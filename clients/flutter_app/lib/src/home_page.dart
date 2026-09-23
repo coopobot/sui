@@ -18,7 +18,6 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   Future<String?>? _pingFuture;
-  String? _error;
 
   @override
   void initState() {
@@ -27,7 +26,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<String?> _ping() async {
-    setState(() => _error = null);
     try {
       final resp = await http
           .get(Uri.parse('${widget.serverUrl}/api/v1/ping'))

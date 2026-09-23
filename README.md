@@ -23,7 +23,7 @@ sui/
 - [x] monorepo 目录结构
 - [x] Go 服务端骨架（健康检查 + 同步心跳，含测试）
 - [x] 顶层构建工具（Makefile）
-- [~] Flutter 客户端壳（代码已就绪；platform 工程待安装 Flutter SDK 后运行 `flutter create .` 生成）
+- [x] Flutter 客户端壳（Web 版可构建运行，含 widget 测试）
 - [ ] CI
 
 ## 快速开始（服务端）
