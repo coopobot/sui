@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "随手记 Sui - 网页剪藏",
+  "version": "0.1.0",
+  "description": "一键剪藏网页到随手记 Sui，自动净化为 Markdown。",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "剪藏到随手记 Sui"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

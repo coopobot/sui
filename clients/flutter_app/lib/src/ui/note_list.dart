@@ -51,6 +51,7 @@ class NoteList extends StatelessWidget {
   }
 
   String _headerTitle() {
+    if (controller.inboxMode) return '收件箱 · 剪藏';
     if (controller.selectedNotebookId != null) {
       final nb = controller.notebooks
           .where((n) => n.id == controller.selectedNotebookId)
@@ -138,9 +139,29 @@ class _NoteTile extends StatelessWidget {
         ],
       ),
       isThreeLine: s.tags.isNotEmpty,
-      trailing: note.pinned
-          ? const Icon(Icons.push_pin_outlined, size: 16)
-          : null,
+      trailing: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (note.sourceDevice.startsWith('clip:'))
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.secondaryContainer,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                '剪藏',
+                style: TextStyle(
+                  fontSize: 10,
+                  color: Theme.of(context).colorScheme.onSecondaryContainer,
+                ),
+              ),
+            ),
+          if (note.pinned)
+            const Icon(Icons.push_pin_outlined, size: 16),
+        ],
+      ),
       onTap: () => controller.selectNote(note.id),
     );
   }

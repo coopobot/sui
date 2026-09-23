@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"sui/note-server/internal/blob"
@@ -254,5 +255,105 @@ func TestRevisionListAndGet(t *testing.T) {
 	rec = authReq(srv, token, http.MethodGet, "/api/v1/notes/note-r1/revisions/99", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing revision, got %d", rec.Code)
+	}
+}
+
+func TestClipEndpoint(t *testing.T) {
+	srv := newTestServer(t)
+	token := register(t, srv)
+
+	html := `<!DOCTYPE html>
+<html><head><title>测试文章标题</title></head>
+<body>
+<nav>导航链接</nav>
+<article>
+<h1>文章大标题</h1>
+<p>这是第一段<strong>加粗文字</strong>和<em>斜体</em>。</p>
+<p>第二段带<a href="https://example.com">链接</a>。</p>
+<ul>
+<li>列表项一</li>
+<li>列表项二</li>
+</ul>
+<blockquote>引用文字</blockquote>
+</article>
+<footer>页脚版权</footer>
+</body></html>`
+
+	body, _ := json.Marshal(map[string]string{
+		"url":   "https://example.com/article/123",
+		"title": "",
+		"html":  html,
+	})
+	rec := authReq(srv, token, http.MethodPost, "/api/v1/clips", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clip failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		OK      bool   `json:"ok"`
+		NoteID  string `json:"noteId"`
+		Title   string `json:"title"`
+		Version int    `json:"version"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatal("expected ok=true")
+	}
+	if resp.Title == "" {
+		t.Fatal("expected non-empty title")
+	}
+	if resp.Version != 1 {
+		t.Fatalf("expected version=1, got %d", resp.Version)
+	}
+
+	// 幂等：同一 URL 再次剪藏 → version 2
+	rec = authReq(srv, token, http.MethodPost, "/api/v1/clips", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clip second time failed: %d", rec.Code)
+	}
+	var resp2 struct {
+		OK      bool `json:"ok"`
+		Version int  `json:"version"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp2); err != nil {
+		t.Fatal(err)
+	}
+	if resp2.Version != 2 {
+		t.Fatalf("expected version=2 after re-clip, got %d", resp2.Version)
+	}
+
+	// 通过 pull 验证剪藏内容已入库
+	rec = authReq(srv, token, http.MethodGet, "/api/v1/sync/pull?since=1970-01-01T00:00:00Z", nil)
+	var pullResp struct {
+		Notes []struct {
+			ID      string `json:"id"`
+			Title   string `json:"title"`
+			Content string `json:"content"`
+		} `json:"notes"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&pullResp); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, n := range pullResp.Notes {
+		if n.ID == resp.NoteID {
+			found = true
+			if n.Title != "测试文章标题" {
+				t.Fatalf("unexpected title: %q", n.Title)
+			}
+			// 内容应该包含来源链接
+			if !strings.Contains(n.Content, "来源") || !strings.Contains(n.Content, "example.com") {
+				t.Fatalf("expected source link in content, got: %q", n.Content[:min(100, len(n.Content))])
+			}
+			// 应该有 Markdown 格式的标题和正文
+			if !strings.Contains(n.Content, "文章大标题") {
+				t.Fatalf("expected article heading in content")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("clipped note not found in pull results")
 	}
 }

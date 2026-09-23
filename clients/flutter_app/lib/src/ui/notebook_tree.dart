@@ -34,6 +34,18 @@ class NotebookTree extends StatelessWidget {
             controller.search('');
           },
         ),
+        ListTile(
+          dense: true,
+          leading: const Icon(Icons.inbox_outlined),
+          title: const Text('收件箱'),
+          subtitle: Text('${_clipCount(controller)} 篇剪藏',
+              style: const TextStyle(fontSize: 11)),
+          selected: controller.inboxMode,
+          onTap: () {
+            controller.selectInbox();
+            controller.search('');
+          },
+        ),
         const Divider(height: 1),
         Expanded(child: _Tree(controller: controller, roots: roots)),
         Padding(
@@ -179,4 +191,8 @@ Future<String?> _askName(BuildContext context, String title,
       ],
     ),
   );
+}
+
+int _clipCount(AppController controller) {
+  return controller.notes.where((n) => n.note.sourceDevice.startsWith('clip:')).length;
 }

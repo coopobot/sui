@@ -26,6 +26,13 @@
 - ✅ **测试**：服务端 Go 测试（6 个：新增 TestRevisionListAndGet）通过；note_core 17 个测试全部通过；flutter analyze 无问题。
 - 说明：Diff 展示采用「选中版本 Markdown 预览」方式；行级 diff 高亮为 M5 可选增强。
 
+**M4 网页剪藏 ✅**
+- ✅ **服务端剪藏 API**：`POST /api/v1/clips` 接收 URL+HTML，自动净化为 Markdown，以 URL 为幂等键创建/更新笔记（source_device="clip:web-extension"）。
+- ✅ **HTML 净化引擎**（`internal/clip`）：类 Readability 启发式（剔除 nav/footer/aside 噪声，按文本密度选主内容块），HTML → Markdown 转换（标题/段落/列表/链接/粗斜体/图片/引用/代码块）。
+- ✅ **Chrome MV3 扩展**：弹窗剪藏 + 右键菜单 + 服务端/Token 设置页（含连接验证）；`chrome.scripting` 注入取页面完整 HTML；`chrome.storage.sync` 保存配置。
+- ✅ **客户端收件箱**：笔记本树顶部「收件箱」入口，按 `sourceDevice` 前缀过滤剪藏笔记；列表项显示「剪藏」标签；支持与正常笔记一样的编辑/同步。
+- ✅ **测试**：服务端 Go 测试（7 个：新增 TestClipEndpoint 覆盖净化、幂等、同步集成）通过；flutter analyze 零问题。
+
 ---
 
 ## 17. 项目目录结构（目标）

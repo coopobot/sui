@@ -38,6 +38,7 @@ func (s *Server) Router() *http.ServeMux {
 	mux.Handle("/api/v1/sync/pull", authWrap)
 	mux.Handle("/api/v1/blobs/", authWrap)
 	mux.Handle("/api/v1/notes/", authWrap)
+	mux.Handle("/api/v1/clips", authWrap)
 	return mux
 }
 
@@ -50,5 +51,6 @@ func NewRouter(s *Server) *http.ServeMux {
 	sub.HandleFunc("PUT /api/v1/blobs/{hash}", s.handleBlobPut)
 	sub.HandleFunc("GET /api/v1/notes/{id}/revisions", s.handleListRevisions)
 	sub.HandleFunc("GET /api/v1/notes/{id}/revisions/{version}", s.handleGetRevision)
+	sub.HandleFunc("POST /api/v1/clips", s.handleClip)
 	return sub
 }

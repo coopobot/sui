@@ -25,12 +25,14 @@ class AppController extends ChangeNotifier {
   String _query = '';
   final bool _includeArchived = false;
   bool _showRevisionPanel = false;
+  bool _inboxMode = false;
 
   String? get selectedNotebookId => _selectedNotebookId;
   String? get selectedNoteId => _selectedNoteId;
   bool get showRevisionPanel => _showRevisionPanel;
+  bool get inboxMode => _inboxMode;
 
-  bool get hasSelection => _selectedNotebookId != null || _query.isNotEmpty;
+  bool get hasSelection => _selectedNotebookId != null || _query.isNotEmpty || _inboxMode;
 
   /// 首次加载全部数据。
   Future<void> bootstrap() async {
@@ -51,15 +53,27 @@ class AppController extends ChangeNotifier {
 
   Future<void> refreshNotes() async {
     _notes = await _repository.listNotes(
-      notebookId: _selectedNotebookId,
+      notebookId: _inboxMode ? null : _selectedNotebookId,
       search: _query.isEmpty ? null : _query,
       includeArchived: _includeArchived,
     );
+    // 收件箱模式：只显示来自剪藏的笔记
+    if (_inboxMode) {
+      _notes = _notes.where((n) => n.note.sourceDevice.startsWith('clip:')).toList();
+    }
     notifyListeners();
   }
 
   void selectNotebook(String? id) {
     _selectedNotebookId = id;
+    _inboxMode = false;
+    _selectedNoteId = null;
+    refreshNotes();
+  }
+
+  void selectInbox() {
+    _inboxMode = true;
+    _selectedNotebookId = null;
     _selectedNoteId = null;
     refreshNotes();
   }
