@@ -56,6 +56,7 @@ func (s *Store) migrate() error {
 			id TEXT PRIMARY KEY,
 			note_id TEXT NOT NULL,
 			version INTEGER NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
 			content_markdown TEXT NOT NULL DEFAULT '',
 			source_device TEXT NOT NULL DEFAULT '',
 			is_conflict INTEGER NOT NULL DEFAULT 0,
@@ -196,9 +197,9 @@ func (s *Store) UpsertNote(noteID, title, content string, isDeleted bool, source
 
 	revID, _ := NewToken()
 	if _, err := tx.Exec(
-		`INSERT INTO revisions (id, note_id, version, content_markdown, source_device, is_conflict, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		revID[:16], noteID, version, content, sourceDevice, 0, ts,
+		`INSERT INTO revisions (id, note_id, version, title, content_markdown, source_device, is_conflict, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		revID[:16], noteID, version, title, content, sourceDevice, 0, ts,
 	); err != nil {
 		return 0, err
 	}
@@ -206,6 +207,70 @@ func (s *Store) UpsertNote(noteID, title, content string, isDeleted bool, source
 		return 0, err
 	}
 	return version, nil
+}
+
+// ---- 修订历史 ----
+
+// RevisionRow 表示一条历史修订。
+type RevisionRow struct {
+	ID              string
+	NoteID          string
+	Version         int
+	Title           string
+	ContentMarkdown string
+	SourceDevice    string
+	IsConflict      bool
+	CreatedAt       time.Time
+}
+
+// ListRevisions 返回指定笔记的修订列表，按 version 降序。
+func (s *Store) ListRevisions(noteID string, limit int) ([]RevisionRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(
+		`SELECT id, note_id, version, title, content_markdown, source_device, is_conflict, created_at
+		 FROM revisions WHERE note_id = ? ORDER BY version DESC LIMIT ?`,
+		noteID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RevisionRow
+	for rows.Next() {
+		var r RevisionRow
+		var conf int
+		var ts string
+		if err := rows.Scan(&r.ID, &r.NoteID, &r.Version, &r.Title, &r.ContentMarkdown, &r.SourceDevice, &conf, &ts); err != nil {
+			return nil, err
+		}
+		r.IsConflict = conf != 0
+		r.CreatedAt = parseTime(ts)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetRevision 获取指定版本的修订。
+func (s *Store) GetRevision(noteID string, version int) (*RevisionRow, error) {
+	var r RevisionRow
+	var conf int
+	var ts string
+	err := s.db.QueryRow(
+		`SELECT id, note_id, version, title, content_markdown, source_device, is_conflict, created_at
+		 FROM revisions WHERE note_id = ? AND version = ?`,
+		noteID, version,
+	).Scan(&r.ID, &r.NoteID, &r.Version, &r.Title, &r.ContentMarkdown, &r.SourceDevice, &conf, &ts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.IsConflict = conf != 0
+	r.CreatedAt = parseTime(ts)
+	return &r, nil
 }
 
 func upsert(tx *sql.Tx, q string, args ...any) error {

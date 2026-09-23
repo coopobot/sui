@@ -184,3 +184,75 @@ func TestUnauthenticatedRejected(t *testing.T) {
 		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 }
+
+func TestRevisionListAndGet(t *testing.T) {
+	srv := newTestServer(t)
+	token := register(t, srv)
+
+	// Push 两个版本的笔记，产生 2 条修订
+	pushVer := func(base, ver int, title, content string) {
+		body, _ := json.Marshal(map[string]any{
+			"clientId": "dev-a", "items": []map[string]any{
+				{"id": "note-r1", "title": title, "content": content,
+					"baseVersion": base, "version": ver, "sourceDevice": "dev-a"},
+			},
+		})
+		rec := authReq(srv, token, http.MethodPost, "/api/v1/sync/push", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("push v%d failed: %d %s", ver, rec.Code, rec.Body.String())
+		}
+	}
+	pushVer(0, 1, "v1 标题", "v1 内容")
+	pushVer(1, 2, "v2 标题", "v2 内容")
+
+	// 列出修订
+	rec := authReq(srv, token, http.MethodGet, "/api/v1/notes/note-r1/revisions", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list revisions failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var listResp struct {
+		Revisions []struct {
+			Version int    `json:"version"`
+			Title   string `json:"title"`
+			Content string `json:"content"`
+		} `json:"revisions"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResp.Revisions) != 2 {
+		t.Fatalf("expected 2 revisions, got %d", len(listResp.Revisions))
+	}
+	// 按 version 降序
+	if listResp.Revisions[0].Version != 2 || listResp.Revisions[0].Title != "v2 标题" {
+		t.Fatalf("expected first revision v2, got %+v", listResp.Revisions[0])
+	}
+	if listResp.Revisions[1].Version != 1 || listResp.Revisions[1].Content != "v1 内容" {
+		t.Fatalf("expected second revision v1, got %+v", listResp.Revisions[1])
+	}
+
+	// 获取单条修订
+	rec = authReq(srv, token, http.MethodGet, "/api/v1/notes/note-r1/revisions/1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get revision failed: %d", rec.Code)
+	}
+	var getResp struct {
+		Revision struct {
+			Version int    `json:"version"`
+			Title   string `json:"title"`
+			Content string `json:"content"`
+		} `json:"revision"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&getResp); err != nil {
+		t.Fatal(err)
+	}
+	if getResp.Revision.Version != 1 || getResp.Revision.Title != "v1 标题" {
+		t.Fatalf("unexpected revision: %+v", getResp.Revision)
+	}
+
+	// 不存在的版本返回 404
+	rec = authReq(srv, token, http.MethodGet, "/api/v1/notes/note-r1/revisions/99", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing revision, got %d", rec.Code)
+	}
+}

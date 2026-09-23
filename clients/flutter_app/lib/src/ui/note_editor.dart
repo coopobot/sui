@@ -40,7 +40,10 @@ class _NoteEditorState extends State<NoteEditor> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_loaded) return;
+    _loadNote();
+  }
+
+  void _loadNote() {
     final note = _note;
     if (note != null) {
       _title.text = note.title;
@@ -50,8 +53,11 @@ class _NoteEditorState extends State<NoteEditor> {
           .firstOrNull;
       _tags = s?.tags ?? [];
       _loaded = true;
+      _lastVersion = note.version;
     }
   }
+
+  int? _lastVersion;
 
   Future<void> _save() async {
     final id = _controller.selectedNoteId;
@@ -66,7 +72,12 @@ class _NoteEditorState extends State<NoteEditor> {
 
   @override
   Widget build(BuildContext context) {
-    final id = _controller.selectedNoteId;
+    final id = context.watch<AppController>().selectedNoteId;
+    // 检测到笔记版本变化（如恢复操作），重新加载内容
+    final note = _note;
+    if (_loaded && note != null && note.version != _lastVersion) {
+      _loadNote();
+    }
     if (id == null) {
       return const _EmptyEditor();
     }
@@ -138,6 +149,12 @@ class _NoteEditorState extends State<NoteEditor> {
                 showSelectedIcon: false,
               ),
               const Spacer(),
+              IconButton(
+                tooltip: '版本历史',
+                icon: const Icon(Icons.history),
+                isSelected: context.watch<AppController>().showRevisionPanel,
+                onPressed: () => _controller.toggleRevisionPanel(),
+              ),
               IconButton(
                 tooltip: '删除笔记',
                 icon: const Icon(Icons.delete_outline),

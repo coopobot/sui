@@ -74,6 +74,7 @@ class Revisions extends Table {
   TextColumn get id => text()();
   TextColumn get noteId => text().references(Notes, #id)();
   IntColumn get version => integer()();
+  TextColumn get title => text().withDefault(const Constant(''))();
   TextColumn get contentMarkdown => text()();
   TextColumn get diffDelta => text().nullable()();
   TextColumn get sourceDevice => text().withDefault(const Constant(''))();
@@ -125,11 +126,16 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) async => m.createAll(),
+        onUpgrade: (m, from, to) async {
+          if (from == 1) {
+            await m.addColumn(revisions, revisions.title);
+          }
+        },
       );
 
   /// 便捷：硬删除某笔记及其所有关联（测试/清理用）。

@@ -1623,6 +1623,13 @@ class $RevisionsTable extends Revisions
   late final GeneratedColumn<int> version = GeneratedColumn<int>(
       'version', aliasedName, false,
       type: DriftSqlType.int, requiredDuringInsert: true);
+  static const VerificationMeta _titleMeta = const VerificationMeta('title');
+  @override
+  late final GeneratedColumn<String> title = GeneratedColumn<String>(
+      'title', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
   static const VerificationMeta _contentMarkdownMeta =
       const VerificationMeta('contentMarkdown');
   @override
@@ -1664,6 +1671,7 @@ class $RevisionsTable extends Revisions
         id,
         noteId,
         version,
+        title,
         contentMarkdown,
         diffDelta,
         sourceDevice,
@@ -1696,6 +1704,10 @@ class $RevisionsTable extends Revisions
           version.isAcceptableOrUnknown(data['version']!, _versionMeta));
     } else if (isInserting) {
       context.missing(_versionMeta);
+    }
+    if (data.containsKey('title')) {
+      context.handle(
+          _titleMeta, title.isAcceptableOrUnknown(data['title']!, _titleMeta));
     }
     if (data.containsKey('content_markdown')) {
       context.handle(
@@ -1742,6 +1754,8 @@ class $RevisionsTable extends Revisions
           .read(DriftSqlType.string, data['${effectivePrefix}note_id'])!,
       version: attachedDatabase.typeMapping
           .read(DriftSqlType.int, data['${effectivePrefix}version'])!,
+      title: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}title'])!,
       contentMarkdown: attachedDatabase.typeMapping.read(
           DriftSqlType.string, data['${effectivePrefix}content_markdown'])!,
       diffDelta: attachedDatabase.typeMapping
@@ -1765,6 +1779,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
   final String id;
   final String noteId;
   final int version;
+  final String title;
   final String contentMarkdown;
   final String? diffDelta;
   final String sourceDevice;
@@ -1774,6 +1789,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
       {required this.id,
       required this.noteId,
       required this.version,
+      required this.title,
       required this.contentMarkdown,
       this.diffDelta,
       required this.sourceDevice,
@@ -1785,6 +1801,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
     map['id'] = Variable<String>(id);
     map['note_id'] = Variable<String>(noteId);
     map['version'] = Variable<int>(version);
+    map['title'] = Variable<String>(title);
     map['content_markdown'] = Variable<String>(contentMarkdown);
     if (!nullToAbsent || diffDelta != null) {
       map['diff_delta'] = Variable<String>(diffDelta);
@@ -1800,6 +1817,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
       id: Value(id),
       noteId: Value(noteId),
       version: Value(version),
+      title: Value(title),
       contentMarkdown: Value(contentMarkdown),
       diffDelta: diffDelta == null && nullToAbsent
           ? const Value.absent()
@@ -1817,6 +1835,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
       id: serializer.fromJson<String>(json['id']),
       noteId: serializer.fromJson<String>(json['noteId']),
       version: serializer.fromJson<int>(json['version']),
+      title: serializer.fromJson<String>(json['title']),
       contentMarkdown: serializer.fromJson<String>(json['contentMarkdown']),
       diffDelta: serializer.fromJson<String?>(json['diffDelta']),
       sourceDevice: serializer.fromJson<String>(json['sourceDevice']),
@@ -1831,6 +1850,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
       'id': serializer.toJson<String>(id),
       'noteId': serializer.toJson<String>(noteId),
       'version': serializer.toJson<int>(version),
+      'title': serializer.toJson<String>(title),
       'contentMarkdown': serializer.toJson<String>(contentMarkdown),
       'diffDelta': serializer.toJson<String?>(diffDelta),
       'sourceDevice': serializer.toJson<String>(sourceDevice),
@@ -1843,6 +1863,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
           {String? id,
           String? noteId,
           int? version,
+          String? title,
           String? contentMarkdown,
           Value<String?> diffDelta = const Value.absent(),
           String? sourceDevice,
@@ -1852,6 +1873,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
         id: id ?? this.id,
         noteId: noteId ?? this.noteId,
         version: version ?? this.version,
+        title: title ?? this.title,
         contentMarkdown: contentMarkdown ?? this.contentMarkdown,
         diffDelta: diffDelta.present ? diffDelta.value : this.diffDelta,
         sourceDevice: sourceDevice ?? this.sourceDevice,
@@ -1863,6 +1885,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
       id: data.id.present ? data.id.value : this.id,
       noteId: data.noteId.present ? data.noteId.value : this.noteId,
       version: data.version.present ? data.version.value : this.version,
+      title: data.title.present ? data.title.value : this.title,
       contentMarkdown: data.contentMarkdown.present
           ? data.contentMarkdown.value
           : this.contentMarkdown,
@@ -1882,6 +1905,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
           ..write('id: $id, ')
           ..write('noteId: $noteId, ')
           ..write('version: $version, ')
+          ..write('title: $title, ')
           ..write('contentMarkdown: $contentMarkdown, ')
           ..write('diffDelta: $diffDelta, ')
           ..write('sourceDevice: $sourceDevice, ')
@@ -1892,7 +1916,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
   }
 
   @override
-  int get hashCode => Object.hash(id, noteId, version, contentMarkdown,
+  int get hashCode => Object.hash(id, noteId, version, title, contentMarkdown,
       diffDelta, sourceDevice, isConflict, createdAt);
   @override
   bool operator ==(Object other) =>
@@ -1901,6 +1925,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
           other.id == this.id &&
           other.noteId == this.noteId &&
           other.version == this.version &&
+          other.title == this.title &&
           other.contentMarkdown == this.contentMarkdown &&
           other.diffDelta == this.diffDelta &&
           other.sourceDevice == this.sourceDevice &&
@@ -1912,6 +1937,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
   final Value<String> id;
   final Value<String> noteId;
   final Value<int> version;
+  final Value<String> title;
   final Value<String> contentMarkdown;
   final Value<String?> diffDelta;
   final Value<String> sourceDevice;
@@ -1922,6 +1948,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
     this.id = const Value.absent(),
     this.noteId = const Value.absent(),
     this.version = const Value.absent(),
+    this.title = const Value.absent(),
     this.contentMarkdown = const Value.absent(),
     this.diffDelta = const Value.absent(),
     this.sourceDevice = const Value.absent(),
@@ -1933,6 +1960,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
     required String id,
     required String noteId,
     required int version,
+    this.title = const Value.absent(),
     required String contentMarkdown,
     this.diffDelta = const Value.absent(),
     this.sourceDevice = const Value.absent(),
@@ -1948,6 +1976,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
     Expression<String>? id,
     Expression<String>? noteId,
     Expression<int>? version,
+    Expression<String>? title,
     Expression<String>? contentMarkdown,
     Expression<String>? diffDelta,
     Expression<String>? sourceDevice,
@@ -1959,6 +1988,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
       if (id != null) 'id': id,
       if (noteId != null) 'note_id': noteId,
       if (version != null) 'version': version,
+      if (title != null) 'title': title,
       if (contentMarkdown != null) 'content_markdown': contentMarkdown,
       if (diffDelta != null) 'diff_delta': diffDelta,
       if (sourceDevice != null) 'source_device': sourceDevice,
@@ -1972,6 +2002,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
       {Value<String>? id,
       Value<String>? noteId,
       Value<int>? version,
+      Value<String>? title,
       Value<String>? contentMarkdown,
       Value<String?>? diffDelta,
       Value<String>? sourceDevice,
@@ -1982,6 +2013,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
       id: id ?? this.id,
       noteId: noteId ?? this.noteId,
       version: version ?? this.version,
+      title: title ?? this.title,
       contentMarkdown: contentMarkdown ?? this.contentMarkdown,
       diffDelta: diffDelta ?? this.diffDelta,
       sourceDevice: sourceDevice ?? this.sourceDevice,
@@ -2002,6 +2034,9 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
     }
     if (version.present) {
       map['version'] = Variable<int>(version.value);
+    }
+    if (title.present) {
+      map['title'] = Variable<String>(title.value);
     }
     if (contentMarkdown.present) {
       map['content_markdown'] = Variable<String>(contentMarkdown.value);
@@ -2030,6 +2065,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
           ..write('id: $id, ')
           ..write('noteId: $noteId, ')
           ..write('version: $version, ')
+          ..write('title: $title, ')
           ..write('contentMarkdown: $contentMarkdown, ')
           ..write('diffDelta: $diffDelta, ')
           ..write('sourceDevice: $sourceDevice, ')
@@ -3410,6 +3446,7 @@ typedef $$RevisionsTableCreateCompanionBuilder = RevisionsCompanion Function({
   required String id,
   required String noteId,
   required int version,
+  Value<String> title,
   required String contentMarkdown,
   Value<String?> diffDelta,
   Value<String> sourceDevice,
@@ -3421,6 +3458,7 @@ typedef $$RevisionsTableUpdateCompanionBuilder = RevisionsCompanion Function({
   Value<String> id,
   Value<String> noteId,
   Value<int> version,
+  Value<String> title,
   Value<String> contentMarkdown,
   Value<String?> diffDelta,
   Value<String> sourceDevice,
@@ -3446,6 +3484,9 @@ class $$RevisionsTableFilterComposer
 
   ColumnFilters<int> get version => $composableBuilder(
       column: $table.version, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get title => $composableBuilder(
+      column: $table.title, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<String> get contentMarkdown => $composableBuilder(
       column: $table.contentMarkdown,
@@ -3482,6 +3523,9 @@ class $$RevisionsTableOrderingComposer
   ColumnOrderings<int> get version => $composableBuilder(
       column: $table.version, builder: (column) => ColumnOrderings(column));
 
+  ColumnOrderings<String> get title => $composableBuilder(
+      column: $table.title, builder: (column) => ColumnOrderings(column));
+
   ColumnOrderings<String> get contentMarkdown => $composableBuilder(
       column: $table.contentMarkdown,
       builder: (column) => ColumnOrderings(column));
@@ -3517,6 +3561,9 @@ class $$RevisionsTableAnnotationComposer
 
   GeneratedColumn<int> get version =>
       $composableBuilder(column: $table.version, builder: (column) => column);
+
+  GeneratedColumn<String> get title =>
+      $composableBuilder(column: $table.title, builder: (column) => column);
 
   GeneratedColumn<String> get contentMarkdown => $composableBuilder(
       column: $table.contentMarkdown, builder: (column) => column);
@@ -3560,6 +3607,7 @@ class $$RevisionsTableTableManager extends RootTableManager<
             Value<String> id = const Value.absent(),
             Value<String> noteId = const Value.absent(),
             Value<int> version = const Value.absent(),
+            Value<String> title = const Value.absent(),
             Value<String> contentMarkdown = const Value.absent(),
             Value<String?> diffDelta = const Value.absent(),
             Value<String> sourceDevice = const Value.absent(),
@@ -3571,6 +3619,7 @@ class $$RevisionsTableTableManager extends RootTableManager<
             id: id,
             noteId: noteId,
             version: version,
+            title: title,
             contentMarkdown: contentMarkdown,
             diffDelta: diffDelta,
             sourceDevice: sourceDevice,
@@ -3582,6 +3631,7 @@ class $$RevisionsTableTableManager extends RootTableManager<
             required String id,
             required String noteId,
             required int version,
+            Value<String> title = const Value.absent(),
             required String contentMarkdown,
             Value<String?> diffDelta = const Value.absent(),
             Value<String> sourceDevice = const Value.absent(),
@@ -3593,6 +3643,7 @@ class $$RevisionsTableTableManager extends RootTableManager<
             id: id,
             noteId: noteId,
             version: version,
+            title: title,
             contentMarkdown: contentMarkdown,
             diffDelta: diffDelta,
             sourceDevice: sourceDevice,

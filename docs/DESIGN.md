@@ -19,6 +19,13 @@
 - ✅ **架构**：服务端 Store/Sync/Blob 分层，客户端 SyncClient 通过 `http.Client` 注入（测试可 mock）。
 - 说明：WebSocket 实时通知、附件字节同步（仅 API 已接，客户端侧待接）归到 M5 多端打磨。
 
+**M3 修订历史 ✅**
+- ✅ **服务端**：revisions 表补全 title 字段；新增 `ListRevisions` / `GetRevision` 数据访问；新增 REST API（`GET /notes/{id}/revisions` 列表、`GET /notes/{id}/revisions/{version}` 详情）。
+- ✅ **客户端 note_core**：revisions 表 schema v2 升级（新增 title 列 + 迁移）；`Revision` 模型补全 title；`NoteRepository` 新增 `getRevision` / `restoreRevision`（恢复=以旧内容创建新版本，不重写历史）；`SyncClient` 新增 `fetchRemoteRevisions` / `fetchRemoteRevision` 远程拉取。
+- ✅ **Flutter UI**：`RevisionPanel` 侧栏（修订列表 + 版本详情预览 + 一键恢复确认）；`AppController` 增加面板显隐状态；编辑器工具栏新增「历史」按钮；恢复后编辑器内容自动刷新（版本号检测）。
+- ✅ **测试**：服务端 Go 测试（6 个：新增 TestRevisionListAndGet）通过；note_core 17 个测试全部通过；flutter analyze 无问题。
+- 说明：Diff 展示采用「选中版本 Markdown 预览」方式；行级 diff 高亮为 M5 可选增强。
+
 ---
 
 ## 17. 项目目录结构（目标）

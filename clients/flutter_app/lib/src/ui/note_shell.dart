@@ -5,6 +5,7 @@ import 'app_controller.dart';
 import 'note_editor.dart';
 import 'note_list.dart';
 import 'notebook_tree.dart';
+import 'revision_panel.dart';
 
 /// 应用主界面外壳：响应式三栏（笔记本树 / 笔记列表 / 编辑区）。
 /// 宽屏（桌面/平板）三栏并排；窄屏（手机）用抽屉 + 导航堆栈。
@@ -49,7 +50,21 @@ class _WideLayout extends StatelessWidget {
           const VerticalDivider(width: 1),
           Expanded(
             flex: 4,
-            child: NoteEditor(key: ValueKey(controller.selectedNoteId)),
+            child: Row(
+              children: [
+                Expanded(
+                  child: NoteEditor(key: ValueKey(controller.selectedNoteId)),
+                ),
+                if (controller.showRevisionPanel &&
+                    controller.selectedNoteId != null) ...[
+                  const VerticalDivider(width: 1),
+                  SizedBox(
+                    width: 320,
+                    child: RevisionPanel(noteId: controller.selectedNoteId!),
+                  ),
+                ],
+              ],
+            ),
           ),
         ],
       ),

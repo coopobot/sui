@@ -24,9 +24,11 @@ class AppController extends ChangeNotifier {
   String? _selectedNoteId;
   String _query = '';
   final bool _includeArchived = false;
+  bool _showRevisionPanel = false;
 
   String? get selectedNotebookId => _selectedNotebookId;
   String? get selectedNoteId => _selectedNoteId;
+  bool get showRevisionPanel => _showRevisionPanel;
 
   bool get hasSelection => _selectedNotebookId != null || _query.isNotEmpty;
 
@@ -106,6 +108,29 @@ class AppController extends ChangeNotifier {
   Future<void> deleteNote(String id) async {
     await _repository.markNoteDeleted(id);
     if (_selectedNoteId == id) _selectedNoteId = null;
+    await refreshNotes();
+    notifyListeners();
+  }
+
+  // ---- 修订历史 ----
+
+  void toggleRevisionPanel() {
+    _showRevisionPanel = !_showRevisionPanel;
+    notifyListeners();
+  }
+
+  void setRevisionPanelVisible(bool visible) {
+    _showRevisionPanel = visible;
+    notifyListeners();
+  }
+
+  Future<List<Revision>> listRevisions(String noteId) async {
+    return await _repository.listRevisions(noteId);
+  }
+
+  /// 恢复到指定历史版本。恢复后刷新笔记列表和编辑器内容。
+  Future<void> restoreRevision(String noteId, int version) async {
+    await _repository.restoreRevision(noteId, version);
     await refreshNotes();
     notifyListeners();
   }

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"sui/note-server/internal/sync"
@@ -131,4 +132,67 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ---- 修订历史 ----
+
+// handleListRevisions 返回指定笔记的修订列表。
+func (s *Server) handleListRevisions(w http.ResponseWriter, r *http.Request) {
+	noteID := r.PathValue("id")
+	revs, err := s.store.ListRevisions(noteID, 50)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	type revOut struct {
+		Version      int    `json:"version"`
+		Title        string `json:"title"`
+		Content      string `json:"content"`
+		SourceDevice string `json:"sourceDevice"`
+		IsConflict   bool   `json:"isConflict"`
+		CreatedAt    string `json:"createdAt"`
+	}
+	list := make([]revOut, 0, len(revs))
+	for _, r := range revs {
+		list = append(list, revOut{
+			Version:      r.Version,
+			Title:        r.Title,
+			Content:      r.ContentMarkdown,
+			SourceDevice: r.SourceDevice,
+			IsConflict:   r.IsConflict,
+			CreatedAt:    r.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "revisions": list})
+}
+
+// handleGetRevision 返回指定版本的修订详情。
+func (s *Server) handleGetRevision(w http.ResponseWriter, r *http.Request) {
+	noteID := r.PathValue("id")
+	verStr := r.PathValue("version")
+	version, err := strconv.Atoi(verStr)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid version"})
+		return
+	}
+	rev, err := s.store.GetRevision(noteID, version)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if rev == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "revision not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+		"revision": map[string]any{
+			"version":      rev.Version,
+			"title":        rev.Title,
+			"content":      rev.ContentMarkdown,
+			"sourceDevice": rev.SourceDevice,
+			"isConflict":   rev.IsConflict,
+			"createdAt":    rev.CreatedAt.UTC().Format(time.RFC3339),
+		},
+	})
 }

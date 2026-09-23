@@ -158,6 +158,7 @@ class NoteRepository {
             id: newId(),
             noteId: nid,
             version: 1,
+            title: Value(title),
             contentMarkdown: contentMarkdown,
             sourceDevice: Value(deviceId),
             createdAt: t,
@@ -221,6 +222,7 @@ class NoteRepository {
             id: newId(),
             noteId: id,
             version: nextVersion,
+            title: Value(nextTitle),
             contentMarkdown: nextContent,
             sourceDevice: Value(deviceId),
             createdAt: t,
@@ -297,6 +299,51 @@ class NoteRepository {
     return rows.map((r) => r.toModel()).toList();
   }
 
+  /// 获取指定版本的修订。
+  Future<Revision?> getRevision(String noteId, int version) async {
+    final row = await (db.select(db.revisions)
+          ..where((t) => t.noteId.equals(noteId) & t.version.equals(version)))
+        .getSingleOrNull();
+    return row?.toModel();
+  }
+
+  /// 恢复到指定历史版本：以旧内容创建一个新版本（不重写历史）。
+  ///
+  /// 返回恢复后的新 Note。
+  Future<Note> restoreRevision(String noteId, int version) async {
+    final rev = await getRevision(noteId, version);
+    if (rev == null) {
+      throw StateError('revision not found: note=$noteId ver=$version');
+    }
+    final note = await getNote(noteId);
+    if (note == null) throw StateError('note not found: $noteId');
+
+    final t = DateTime.now();
+    final nextVersion = note.version + 1;
+
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
+          .write(NotesCompanion(
+        title: Value(rev.title),
+        contentMarkdown: Value(rev.contentMarkdown),
+        version: Value(nextVersion),
+        updatedAt: Value(t),
+      ));
+      await db.into(db.revisions).insert(RevisionsCompanion.insert(
+            id: newId(),
+            noteId: noteId,
+            version: nextVersion,
+            title: Value(rev.title),
+            contentMarkdown: rev.contentMarkdown,
+            sourceDevice: Value(deviceId),
+            createdAt: t,
+          ));
+      await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
+          .write(NotesCompanion(revisionCount: Value(note.revisionCount + 1)));
+    });
+    return (await getNote(noteId))!;
+  }
+
   Future<List<Attachment>> listAttachments({String? noteId}) async {
     final q = db.select(db.attachments)
       ..where((t) => t.isDeleted.equals(false));
@@ -369,6 +416,7 @@ extension _RevisionRowEx on RevisionRow {
         id: id,
         noteId: noteId,
         version: version,
+        title: title,
         contentMarkdown: contentMarkdown,
         diffDelta: diffDelta,
         sourceDevice: sourceDevice,

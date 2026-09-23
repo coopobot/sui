@@ -13,6 +13,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/note.dart';
+import '../models/revision.dart';
 import '../repository/note_repository.dart';
 
 /// 同步客户端：协调本地仓储与远端服务。
@@ -175,6 +176,15 @@ class SyncClient {
     return resp.body;
   }
 
+  Future<String> _authGet(String path) async {
+    final uri = Uri.parse('$baseUrl$path');
+    final resp = await _http.get(uri, headers: {'Authorization': 'Bearer $token'});
+    if (resp.statusCode != 200) {
+      throw HttpException(resp.statusCode, resp.body);
+    }
+    return resp.body;
+  }
+
   /// 从服务端拉取某条笔记的当前内容（冲突时用）。
   /// 简化：pull 自 epoch 0 + 过滤 id；但当前 API 没有单条接口。
   /// 这里用"拉全部 + 找 id"的方式，对测试/小数据足够。
@@ -249,6 +259,46 @@ class SyncClient {
   }
 
   void close() => _http.close();
+
+  // ---- 修订历史 ----
+
+  /// 从服务端拉取指定笔记的修订历史列表。
+  Future<List<RemoteRevision>> fetchRemoteRevisions(String noteId) async {
+    final resp = await _authGet('/api/v1/notes/$noteId/revisions');
+    final data = jsonDecode(resp) as Map<String, dynamic>;
+    final revs = (data['revisions'] as List)
+        .cast<Map<String, dynamic>>()
+        .map((e) => RemoteRevision(
+              version: e['version'] as int,
+              title: (e['title'] as String?) ?? '',
+              content: e['content'] as String,
+              sourceDevice: (e['sourceDevice'] as String?) ?? '',
+              isConflict: (e['isConflict'] as bool?) ?? false,
+              createdAt: DateTime.parse(e['createdAt'] as String),
+            ))
+        .toList();
+    return revs;
+  }
+
+  /// 从服务端拉取指定版本的修订详情。
+  Future<RemoteRevision?> fetchRemoteRevision(String noteId, int version) async {
+    try {
+      final resp = await _authGet('/api/v1/notes/$noteId/revisions/$version');
+      final data = jsonDecode(resp) as Map<String, dynamic>;
+      final rev = data['revision'] as Map<String, dynamic>;
+      return RemoteRevision(
+        version: rev['version'] as int,
+        title: (rev['title'] as String?) ?? '',
+        content: rev['content'] as String,
+        sourceDevice: (rev['sourceDevice'] as String?) ?? '',
+        isConflict: (rev['isConflict'] as bool?) ?? false,
+        createdAt: DateTime.parse(rev['createdAt'] as String),
+      );
+    } on HttpException catch (e) {
+      if (e.statusCode == 404) return null;
+      rethrow;
+    }
+  }
 }
 
 /// 出站队列中的一条笔记变更。
@@ -305,6 +355,25 @@ class _ServerNote {
     required this.content,
     required this.version,
     required this.isDeleted,
+  });
+}
+
+/// 服务端返回的修订摘要。
+class RemoteRevision {
+  final int version;
+  final String title;
+  final String content;
+  final String sourceDevice;
+  final bool isConflict;
+  final DateTime createdAt;
+
+  RemoteRevision({
+    required this.version,
+    required this.title,
+    required this.content,
+    required this.sourceDevice,
+    required this.isConflict,
+    required this.createdAt,
   });
 }
 
