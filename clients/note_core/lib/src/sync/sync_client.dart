@@ -9,11 +9,12 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import '../blob/blob_store.dart';
 import '../models/note.dart';
-import '../models/revision.dart';
 import '../repository/note_repository.dart';
 
 /// 同步客户端：协调本地仓储与远端服务。
@@ -25,6 +26,7 @@ class SyncClient {
     required this.baseUrl,
     required this.deviceId,
     required this.token,
+    this.blobStore,
     http.Client? httpClient,
   }) : _http = httpClient ?? http.Client();
 
@@ -32,6 +34,9 @@ class SyncClient {
   final String baseUrl;
   final String deviceId;
   final String token;
+
+  /// 附件缓存（方案 B：按需拉取 + LRU）。为空表示未启用附件同步。
+  final BlobStore? blobStore;
   final http.Client _http;
 
   final List<OutboxItem> _outbox = [];
@@ -161,6 +166,29 @@ class SyncClient {
     final pushResults = await push();
     final pulled = await pull();
     return (pushResults.length, pulled);
+  }
+
+  /// 确保附件字节已缓存在本地（方案 B 按需下载入口）。
+  ///
+  /// 命中缓存直接返回；未命中则 `GET /api/v1/blobs/{hash}` 下载并写入
+  /// [blobStore]（LRU 容量记账由缓存层处理）。未配置 [blobStore] 时抛异常。
+  Future<Uint8List> ensureBlob(String sha256) async {
+    final store = blobStore;
+    if (store == null) {
+      throw StateError('blobStore 未配置，无法按需下载附件');
+    }
+    final cached = await store.read(sha256);
+    if (cached != null) return cached;
+
+    final uri = Uri.parse('$baseUrl/api/v1/blobs/$sha256');
+    final resp =
+        await _http.get(uri, headers: {'Authorization': 'Bearer $token'});
+    if (resp.statusCode != 200) {
+      throw HttpException(resp.statusCode, resp.body);
+    }
+    final bytes = resp.bodyBytes;
+    await store.put(sha256: sha256, bytes: bytes);
+    return bytes;
   }
 
   // ---------- internal ----------

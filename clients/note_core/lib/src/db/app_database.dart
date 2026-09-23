@@ -104,6 +104,21 @@ class Attachments extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// 本地附件缓存记账（CachedBlobStore 的 LRU 元数据）。
+///
+/// 每行 = 一个已缓存的字节内容：size 用于容量记账，lastAccessAt 用于
+/// LRU 淘汰排序，refCount 表示被多少篇笔记引用（>0 才允许保留）。
+@DataClassName('BlobRefRow')
+class BlobRefs extends Table {
+  TextColumn get sha256 => text()();
+  IntColumn get byteSize => integer().withDefault(const Constant(0))();
+  DateTimeColumn get lastAccessAt => dateTime()();
+  IntColumn get refCount => integer().withDefault(const Constant(0))();
+
+  @override
+  Set<Column> get primaryKey => {sha256};
+}
+
 @DriftDatabase(tables: [
   Notebooks,
   Tags,
@@ -111,6 +126,7 @@ class Attachments extends Table {
   NoteTags,
   Revisions,
   Attachments,
+  BlobRefs,
 ])
 class AppDatabase extends _$AppDatabase {
   AppDatabase(super.executor);
@@ -126,7 +142,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -134,6 +150,9 @@ class AppDatabase extends _$AppDatabase {
         onUpgrade: (m, from, to) async {
           if (from == 1) {
             await m.addColumn(revisions, revisions.title);
+          }
+          if (from <= 2) {
+            await m.createTable(blobRefs);
           }
         },
       );

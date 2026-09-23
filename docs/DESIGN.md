@@ -121,11 +121,14 @@
 
 **实现清单（后续）**
 
-1. note_core：`CachedBlobStore`（实现 `BlobStore`，内部 = LocalBlobStore + 容量记账 + LRU 淘汰 + 下载回调）。
-2. 附件元数据表：blob_refs（hash / size / last_access_at / ref_count），随同步协议交换。
-3. SyncClient：pull 只同步附件映射，不拉字节；新增 `ensureBlob(hash)` 按需下载入口。
-4. Flutter UI：附件卡片「未下载 ⇄ 已缓存」状态 + 下载进度；编辑区附件选择器。
-5. 服务端：`GET /blobs/{hash}` 已就绪（M5），无需改动；可选加缩略图生成（C 方案，后续）。
+1. ✅ note_core：`CachedBlobStore`（实现 `BlobStore`，内部 = LocalBlobStore + 容量记账 + LRU 淘汰 + 下载回调）。
+2. ✅ 附件元数据表：`blob_refs`（hash / size / last_access_at / ref_count），随同步协议交换（表已建 + drift 迁移 v3）。
+3. ✅ SyncClient：`ensureBlob(hash)` 按需下载入口（`GET /blobs/{hash}` + 写入缓存）；pull 附件映射同步待扩展。
+4. ✅ Flutter UI：编辑器底部附件卡片区（文件名/大小/「未下载 ⇄ 已缓存」状态 + 下载进度提示）；`AppController` 暴露 `attachments` / `isAttachmentCached` / `openAttachment`。
+5. ✅ 服务端：`GET /blobs/{hash}` 已就绪（M5），无需改动；缩略图生成（C 方案）留后续。
+6. ✅ 测试：`cached_blob_store_test.dart` 7 用例（幂等 / 按需下载 / 无源返回 null / LRU 淘汰 / 孤儿优先 / 引用归零清理 / 删除联动）通过；note_core 全量 24 用例通过；flutter analyze 零问题、widget 测试通过。
+
+> 注：附件-笔记映射（attachments 表）的服务端同步、附件选择器/上传 UI 为后续增量项，当前交付聚焦"缓存压力受控"机制本身。
 
 **存储压力结论**
 

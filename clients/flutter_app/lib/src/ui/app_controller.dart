@@ -6,11 +6,14 @@ import 'package:note_core/note_core.dart';
 /// M1 用内存 ChangeNotifier（简单可靠）；后续如需更细粒度局部刷新，可
 /// 引入 watch/select，但当前规模以清晰为先。
 class AppController extends ChangeNotifier {
-  AppController({required NoteRepository repository})
+  AppController({required NoteRepository repository, this.syncClient})
       : _repository = repository;
 
   final NoteRepository _repository;
   NoteRepository get repository => _repository;
+
+  /// 同步客户端（可选）：提供附件按需下载等跨端能力；未配置时附件只读本地缓存。
+  final SyncClient? syncClient;
 
   List<Notebook> _notebooks = [];
   List<NoteSummary> _notes = [];
@@ -147,5 +150,43 @@ class AppController extends ChangeNotifier {
     await _repository.restoreRevision(noteId, version);
     await refreshNotes();
     notifyListeners();
+  }
+
+  // ---- 附件（方案 B：按需拉取 + LRU 缓存） ----
+
+  List<Attachment> _attachments = [];
+  List<Attachment> get attachments => _attachments;
+
+  Future<void> refreshAttachments(String noteId) async {
+    _attachments = await _repository.listAttachments(noteId: noteId);
+    notifyListeners();
+  }
+
+  /// 附件字节是否已在本地缓存（未下载 ⇄ 已缓存）。
+  Future<bool> isAttachmentCached(Attachment a) async {
+    final store = syncClient?.blobStore;
+    if (store == null) return false;
+    return store.exists(a.sha256);
+  }
+
+  final Set<String> _downloading = {};
+
+  /// 附件是否正在按需下载中（用于 UI 展示下载进度状态）。
+  bool isDownloading(String sha256) => _downloading.contains(sha256);
+
+  /// 打开 / 下载附件字节：命中缓存直接返回，未命中按需下载。
+  /// 未配置同步客户端时返回 null（仅展示元数据）。
+  Future<Uint8List?> openAttachment(Attachment a) async {
+    final client = syncClient;
+    if (client == null) return null;
+    final sha = a.sha256;
+    _downloading.add(sha);
+    notifyListeners();
+    try {
+      return await client.ensureBlob(sha);
+    } finally {
+      _downloading.remove(sha);
+      notifyListeners();
+    }
   }
 }

@@ -2629,6 +2629,281 @@ class AttachmentsCompanion extends UpdateCompanion<AttachmentRow> {
   }
 }
 
+class $BlobRefsTable extends BlobRefs
+    with TableInfo<$BlobRefsTable, BlobRefRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $BlobRefsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sha256Meta = const VerificationMeta('sha256');
+  @override
+  late final GeneratedColumn<String> sha256 = GeneratedColumn<String>(
+      'sha256', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _byteSizeMeta =
+      const VerificationMeta('byteSize');
+  @override
+  late final GeneratedColumn<int> byteSize = GeneratedColumn<int>(
+      'byte_size', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _lastAccessAtMeta =
+      const VerificationMeta('lastAccessAt');
+  @override
+  late final GeneratedColumn<DateTime> lastAccessAt = GeneratedColumn<DateTime>(
+      'last_access_at', aliasedName, false,
+      type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _refCountMeta =
+      const VerificationMeta('refCount');
+  @override
+  late final GeneratedColumn<int> refCount = GeneratedColumn<int>(
+      'ref_count', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  @override
+  List<GeneratedColumn> get $columns =>
+      [sha256, byteSize, lastAccessAt, refCount];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'blob_refs';
+  @override
+  VerificationContext validateIntegrity(Insertable<BlobRefRow> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('sha256')) {
+      context.handle(_sha256Meta,
+          sha256.isAcceptableOrUnknown(data['sha256']!, _sha256Meta));
+    } else if (isInserting) {
+      context.missing(_sha256Meta);
+    }
+    if (data.containsKey('byte_size')) {
+      context.handle(_byteSizeMeta,
+          byteSize.isAcceptableOrUnknown(data['byte_size']!, _byteSizeMeta));
+    }
+    if (data.containsKey('last_access_at')) {
+      context.handle(
+          _lastAccessAtMeta,
+          lastAccessAt.isAcceptableOrUnknown(
+              data['last_access_at']!, _lastAccessAtMeta));
+    } else if (isInserting) {
+      context.missing(_lastAccessAtMeta);
+    }
+    if (data.containsKey('ref_count')) {
+      context.handle(_refCountMeta,
+          refCount.isAcceptableOrUnknown(data['ref_count']!, _refCountMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {sha256};
+  @override
+  BlobRefRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return BlobRefRow(
+      sha256: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}sha256'])!,
+      byteSize: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}byte_size'])!,
+      lastAccessAt: attachedDatabase.typeMapping.read(
+          DriftSqlType.dateTime, data['${effectivePrefix}last_access_at'])!,
+      refCount: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}ref_count'])!,
+    );
+  }
+
+  @override
+  $BlobRefsTable createAlias(String alias) {
+    return $BlobRefsTable(attachedDatabase, alias);
+  }
+}
+
+class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
+  final String sha256;
+  final int byteSize;
+  final DateTime lastAccessAt;
+  final int refCount;
+  const BlobRefRow(
+      {required this.sha256,
+      required this.byteSize,
+      required this.lastAccessAt,
+      required this.refCount});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['sha256'] = Variable<String>(sha256);
+    map['byte_size'] = Variable<int>(byteSize);
+    map['last_access_at'] = Variable<DateTime>(lastAccessAt);
+    map['ref_count'] = Variable<int>(refCount);
+    return map;
+  }
+
+  BlobRefsCompanion toCompanion(bool nullToAbsent) {
+    return BlobRefsCompanion(
+      sha256: Value(sha256),
+      byteSize: Value(byteSize),
+      lastAccessAt: Value(lastAccessAt),
+      refCount: Value(refCount),
+    );
+  }
+
+  factory BlobRefRow.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return BlobRefRow(
+      sha256: serializer.fromJson<String>(json['sha256']),
+      byteSize: serializer.fromJson<int>(json['byteSize']),
+      lastAccessAt: serializer.fromJson<DateTime>(json['lastAccessAt']),
+      refCount: serializer.fromJson<int>(json['refCount']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'sha256': serializer.toJson<String>(sha256),
+      'byteSize': serializer.toJson<int>(byteSize),
+      'lastAccessAt': serializer.toJson<DateTime>(lastAccessAt),
+      'refCount': serializer.toJson<int>(refCount),
+    };
+  }
+
+  BlobRefRow copyWith(
+          {String? sha256,
+          int? byteSize,
+          DateTime? lastAccessAt,
+          int? refCount}) =>
+      BlobRefRow(
+        sha256: sha256 ?? this.sha256,
+        byteSize: byteSize ?? this.byteSize,
+        lastAccessAt: lastAccessAt ?? this.lastAccessAt,
+        refCount: refCount ?? this.refCount,
+      );
+  BlobRefRow copyWithCompanion(BlobRefsCompanion data) {
+    return BlobRefRow(
+      sha256: data.sha256.present ? data.sha256.value : this.sha256,
+      byteSize: data.byteSize.present ? data.byteSize.value : this.byteSize,
+      lastAccessAt: data.lastAccessAt.present
+          ? data.lastAccessAt.value
+          : this.lastAccessAt,
+      refCount: data.refCount.present ? data.refCount.value : this.refCount,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('BlobRefRow(')
+          ..write('sha256: $sha256, ')
+          ..write('byteSize: $byteSize, ')
+          ..write('lastAccessAt: $lastAccessAt, ')
+          ..write('refCount: $refCount')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(sha256, byteSize, lastAccessAt, refCount);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is BlobRefRow &&
+          other.sha256 == this.sha256 &&
+          other.byteSize == this.byteSize &&
+          other.lastAccessAt == this.lastAccessAt &&
+          other.refCount == this.refCount);
+}
+
+class BlobRefsCompanion extends UpdateCompanion<BlobRefRow> {
+  final Value<String> sha256;
+  final Value<int> byteSize;
+  final Value<DateTime> lastAccessAt;
+  final Value<int> refCount;
+  final Value<int> rowid;
+  const BlobRefsCompanion({
+    this.sha256 = const Value.absent(),
+    this.byteSize = const Value.absent(),
+    this.lastAccessAt = const Value.absent(),
+    this.refCount = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  BlobRefsCompanion.insert({
+    required String sha256,
+    this.byteSize = const Value.absent(),
+    required DateTime lastAccessAt,
+    this.refCount = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : sha256 = Value(sha256),
+        lastAccessAt = Value(lastAccessAt);
+  static Insertable<BlobRefRow> custom({
+    Expression<String>? sha256,
+    Expression<int>? byteSize,
+    Expression<DateTime>? lastAccessAt,
+    Expression<int>? refCount,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (sha256 != null) 'sha256': sha256,
+      if (byteSize != null) 'byte_size': byteSize,
+      if (lastAccessAt != null) 'last_access_at': lastAccessAt,
+      if (refCount != null) 'ref_count': refCount,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  BlobRefsCompanion copyWith(
+      {Value<String>? sha256,
+      Value<int>? byteSize,
+      Value<DateTime>? lastAccessAt,
+      Value<int>? refCount,
+      Value<int>? rowid}) {
+    return BlobRefsCompanion(
+      sha256: sha256 ?? this.sha256,
+      byteSize: byteSize ?? this.byteSize,
+      lastAccessAt: lastAccessAt ?? this.lastAccessAt,
+      refCount: refCount ?? this.refCount,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (sha256.present) {
+      map['sha256'] = Variable<String>(sha256.value);
+    }
+    if (byteSize.present) {
+      map['byte_size'] = Variable<int>(byteSize.value);
+    }
+    if (lastAccessAt.present) {
+      map['last_access_at'] = Variable<DateTime>(lastAccessAt.value);
+    }
+    if (refCount.present) {
+      map['ref_count'] = Variable<int>(refCount.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('BlobRefsCompanion(')
+          ..write('sha256: $sha256, ')
+          ..write('byteSize: $byteSize, ')
+          ..write('lastAccessAt: $lastAccessAt, ')
+          ..write('refCount: $refCount, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -2638,12 +2913,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $NoteTagsTable noteTags = $NoteTagsTable(this);
   late final $RevisionsTable revisions = $RevisionsTable(this);
   late final $AttachmentsTable attachments = $AttachmentsTable(this);
+  late final $BlobRefsTable blobRefs = $BlobRefsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
   @override
   List<DatabaseSchemaEntity> get allSchemaEntities =>
-      [notebooks, tags, notes, noteTags, revisions, attachments];
+      [notebooks, tags, notes, noteTags, revisions, attachments, blobRefs];
 }
 
 typedef $$NotebooksTableCreateCompanionBuilder = NotebooksCompanion Function({
@@ -3934,6 +4210,157 @@ typedef $$AttachmentsTableProcessedTableManager = ProcessedTableManager<
     ),
     AttachmentRow,
     PrefetchHooks Function()>;
+typedef $$BlobRefsTableCreateCompanionBuilder = BlobRefsCompanion Function({
+  required String sha256,
+  Value<int> byteSize,
+  required DateTime lastAccessAt,
+  Value<int> refCount,
+  Value<int> rowid,
+});
+typedef $$BlobRefsTableUpdateCompanionBuilder = BlobRefsCompanion Function({
+  Value<String> sha256,
+  Value<int> byteSize,
+  Value<DateTime> lastAccessAt,
+  Value<int> refCount,
+  Value<int> rowid,
+});
+
+class $$BlobRefsTableFilterComposer
+    extends Composer<_$AppDatabase, $BlobRefsTable> {
+  $$BlobRefsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get sha256 => $composableBuilder(
+      column: $table.sha256, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get byteSize => $composableBuilder(
+      column: $table.byteSize, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get lastAccessAt => $composableBuilder(
+      column: $table.lastAccessAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get refCount => $composableBuilder(
+      column: $table.refCount, builder: (column) => ColumnFilters(column));
+}
+
+class $$BlobRefsTableOrderingComposer
+    extends Composer<_$AppDatabase, $BlobRefsTable> {
+  $$BlobRefsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get sha256 => $composableBuilder(
+      column: $table.sha256, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get byteSize => $composableBuilder(
+      column: $table.byteSize, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get lastAccessAt => $composableBuilder(
+      column: $table.lastAccessAt,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get refCount => $composableBuilder(
+      column: $table.refCount, builder: (column) => ColumnOrderings(column));
+}
+
+class $$BlobRefsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $BlobRefsTable> {
+  $$BlobRefsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get sha256 =>
+      $composableBuilder(column: $table.sha256, builder: (column) => column);
+
+  GeneratedColumn<int> get byteSize =>
+      $composableBuilder(column: $table.byteSize, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get lastAccessAt => $composableBuilder(
+      column: $table.lastAccessAt, builder: (column) => column);
+
+  GeneratedColumn<int> get refCount =>
+      $composableBuilder(column: $table.refCount, builder: (column) => column);
+}
+
+class $$BlobRefsTableTableManager extends RootTableManager<
+    _$AppDatabase,
+    $BlobRefsTable,
+    BlobRefRow,
+    $$BlobRefsTableFilterComposer,
+    $$BlobRefsTableOrderingComposer,
+    $$BlobRefsTableAnnotationComposer,
+    $$BlobRefsTableCreateCompanionBuilder,
+    $$BlobRefsTableUpdateCompanionBuilder,
+    (BlobRefRow, BaseReferences<_$AppDatabase, $BlobRefsTable, BlobRefRow>),
+    BlobRefRow,
+    PrefetchHooks Function()> {
+  $$BlobRefsTableTableManager(_$AppDatabase db, $BlobRefsTable table)
+      : super(TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$BlobRefsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$BlobRefsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$BlobRefsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback: ({
+            Value<String> sha256 = const Value.absent(),
+            Value<int> byteSize = const Value.absent(),
+            Value<DateTime> lastAccessAt = const Value.absent(),
+            Value<int> refCount = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              BlobRefsCompanion(
+            sha256: sha256,
+            byteSize: byteSize,
+            lastAccessAt: lastAccessAt,
+            refCount: refCount,
+            rowid: rowid,
+          ),
+          createCompanionCallback: ({
+            required String sha256,
+            Value<int> byteSize = const Value.absent(),
+            required DateTime lastAccessAt,
+            Value<int> refCount = const Value.absent(),
+            Value<int> rowid = const Value.absent(),
+          }) =>
+              BlobRefsCompanion.insert(
+            sha256: sha256,
+            byteSize: byteSize,
+            lastAccessAt: lastAccessAt,
+            refCount: refCount,
+            rowid: rowid,
+          ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ));
+}
+
+typedef $$BlobRefsTableProcessedTableManager = ProcessedTableManager<
+    _$AppDatabase,
+    $BlobRefsTable,
+    BlobRefRow,
+    $$BlobRefsTableFilterComposer,
+    $$BlobRefsTableOrderingComposer,
+    $$BlobRefsTableAnnotationComposer,
+    $$BlobRefsTableCreateCompanionBuilder,
+    $$BlobRefsTableUpdateCompanionBuilder,
+    (BlobRefRow, BaseReferences<_$AppDatabase, $BlobRefsTable, BlobRefRow>),
+    BlobRefRow,
+    PrefetchHooks Function()>;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -3949,4 +4376,6 @@ class $AppDatabaseManager {
       $$RevisionsTableTableManager(_db, _db.revisions);
   $$AttachmentsTableTableManager get attachments =>
       $$AttachmentsTableTableManager(_db, _db.attachments);
+  $$BlobRefsTableTableManager get blobRefs =>
+      $$BlobRefsTableTableManager(_db, _db.blobRefs);
 }

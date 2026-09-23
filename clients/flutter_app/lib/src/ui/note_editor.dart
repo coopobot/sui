@@ -20,8 +20,10 @@ class _NoteEditorState extends State<NoteEditor> {
   final TextEditingController _content = TextEditingController();
   final TextEditingController _tagInput = TextEditingController();
   List<String> _tags = [];
+  List<Attachment> _attachments = [];
   bool _preview = false;
   bool _loaded = false;
+  String? _loadedNoteId;
 
   @override
   void dispose() {
@@ -55,6 +57,17 @@ class _NoteEditorState extends State<NoteEditor> {
       _tags = s?.tags ?? [];
       _loaded = true;
       _lastVersion = note.version;
+    }
+    if (note?.id != _loadedNoteId) {
+      _loadedNoteId = note?.id;
+      if (note != null) {
+        _controller.refreshAttachments(note.id).then((_) {
+          _attachments = _controller.attachments;
+          if (mounted) setState(() {});
+        });
+      } else {
+        _attachments = [];
+      }
     }
   }
 
@@ -179,8 +192,57 @@ class _NoteEditorState extends State<NoteEditor> {
             onChanged: () => _save(),
           ),
         ),
+        if (_attachments.isNotEmpty) _buildAttachmentBar(context),
       ],
     );
+  }
+
+  Widget _buildAttachmentBar(BuildContext context) {
+    return SizedBox(
+      height: 64,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        itemCount: _attachments.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, i) => _AttachmentCard(
+          attachment: _attachments[i],
+          cached: _controller.syncClient != null
+              ? null // 未知 → 卡片自行查询
+              : false,
+          onOpen: () => _openAttachment(_attachments[i]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openAttachment(Attachment a) async {
+    final Uint8List? bytes;
+    try {
+      bytes = await _controller.openAttachment(a);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('下载「${a.filename}」失败：$e')),
+      );
+      return;
+    }
+    if (bytes == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text('附件「${a.filename}」未配置同步客户端，无法下载')),
+      );
+      return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+          content: Text('已下载「${a.filename}」（${bytes.length} 字节，已缓存）'),
+          duration: const Duration(seconds: 2)),
+    );
+    // 刷新卡片缓存状态
+    setState(() {});
   }
 
   void _addTag() {
@@ -290,6 +352,158 @@ class _EmptyEditor extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// 单个附件卡片：文件名 + 大小 + 缓存状态（未下载 ⇄ 已缓存）+ 打开/下载。
+class _AttachmentCard extends StatefulWidget {
+  const _AttachmentCard({
+    required this.attachment,
+    required this.cached,
+    required this.onOpen,
+  });
+
+  final Attachment attachment;
+
+  /// 已知缓存状态；null 表示需自行异步查询。
+  final bool? cached;
+  final VoidCallback onOpen;
+
+  @override
+  State<_AttachmentCard> createState() => _AttachmentCardState();
+}
+
+class _AttachmentCardState extends State<_AttachmentCard> {
+  late bool _cached;
+  bool _checking = true;
+  bool _downloading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final known = widget.cached;
+    if (known != null) {
+      _cached = known;
+      _checking = false;
+    } else {
+      _cached = false;
+      _downloading = context.read<AppController>().isDownloading(widget.attachment.sha256);
+      _check();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _AttachmentCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final known = widget.cached;
+    if (known != null) {
+      _cached = known;
+      _checking = false;
+      return;
+    }
+    final sha = widget.attachment.sha256;
+    if (oldWidget.attachment.sha256 != sha) {
+      _check();
+      return;
+    }
+    // 下载完成过渡（下载中 → 结束）后重新确认缓存状态
+    final nowDownloading = context.read<AppController>().isDownloading(sha);
+    if (_downloading && !nowDownloading) {
+      _check();
+    }
+    _downloading = nowDownloading;
+  }
+
+  Future<void> _check() async {
+    final cached = await context.read<AppController>().isAttachmentCached(widget.attachment);
+    if (!mounted) return;
+    setState(() {
+      _cached = cached;
+      _checking = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final a = widget.attachment;
+    final downloading = context.watch<AppController>().isDownloading(a.sha256);
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: widget.onOpen,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_iconFor(a.mimeKind), size: 20),
+              const SizedBox(width: 8),
+              Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 160),
+                    child: Text(
+                      a.filename,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  Text(
+                    '${_formatSize(a.byteSize)} · ${_statusText(downloading)}',
+                    style: Theme.of(context)
+                        .textTheme
+                        .labelSmall
+                        ?.copyWith(color: Theme.of(context).colorScheme.outline),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 8),
+              if (_checking || downloading)
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else if (_cached)
+                const Icon(Icons.cloud_done_outlined, size: 16)
+              else
+                const Icon(Icons.download_for_offline_outlined, size: 16),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _statusText(bool downloading) {
+    if (_checking) return '检查中';
+    if (downloading) return '下载中…';
+    return _cached ? '已缓存' : '未下载';
+  }
+
+  IconData _iconFor(String mimeKind) {
+    switch (mimeKind) {
+      case 'image':
+        return Icons.image_outlined;
+      case 'pdf':
+        return Icons.picture_as_pdf_outlined;
+      case 'video':
+        return Icons.videocam_outlined;
+      case 'audio':
+        return Icons.music_note_outlined;
+      default:
+        return Icons.attach_file_outlined;
+    }
+  }
+
+  String _formatSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 }
 

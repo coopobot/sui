@@ -356,6 +356,53 @@ class NoteRepository {
     return rows.map((r) => r.toModel()).toList();
   }
 
+  /// 为笔记挂载一个附件（写入附件元数据行）。
+  ///
+  /// [sha256] 为内容地址；字节本身已通过 BlobStore 落盘（此处只管引用）。
+  /// 返回新创建的 [Attachment]。
+  Future<Attachment> addAttachment({
+    String? id,
+    required String noteId,
+    required String filename,
+    required String mimeKind,
+    int byteSize = 0,
+    required String sha256,
+    String? storageRef,
+    String? thumbnailRef,
+    int embeddedPos = 0,
+    DateTime? now,
+  }) async {
+    final t = now ?? DateTime.now();
+    final aid = id ?? newId();
+    await db.into(db.attachments).insert(AttachmentsCompanion.insert(
+          id: aid,
+          noteId: Value(noteId),
+          filename: filename,
+          mimeKind: mimeKind,
+          byteSize: Value(byteSize),
+          sha256: sha256,
+          storageRef: storageRef ?? sha256,
+          thumbnailRef: Value(thumbnailRef),
+          embeddedPos: Value(embeddedPos),
+          createdAt: t,
+        ));
+    return (await _attachmentById(aid))!;
+  }
+
+  /// 软删除附件（附件映射删除时引用计数由上层配合调整）。
+  Future<void> removeAttachment(String id) async {
+    await (db.update(db.attachments)..where((t) => t.id.equals(id)))
+        .write(AttachmentsCompanion(
+      isDeleted: const Value(true),
+    ));
+  }
+
+  Future<Attachment?> _attachmentById(String id) async {
+    final row = await (db.select(db.attachments)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    return row?.toModel();
+  }
+
   Future<void> _replaceTags(String noteId, List<String> tagNames) async {
     await (db.delete(db.noteTags)..where((t) => t.noteId.equals(noteId))).go();
     if (tagNames.isEmpty) return;
