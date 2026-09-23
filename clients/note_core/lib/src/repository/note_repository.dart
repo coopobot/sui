@@ -135,9 +135,11 @@ class NoteRepository {
     List<String> tags = const [],
     bool pinned = false,
     DateTime? now,
+    String? sourceDevice,
   }) async {
     final t = now ?? DateTime.now();
     final nid = id ?? newId();
+    final src = sourceDevice ?? deviceId;
     await db.transaction(() async {
       await db.into(db.notes).insert(NotesCompanion.insert(
             id: nid,
@@ -148,7 +150,7 @@ class NoteRepository {
             version: const Value(1),
             createdAt: t,
             updatedAt: t,
-            sourceDevice: Value(deviceId),
+            sourceDevice: Value(src),
           ));
       if (tags.isNotEmpty) {
         await _replaceTags(nid, tags);
@@ -160,7 +162,7 @@ class NoteRepository {
             version: 1,
             title: Value(title),
             contentMarkdown: contentMarkdown,
-            sourceDevice: Value(deviceId),
+            sourceDevice: Value(src),
             createdAt: t,
           ));
       await (db.update(db.notes)..where((n) => n.id.equals(nid)))

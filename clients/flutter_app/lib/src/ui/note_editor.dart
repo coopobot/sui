@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:note_core/note_core.dart';
 import 'package:provider/provider.dart';
 
@@ -156,6 +157,11 @@ class _NoteEditorState extends State<NoteEditor> {
                 onPressed: () => _controller.toggleRevisionPanel(),
               ),
               IconButton(
+                tooltip: '导出 Markdown',
+                icon: const Icon(Icons.file_download_outlined),
+                onPressed: () => _showExportDialog(),
+              ),
+              IconButton(
                 tooltip: '删除笔记',
                 icon: const Icon(Icons.delete_outline),
                 onPressed: () async {
@@ -186,6 +192,64 @@ class _NoteEditorState extends State<NoteEditor> {
     _tagInput.clear();
     setState(() => _tags = [..._tags, name]);
     _save();
+  }
+
+  void _showExportDialog() {
+    final title = _title.text.isEmpty ? '未命名笔记' : _title.text;
+    final content = '# $title\n\n${_content.text}';
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('导出 Markdown'),
+        content: SizedBox(
+          width: 500,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('标题：$title',
+                  style: Theme.of(context).textTheme.bodySmall),
+              const SizedBox(height: 8),
+              Container(
+                height: 200,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  border: Border.all(
+                      color: Theme.of(context).colorScheme.outlineVariant),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    content,
+                    style: const TextStyle(
+                        fontFamily: 'monospace', fontSize: 12),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
+          FilledButton.icon(
+            icon: const Icon(Icons.copy, size: 18),
+            label: const Text('复制全部'),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: content));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                    content: Text('已复制到剪贴板'),
+                    duration: Duration(seconds: 1)),
+              );
+              Navigator.pop(context);
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   Future<bool> _confirmDelete() async {

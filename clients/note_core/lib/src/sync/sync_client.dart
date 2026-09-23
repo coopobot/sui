@@ -137,6 +137,7 @@ class SyncClient {
           id: id,
           title: n['title'] as String? ?? '',
           contentMarkdown: n['content'] as String? ?? '',
+          sourceDevice: (n['sourceDevice'] as String?) ?? '',
         );
         _baseVersion[id] = ver;
         count++;
@@ -202,6 +203,7 @@ class SyncClient {
       content: m['content'] as String? ?? '',
       version: m['version'] as int,
       isDeleted: m['isDeleted'] as bool,
+      sourceDevice: (m['sourceDevice'] as String?) ?? '',
     );
   }
 
@@ -348,6 +350,7 @@ class _ServerNote {
   final String content;
   final int version;
   final bool isDeleted;
+  final String sourceDevice;
 
   _ServerNote({
     required this.id,
@@ -355,6 +358,7 @@ class _ServerNote {
     required this.content,
     required this.version,
     required this.isDeleted,
+    required this.sourceDevice,
   });
 }
 

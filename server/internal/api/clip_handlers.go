@@ -78,6 +78,9 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 发送变更通知（WebSocket）
+	s.hub.NotifyChange()
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"noteId":  noteID,

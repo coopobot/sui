@@ -32,6 +32,30 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token, "username": req.Username})
 }
 
+// handleLogin 用户登录，返回新 token（简化：密码明文比对）。
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad request"})
+		return
+	}
+	if req.Username == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "username/password required"})
+		return
+	}
+	// 简化实现：验证密码（明文前缀存储），成功则生成新 token
+	// 生产环境应使用密码哈希 + 数据库查询
+	token, err := s.store.LoginUser(req.Username, "plain:"+req.Password)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid credentials"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token, "username": req.Username})
+}
+
 // handlePush 处理客户端批量推送（逐条调用 sync.Push，汇总结果）。
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -60,6 +84,9 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 			ServerVersion: resp.ServerVersion, AppliedVersion: resp.AppliedVersion,
 		})
 	}
+	// 发送变更通知（WebSocket）
+	s.hub.NotifyChange()
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results})
 }
 
@@ -78,19 +105,21 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type out struct {
-		ID        string `json:"id"`
-		Title     string `json:"title"`
-		Content   string `json:"content"`
-		Version   int    `json:"version"`
-		IsDeleted bool   `json:"isDeleted"`
-		UpdatedAt string `json:"updatedAt"`
+		ID           string `json:"id"`
+		Title        string `json:"title"`
+		Content      string `json:"content"`
+		Version      int    `json:"version"`
+		IsDeleted    bool   `json:"isDeleted"`
+		SourceDevice string `json:"sourceDevice"`
+		UpdatedAt    string `json:"updatedAt"`
 	}
 	list := make([]out, 0, len(rows))
 	for _, rw := range rows {
 		list = append(list, out{
 			ID: rw.ID, Title: rw.Title, Content: rw.ContentMarkdown,
 			Version: rw.Version, IsDeleted: rw.IsDeleted,
-			UpdatedAt: rw.UpdatedAt.UTC().Format(time.RFC3339),
+			SourceDevice: rw.SourceDevice,
+			UpdatedAt:    rw.UpdatedAt.UTC().Format(time.RFC3339),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "notes": list})
@@ -132,6 +161,29 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleBlobGet 下载 hash 对应的 blob 字节。
+func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+	exists, err := s.store.BlobExists(hash)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if !exists {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "blob not found"})
+		return
+	}
+	reader, err := s.blobs.Open(hash)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	defer reader.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", "attachment; filename="+hash)
+	http.ServeContent(w, r, hash, time.Time{}, reader)
 }
 
 // ---- 修订历史 ----

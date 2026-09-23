@@ -50,6 +50,7 @@ func (s *Store) migrate() error {
 			content_markdown TEXT NOT NULL DEFAULT '',
 			version INTEGER NOT NULL DEFAULT 0,   -- 服务端权威版本线
 			is_deleted INTEGER NOT NULL DEFAULT 0, -- 墓碑
+			source_device TEXT NOT NULL DEFAULT '', -- 最近一次修改的来源设备
 			updated_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS revisions (
@@ -70,6 +71,8 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_revisions_note ON revisions(note_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_revisions_note_ver ON revisions(note_id, version DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_notes_isdel ON notes(is_deleted, updated_at DESC)`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
@@ -107,6 +110,26 @@ func (s *Store) CreateUser(username, passwordHash string) (token string, err err
 	return tok, err
 }
 
+// LoginUser 验证用户名密码，成功则生成并返回新 token。
+func (s *Store) LoginUser(username, passwordHash string) (string, error) {
+	var storedHash string
+	err := s.db.QueryRow(
+		`SELECT password_hash FROM users WHERE username = ?`, username,
+	).Scan(&storedHash)
+	if err != nil {
+		return "", errors.New("user not found")
+	}
+	if storedHash != passwordHash {
+		return "", errors.New("wrong password")
+	}
+	tok, _ := NewToken()
+	_, err = s.db.Exec(`UPDATE users SET token = ? WHERE username = ?`, tok, username)
+	if err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
 // NewToken 生成一个伪随机 token（hex 编码 32 字节）。
 func NewToken() (string, error) {
 	raw := make([]byte, 32)
@@ -125,13 +148,14 @@ type NoteRow struct {
 	ContentMarkdown string
 	Version         int
 	IsDeleted       bool
+	SourceDevice    string
 	UpdatedAt       time.Time
 }
 
 // UpdatedSince 返回 updated_at > since 的所有笔记（增量拉取）。
 func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, title, content_markdown, version, is_deleted, updated_at
+		`SELECT id, title, content_markdown, version, is_deleted, source_device, updated_at
 		 FROM notes WHERE updated_at > ? ORDER BY updated_at`,
 		since.UTC().Format(time.RFC3339),
 	)
@@ -144,7 +168,7 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 		var r NoteRow
 		var del int
 		var ts string
-		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.Version, &del, &ts); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.Version, &del, &r.SourceDevice, &ts); err != nil {
 			return nil, err
 		}
 		r.IsDeleted = del != 0
@@ -160,9 +184,9 @@ func (s *Store) GetNote(id string) (*NoteRow, error) {
 	var del int
 	var ts string
 	err := s.db.QueryRow(
-		`SELECT id, title, content_markdown, version, is_deleted, updated_at
+		`SELECT id, title, content_markdown, version, is_deleted, source_device, updated_at
 		 FROM notes WHERE id = ?`, id,
-	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.Version, &del, &ts)
+	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.Version, &del, &r.SourceDevice, &ts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -184,13 +208,14 @@ func (s *Store) UpsertNote(noteID, title, content string, isDeleted bool, source
 	defer tx.Rollback()
 
 	if err := upsert(tx,
-		`INSERT INTO notes (id, title, content_markdown, version, is_deleted, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO notes (id, title, content_markdown, version, is_deleted, source_device, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   title=excluded.title, content_markdown=excluded.content_markdown,
 		   version=excluded.version, is_deleted=excluded.is_deleted,
+		   source_device=excluded.source_device,
 		   updated_at=excluded.updated_at`,
-		noteID, title, content, version, b2i(isDeleted), ts,
+		noteID, title, content, version, b2i(isDeleted), sourceDevice, ts,
 	); err != nil {
 		return 0, err
 	}
