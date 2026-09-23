@@ -1,0 +1,20 @@
+name: sui_flutter_app
+description: 随手记 Sui — 多端客户端（M0 骨架：连接服务端健康检查）
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ^3.3.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

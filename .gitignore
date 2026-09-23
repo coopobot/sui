@@ -1,0 +1,30 @@
+# Binaries
+server/sui-server
+server/bin/
+*.exe
+
+# Go
+server/vendor/
+*.test
+*.out
+
+# Flutter
+clients/flutter_app/build/
+clients/flutter_app/.dart_tool/
+clients/flutter_app/.flutter-plugins
+clients/flutter_app/.flutter-plugins-dependencies
+clients/flutter_app/ios/Pods/
+clients/flutter_app/android/.gradle/
+clients/flutter_app/.idea/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs / env
+*.log
+.env
+.env.*
