@@ -1,0 +1,20 @@
+name: note_core
+description: 随手记 Sui — 多端共享核心逻辑（数据模型、本地存储、同步引擎、搜索）
+version: 0.1.0
+publish_to: "none"
+environment:
+  sdk: ^3.3.0
+
+dependencies:
+  drift: ^2.23.0
+  sqlite3: ^2.4.0
+  drift_dev: ^2.23.0
+  path: ^1.9.0
+  collection: ^1.18.0
+  crypto: ^3.0.0
+  uuid: ^4.0.0
+
+dev_dependencies:
+  build_runner: ^2.4.0
+  test: ^1.25.0
+  lints: ^4.0.0

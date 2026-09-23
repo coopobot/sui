@@ -274,6 +274,49 @@ Revision (修订)                        Attachment (附件)
 
 ---
 
+## 10.5 存储技术路径（定案）
+
+> 本专题经研讨定案，涵盖总体选型、附件存储、云端元数据库、两端表结构与容量。
+
+### 总体选型：一个业务核心，按端选存储后端
+
+- 采用 **DAL 数据访问层抽象 + drift（Dart 版 SQLite ORM）**。
+- 笔记元数据（标题/正文/标签/版本）→ 全端进 **SQLite**。
+- 桌面/移动：drift 落原生 SQLite；Web：同一 drift 跑在 WASM + IndexedDB 上。
+- 收益：**同步引擎、冲突解决、搜索逻辑只写一次，三端复用**。
+- 附件字节 → 独立 Blob 存储，不进 SQLite，业务层只看 ID/hash。
+
+### 附件存储：两端分开存，但都按 sha256 内容寻址
+
+| | 客户端 | 服务端 |
+|---|---|---|
+| 元数据 | `attachments` 表只存引用+hash | `blob_objects`（sha256 主键 + refcount） |
+| 字节 | 本地 blob 目录（`~/sui/blobs/`，按 hash 分片） | 默认服务端磁盘（`/data/blobs/` 分片） |
+| 特点 | BlobStore 接口（本地文件 / Web 沙箱） | BlobStore 接口（本地盘 / S3 可切换） |
+
+- **字节不随笔记同步走、按需拉取**；`sha256` 天然去重；服务端靠 refcount + GC 做去重中心。
+- 服务端默认 `BLOB_STORE=local` 存本地磁盘（`/data/blobs/` 分片），零运维贴合自托管；
+  抽象 `BlobStore` 接口 + 环境变量切后端：`local ↔ s3`（MinIO/COS）。**元数据只记 sha256+refcount，换后端时元数据库零改动**。
+- 本地磁盘要点：分片目录（`blobs/ab/`）、哈希幂等、refcount GC、定时备份 blobs 目录。
+
+### 云端元数据数据库：默认 SQLite，留 PostgreSQL 的接口
+
+- 表结构与客户端**共用 schema 完全对齐、各自私有字段各留各的**。
+- 同步协议**只走两边的公共字段；私有状态（outbox/cursor/refcount）不进协议**。
+- 现在用 SQLite 落地（自托管零运维），通过 `Store` 接口保留换 PostgreSQL 的路，**不预付抽象成本**。
+
+**共用 schema（进同步协议）** —— `notes`／`revisions`／`notebooks`／`attachments`(引用)
+**客户端私有** —— `outbox` · `base` · 本地草稿号 · `last_pull_cursor`
+**服务端专属** —— `devices` · `sync_cursors` · `blob_refs` · 权威版本线
+
+### SQLite 容量确认
+
+- 单库默认上限约 1TB，可支撑**几十万到上百万条笔记**；个人场景通常 <1 万篇，**非瓶颈**。
+- 真正撑大库的是**附件**，故设计上附件已移出 SQLite，库保持瘦身。
+- 容量焦虑无必要；重点放在同步一致性与搜索体验。
+
+---
+
 ## 11. 笔记历史查看与恢复（需求 6）
 
 ### 11.1 历史版本策略（已定案）
@@ -350,14 +393,21 @@ Revision (修订)                        Attachment (附件)
 
 | 里程碑 | 内容 | 验收标准 |
 |--------|------|----------|
-| **M0 骨架** | monorepo 结构、Go 服务端 hello-sync、Flutter 客户端壳、CI | 两端能建立连接 |
-| **M1 核心本地笔记** | 本地创建/编辑(Markdown+WYSIWYG)、笔记本树、标签、附件入库、本地搜索、本地历史 | 纯离线可用 |
+| **M0 骨架** ✅ 完成 | monorepo 结构、Go 服务端 hello-sync、Flutter 客户端壳、CI | 两端能建立连接 |
+| **M1 核心本地笔记** 🔄 进行中 | 本地创建/编辑(Markdown+WYSIWYG)、笔记本树、标签、附件入库、本地搜索、本地历史 | 纯离线可用 |
 | **M2 同步** | 服务端元数据+Blob、增量同步、离线队列、冲突处理、WebSocket 通知 | 多端数据收敛一致 |
 | **M3 历史与恢复** | 修订快照/增量、Diff UI、一键恢复、跨端历史 | 可完整回溯任意版本 |
 | **M4 浏览器剪藏** | 扩展 MV3、服务端净化、收件箱流程 | 一键剪藏网页成笔记 |
 | **M5 多端打磨** | 平板/桌面响应式、PWA、导出迁移、权限与配额、性能 | 满足 8 项能力全面上线 |
 
 > 建议逐里程碑验收后合入，先以 **M1 + M2** 打通主链路。
+
+**M1 进度速记：**
+- ✅ `clients/note_core`（纯 Dart 包）骨架：数据模型（Note/Notebook/Tag/Attachment/Revision）、drift 数据库（6 表 SQLite schema）、`BlobStore` 抽象 + `LocalBlobStore`。
+- ✅ `NoteRepository`：笔记本树 CRUD、标签（多对多）、笔记 CRUD、修订历史追加、标题/正文关键字搜索、软删除墓碑、归档/置顶。
+- ✅ 12 个单元测试全部通过；`dart analyze` 无问题。
+- ⏳ 编辑器（WYSIWYG+Markdown）、UI（Flutter 界面）尚未接入 —— 属 M1 剩余部分。
+- 备注：Dart SQLite 依赖 `libsqlite3.so`，WSL 需在 `~/.local/lib` 建 symlink（`libsqlite3.so.0` → `.so`），详见 `clients/note_core/README`。
 
 ---
 
