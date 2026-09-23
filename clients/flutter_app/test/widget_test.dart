@@ -1,20 +1,56 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:note_core/note_core.dart';
+import 'package:provider/provider.dart';
 
-import 'package:sui_flutter_app/src/app.dart';
+import 'package:sui_flutter_app/src/ui/app_controller.dart';
+import 'package:sui_flutter_app/src/ui/note_shell.dart';
+
+/// 用 ChangeNotifierProvider 包裹 NoteShell，让测试 controller 真正被使用。
+Widget buildShell(AppController controller) {
+  return ChangeNotifierProvider<AppController>.value(
+    value: controller,
+    child: const MaterialApp(home: NoteShell()),
+  );
+}
 
 void main() {
-  testWidgets('Sui app shell renders', (WidgetTester tester) async {
-    await tester.pumpWidget(const SuiApp());
+  testWidgets('应用外壳渲染主视图（空态）', (tester) async {
+    final db = AppDatabase.memory();
+    final controller =
+        AppController(repository: NoteRepository(db, deviceId: 'widget-test'));
+    await controller.bootstrap();
 
-    // App bar title renders.
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(buildShell(controller));
+    await tester.pumpAndSettle();
+
     expect(find.text('随手记 Sui'), findsOneWidget);
+    expect(find.text('全部笔记'), findsWidgets);
+    expect(find.text('暂无笔记'), findsOneWidget);
 
-    // Server URL is shown.
-    expect(find.textContaining('服务端：'), findsOneWidget);
+    await db.close();
+  });
 
-    // Let the pending ping future attempt to resolve (offline → cannot-connect).
-    // Use a bounded pump, not pumpAndSettle, to avoid hanging on progress animation.
-    await tester.pump(const Duration(seconds: 6));
-    expect(find.text('无法连接服务端'), findsOneWidget);
+  testWidgets('新建笔记本后出现在树中', (tester) async {
+    final db = AppDatabase.memory();
+    final controller =
+        AppController(repository: NoteRepository(db, deviceId: 'widget-test'));
+    await controller.bootstrap();
+
+    await tester.binding.setSurfaceSize(const Size(1200, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(buildShell(controller));
+    await tester.pumpAndSettle();
+
+    await controller.createNotebook('工作');
+    await tester.pumpAndSettle();
+
+    expect(find.text('工作'), findsOneWidget);
+
+    await db.close();
   });
 }

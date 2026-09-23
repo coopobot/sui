@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
 import 'src/app.dart';
+import 'src/bootstrap.dart';
 
-void main() {
-  runApp(const SuiApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final storage = await bootstrapStorage();
+  runApp(SuiApp(repository: storage.$2));
 }

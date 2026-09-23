@@ -216,6 +216,28 @@ Revision (修订)                        Attachment (附件)
 
 ## 8. 笔记编辑器与内容格式（需求 3）
 
+### 8.0 编辑器技术选型（已定案）
+
+> **结论：`flutter_quill`（Delta 编辑模型）+ `markdown_quill`（Markdown↔Delta 双向转换）+ `flutter_markdown`（源码/只读渲染），守住 canonical = Markdown。**
+
+- **存储层正本恒为 Markdown**；同步/历史/搜索都基于 `content_markdown`（定案）。
+- **编辑模型用 Delta（JSON）**：Quill 以 Delta 为内部模型，能以 JSON 无损往返保证 WYSIWYG 编辑体验，天然安全（存库无需消毒）[$TRAE_REF](https://www.rapidevelopers.com/flutterflow-tutorials/how-to-create-a-document-editor-in-flutterflow)。
+- **Markdown ↔ Delta 双向转换**：读笔记 `Markdown → Delta`，保存 `Delta → Markdown` 再落库——持久层永远是 Markdown。
+- **双轨**：WYSIWYG（Quill）为主 + 源码视图（直接编辑 Markdown 文本）。切换源码改的是纯 Markdown，切回 Quill 重新 `Markdown → Delta`。
+
+**选型对比**
+
+| 方案 | 编辑体验 | Markdown 往返 | 维护 | 结论 |
+|---|---|---|---|---|
+| **flutter_quill + markdown_quill** | WYSIWYG 成熟 | 可转换 | 好，生态大 | **推荐** |
+| appflowy_editor | 块编辑器、Notion 风 | 绑定其块模型 | 中（AppFlowy 主推） | 备选 |
+| flutter_markdown（纯渲染） | 差，仅预览 | 天然源码 | 好 | 仅作展示/只读 |
+| super_editor | 可组合 | 需自写桥接 | 平均 | 偏底层 |
+
+**风险与缓解**：官方明确提示 Markdown↔Delta 转换 *experimental*[$TRAE_REF](https://pub.dev/packages/wysiwyg_flutter_quill)。
+- 仅对**标准 GFM 子集**（标题/列表/粗斜/勾选/代码块/表格）做往返；**复杂内容**（mermaid、内嵌 math）**保留源码模式**不做往返转换。
+- 封装为 `EditorBridge` 接口（放 note_core），编辑器实现可替换——若转换质量不达标，可平滑切换编辑内核，不污染上层。
+
 ### 8.1 双轨内容体系
 - **规范正本 = Markdown**（含扩展语法：附件占位、勾选、代码块、表格 GFM、LaTeX 可选）。
 - 视图层 = WYSIWYG（扁平化渲染，所见即所得），支持一键切换到**源码模式**。
@@ -402,12 +424,21 @@ Revision (修订)                        Attachment (附件)
 
 > 建议逐里程碑验收后合入，先以 **M1 + M2** 打通主链路。
 
-**M1 进度速记：**
-- ✅ `clients/note_core`（纯 Dart 包）骨架：数据模型（Note/Notebook/Tag/Attachment/Revision）、drift 数据库（6 表 SQLite schema）、`BlobStore` 抽象 + `LocalBlobStore`。
+**里程碑进度速记：**
+
+**M0 骨架 ✅**
+- Go 服务端：`cmd/sui-server`（健康检查 `/healthz` + 心跳 `/api/v1/ping`，含测试），优雅启停。
+- Flutter 客户端壳：连接服务端健康检查的界面，web 目标可构建 + widget 测试。
+- monorepo 工程：顶层 `Makefile` / `README` / `.gitignore`；CI 尚未配置（唯一缺口）。
+
+**M1 核心本地笔记 ✅**
+- ✅ `clients/note_core`（纯 Dart 包）：数据模型（Note/Notebook/Tag/Attachment/Revision）、drift 数据库（6 表 SQLite schema）、`BlobStore` 抽象 + `LocalBlobStore`。
 - ✅ `NoteRepository`：笔记本树 CRUD、标签（多对多）、笔记 CRUD、修订历史追加、标题/正文关键字搜索、软删除墓碑、归档/置顶。
 - ✅ 12 个单元测试全部通过；`dart analyze` 无问题。
-- ⏳ 编辑器（WYSIWYG+Markdown）、UI（Flutter 界面）尚未接入 —— 属 M1 剩余部分。
-- 备注：Dart SQLite 依赖 `libsqlite3.so`，WSL 需在 `~/.local/lib` 建 symlink（`libsqlite3.so.0` → `.so`），详见 `clients/note_core/README`。
+- ✅ **编辑器接入（M1 实现）**：Markdown 源码「编辑」+ 预览「所见即所得」双轨（`flutter_markdown` 渲染），正本恒为 Markdown；`EditorBridge` 语义内建于仓储，编辑器可后续升级富文本。
+- ✅ **Flutter UI 接入**（`note_shell`）：响应式三栏（笔记本树 / 笔记列表 / 编辑区），窄屏抽屉 + 导航堆栈；笔记本树（嵌套）、标签、搜索、置顶/删除、Markdown 双轨编辑；provider 状态管理 + `AppController`。widget 测试（2）通过。
+- 备注：Dart SQLite 依赖 `libsqlite3.so`，WSL 建 symlink（`~/.local/lib`），见 `clients/note_core/README`。
+- 说明：编辑器当前为「Markdown 源码 + 预览」双轨（稳定、无实验性转换风险）；`flutter_quill`/`markdown_quill` 富文本 WYSIWYG 升级列为后续可选增强（§8.0 已记风险）。
 
 ---
 
