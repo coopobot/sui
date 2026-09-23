@@ -1,0 +1,134 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"time"
+
+	"sui/note-server/internal/sync"
+)
+
+// handleRegister 创建用户并返回 token（明文，供客户端 bootstrap 使用）。
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad request"})
+		return
+	}
+	if req.Username == "" || req.Password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "username/password required"})
+		return
+	}
+	// 简化：不存储密码哈希，仅演示 token 发放。生产应做哈希。
+	token, err := s.store.CreateUser(req.Username, "plain:"+req.Password)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "user exists"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token, "username": req.Username})
+}
+
+// handlePush 处理客户端批量推送（逐条调用 sync.Push，汇总结果）。
+func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ClientID string        `json:"clientId"`
+		Items    []sync.PushItem `json:"items"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad request"})
+		return
+	}
+	type itemResult struct {
+		ID       string `json:"id"`
+		Accepted bool   `json:"accepted"`
+		ServerVersion int `json:"serverVersion,omitempty"`
+		AppliedVersion int `json:"appliedVersion,omitempty"`
+	}
+	results := make([]itemResult, 0, len(req.Items))
+	for _, it := range req.Items {
+		resp, err := s.sync.Push(it)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		results = append(results, itemResult{
+			ID: it.ID, Accepted: resp.Accepted,
+			ServerVersion: resp.ServerVersion, AppliedVersion: resp.AppliedVersion,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results})
+}
+
+// handlePull 返回自 since 之后的增量。
+func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
+	sinceStr := r.URL.Query().Get("since")
+	since := time.Time{}
+	if sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = t
+		}
+	}
+	rows, err := s.sync.Pull(since)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	type out struct {
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Content   string `json:"content"`
+		Version   int    `json:"version"`
+		IsDeleted bool   `json:"isDeleted"`
+		UpdatedAt string `json:"updatedAt"`
+	}
+	list := make([]out, 0, len(rows))
+	for _, rw := range rows {
+		list = append(list, out{
+			ID: rw.ID, Title: rw.Title, Content: rw.ContentMarkdown,
+			Version: rw.Version, IsDeleted: rw.IsDeleted,
+			UpdatedAt: rw.UpdatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "notes": list})
+}
+
+// handleBlobHead 检查 hash 是否存在（内容寻址去重）。
+func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+	exists, err := s.store.BlobExists(hash)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if exists {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
+}
+
+// handleBlobPut 上传 hash 对应的字节；已存在则幂等返回。
+func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+	// 先登记引用（即使已存在也 +1）。字节尚未写入时对已有 blob 寄存器冲突，
+	// 这里简化：先 PUT 字节，再 +1 引用。若内容已存在则直接 +1。
+	exists, err := s.store.BlobExists(hash)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if !exists {
+		if _, err := s.blobs.Put(hash, r.Body); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+	}
+	if _, err := s.store.AddBlobRef(hash, int(r.ContentLength)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"sui/note-server/internal/api"
+	"sui/note-server/internal/blob"
+	"sui/note-server/internal/store"
 	"sui/note-server/internal/version"
 )
 
@@ -21,10 +23,28 @@ func main() {
 	if addr == "" {
 		addr = ":8080"
 	}
+	dataDir := os.Getenv("SUI_DATA")
+	if dataDir == "" {
+		dataDir = "./data"
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		log.Fatalf("mkdir data: %v", err)
+	}
+
+	st, err := store.Open(dataDir + "/sui.db")
+	if err != nil {
+		log.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	blobs, err := blob.NewLocal(dataDir)
+	if err != nil {
+		log.Fatalf("init blob store: %v", err)
+	}
 
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      api.NewRouter(),
+		Handler:      api.New(st, blobs).Router(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
