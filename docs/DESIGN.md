@@ -304,22 +304,25 @@ IndexedDB 实现（壳文件的第三个分支）。
 - 服务端：Go 构建通过、7/7 测试通过；`ping`/`register`/`login`/`push`/`pull`/
   `blobs`(HEAD/PUT/GET)/`revisions`/`clips` 全部实测正常，鉴权 401、重复注册 409、
   坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
-- note_core：26/26 测试通过（含新增落盘持久化 2 用例）。
-- Web 构建：`flutter build web` 成功；真实浏览器验证启动、IndexedDB 落库。
+- note_core：35/35 测试通过（落盘持久化 2 用例 + 配置存取 9 用例）。
+- flutter_app：5/5 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
+  第二台设备拉取到）。
+- 同步链路：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
+- Web 构建：`flutter build web --release` 成功；真实浏览器验证启动、IndexedDB 落库。
 - 代码质量：`flutter analyze` 两个包 0 问题。
 
 ### 20.2 待修复缺口
 
-| # | 缺口 | 影响 |
-|---|------|------|
-| 1 | **同步链路未接线**：`SyncClient` 从未实例化，`blobStore` 从未注入 | 客户端实为纯本地编辑器；附件按需下载/LRU 机制是死代码 |
-| 2 | 无登录 / 服务端地址配置 UI | 客户端无法连接服务端 |
-| 3 | 服务端 `attachments` 表为半成品（建表但无读写方法与协议字段） | 附件-笔记映射无法跨端重建 |
-| 4 | 无附件上传 / 选择器 | 用户无法添加附件 |
-| 5 | 缺桌面/移动平台脚手架目录 | 这些端暂不可构建（代码路径已就绪） |
-| 6 | `lib/src/home_page.dart` 为 M0 死代码 | 冗余，易误导 |
-| 7 | README/DEVELOPER 的运行命令与实际不符 | 按文档操作会失败 |
-| 8 | 文档「核心特性」全 ✅ 但部分未在客户端生效 | 认知偏差 |
+| # | 缺口 | 状态 | 影响 |
+|---|------|------|------|
+| 1 | **同步链路未接线**：`SyncClient` 从未实例化，`blobStore` 从未注入 | ✅ 修复 2 | 客户端原为纯本地编辑器；附件按需下载/LRU 机制曾是死代码 |
+| 2 | 无登录 / 服务端地址配置 UI | ✅ 修复 2 | 客户端原无法连接服务端 |
+| 3 | 服务端 `attachments` 表为半成品（建表但无读写方法与协议字段） | ⏳ 待修复 | 附件-笔记映射无法跨端重建 |
+| 4 | 无附件上传 / 选择器 | ⏳ 待修复 | 用户无法添加附件 |
+| 5 | 缺桌面/移动平台脚手架目录 | ⏳ 待修复 | 这些端暂不可构建（代码路径已就绪） |
+| 6 | `lib/src/home_page.dart` 为 M0 死代码 | ⏳ 待修复 | 冗余，易误导 |
+| 7 | README/DEVELOPER 的运行命令与实际不符 | ⏳ 待修复 | 按文档操作会失败 |
+| 8 | 文档「核心特性」全 ✅ 但部分未在客户端生效 | ⏳ 待修复 | 认知偏差 |
 
 ### 20.3 未实现的设计项
 
@@ -355,6 +358,57 @@ IndexedDB 实现（壳文件的第三个分支）。
 | note_core 测试 | `dart test` | 26/26 通过 |
 | note_core 静态检查 | `dart analyze` | No issues found |
 | 客户端测试 | `flutter test` | 2/2 通过 |
+| 客户端静态检查 | `flutter analyze` | No issues found |
+| Web 构建 | `flutter build web --release` | ✓ Built build/web |
+
+> 环境备注：WSL 内 Go 工具链位于 `/home/aiuser/go-sdk/go/bin`、Flutter 位于
+> `/home/aiuser/flutter/bin`，二者均不在默认 `PATH`，需显式指定绝对路径调用。
+
+#### 修复 2 ✅ 同步链路接线 + 服务端连接配置 UI
+
+对应 §20.2 #1 / #2。原状：`SyncClient` 从未被实例化，`CachedBlobStore` 从未注入
+（附件按需下载/LRU 全是死代码）；客户端也没有任何地方能填写服务端地址与 Token，
+因此「多端同步」「实时通知」在客户端实际不可达。
+
+设计要点：
+
+- **配置落本地库**：新增 `settings` 键值表（drift schema v4），存
+  `sync.baseUrl` / `sync.token` / `device.id` / `blob.cacheLimitBytes`。
+  选本地 SQLite 而非新增 `shared_preferences` 依赖 —— 与既有存储同源，
+  一份代码三端通用（Web 同样落在 IndexedDB）。
+- **deviceId 首次生成后恒定**：用于来源标记（`sourceDevice`）与冲突归因；
+  断开连接只清地址与 Token，**保留** deviceId 与本地数据。
+- **连接即装配**：`AppController.connect()` 负责构造
+  `CachedBlobStore(LocalBlobStore(dataDir/blobs), SqliteBlobCacheMeta(db))`
+  并注入 `SyncClient`。注意此处**不设** `CachedBlobStore.fetcher` —— 下载由
+  `SyncClient.ensureBlob()` 统一负责，设了会形成自我递归。
+- **离线优先不变**：编辑先落本地并入 Outbox，700ms 防抖后推送；同步失败只把
+  状态置为 error 并保留原因，不影响本地读写。
+- **WS 降级**：`GET /api/v1/ws` 收到 `changed` 即触发 pull；WS 不可用仅静默降级，
+  手动同步与防抖推送仍可用。
+
+落地内容：
+
+| 项 | 文件 | 说明 |
+|----|------|------|
+| 配置表 | `note_core/lib/src/db/app_database.dart` | 新增 `Settings` 表，schema v4 + 迁移 |
+| 配置模型 | `note_core/lib/src/models/sync_config.dart` | `SyncConfig` + 地址规范化 |
+| 配置读写 | `note_core/lib/src/repository/settings_store.dart` | get/set、deviceId、缓存上限 |
+| 账号操作 | `note_core/lib/src/sync/auth_client.dart` | `register` / `login` / `ping`（取 Token 的入口，不能走已鉴权的 SyncClient） |
+| 状态中枢 | `flutter_app/lib/src/ui/app_controller.dart` | 可变的 `syncClient`、`SyncState`、`connect`/`disconnect`/`syncNow`、WS 订阅、编辑自动入队 |
+| 设置 UI | `flutter_app/lib/src/ui/sync_settings_dialog.dart` | 地址 / 用户名密码注册登录 / Token / 测试连接 / 缓存上限 |
+| 顶栏状态 | `flutter_app/lib/src/ui/note_shell.dart` | 同步状态图标（未连接/已同步/同步中/失败）+ 立即同步 + 设置入口 |
+| 启动装配 | `flutter_app/lib/src/bootstrap.dart`、`app.dart`、`main.dart` | `AppStorage` 一并返回 db / repository / dataDir |
+| 依赖 | `flutter_app/pubspec.yaml` | 新增 `web_socket_channel`（WS 跨端可用） |
+
+验收（本次实测）：
+
+| 检查 | 命令 | 结果 |
+|------|------|------|
+| 服务端 | `go build ./... && go test -count=1 -v ./internal/api/` | 构建通过，7/7 PASS |
+| note_core 测试 | `dart test` | 35/35 通过（新增配置存取 9 用例） |
+| note_core 静态检查 | `dart analyze` | No issues found |
+| 客户端测试 | `flutter test` | 5/5 通过（含 `sync_wiring_test.dart`：起真服务端，注册连接 → 新建 → 同步 → 第二台设备拉到） |
 | 客户端静态检查 | `flutter analyze` | No issues found |
 | Web 构建 | `flutter build web --release` | ✓ Built build/web |
 

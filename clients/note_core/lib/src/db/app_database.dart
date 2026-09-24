@@ -117,6 +117,19 @@ class BlobRefs extends Table {
   Set<Column> get primaryKey => {sha256};
 }
 
+/// 应用级键值配置（服务端地址 / Token / 本机 deviceId 等）。
+///
+/// 与业务表分开：这里存的是「本机如何连服务端」这类设备级偏好，
+/// 不参与同步，也不需要跨端一致。
+@DataClassName('SettingRow')
+class Settings extends Table {
+  TextColumn get key => text()();
+  TextColumn get value => text()();
+
+  @override
+  Set<Column> get primaryKey => {key};
+}
+
 @DriftDatabase(tables: [
   Notebooks,
   Tags,
@@ -125,6 +138,7 @@ class BlobRefs extends Table {
   Revisions,
   Attachments,
   BlobRefs,
+  Settings,
 ])
 class AppDatabase extends _$AppDatabase {
   AppDatabase(super.executor);
@@ -137,7 +151,7 @@ class AppDatabase extends _$AppDatabase {
       AppDatabase(openConnection(basePath: basePath));
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -148,6 +162,9 @@ class AppDatabase extends _$AppDatabase {
           }
           if (from <= 2) {
             await m.createTable(blobRefs);
+          }
+          if (from <= 3) {
+            await m.createTable(settings);
           }
         },
       );

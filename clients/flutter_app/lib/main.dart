@@ -6,5 +6,5 @@ import 'src/bootstrap.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final storage = await bootstrapStorage();
-  runApp(SuiApp(repository: storage.$2));
+  runApp(SuiApp(storage: storage));
 }

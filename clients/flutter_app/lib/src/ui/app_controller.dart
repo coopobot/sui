@@ -1,19 +1,79 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:note_core/note_core.dart';
+import 'package:path/path.dart' as p;
+import 'package:web_socket_channel/web_socket_channel.dart';
 
-/// 应用状态中枢：持有仓储，向 UI 暴露笔记本树/笔记列表/当前选中状态。
+/// 同步连接状态（供 UI 展示）。
+enum SyncState {
+  /// 尚未配置服务端地址 / Token。
+  unconfigured,
+
+  /// 已连接、空闲。
+  idle,
+
+  /// 正在 push / pull。
+  syncing,
+
+  /// 最近一次同步失败（[AppController.syncError] 有原因）。
+  error,
+}
+
+/// 应用状态中枢：持有仓储与同步客户端，向 UI 暴露笔记本树/笔记列表/同步状态。
 ///
-/// M1 用内存 ChangeNotifier（简单可靠）；后续如需更细粒度局部刷新，可
-/// 引入 watch/select，但当前规模以清晰为先。
+/// 离线优先：所有编辑先落本地 SQLite，再入 Outbox 异步推送；同步失败不影响
+/// 本地可用性，仅把 [syncState] 置为 [SyncState.error] 并保留原因。
 class AppController extends ChangeNotifier {
-  AppController({required NoteRepository repository, this.syncClient})
-      : _repository = repository;
+  AppController({
+    required NoteRepository repository,
+    required AppDatabase database,
+    String? dataDir,
+  })  : _repository = repository,
+        _db = database,
+        _dataDir = dataDir;
 
   final NoteRepository _repository;
+  final AppDatabase _db;
+
+  /// 原生平台的数据目录（用于附件缓存落盘）；Web 为 null。
+  final String? _dataDir;
+
   NoteRepository get repository => _repository;
 
-  /// 同步客户端（可选）：提供附件按需下载等跨端能力；未配置时附件只读本地缓存。
-  final SyncClient? syncClient;
+  late final SettingsStore _settings = SettingsStore(_db);
+  SettingsStore get settings => _settings;
+
+  AuthClient? _auth;
+
+  SyncClient? _syncClient;
+
+  /// 同步客户端：未配置服务端时为 null。
+  SyncClient? get syncClient => _syncClient;
+
+  CachedBlobStore? _blobStore;
+
+  /// 附件缓存（方案 B：按需拉取 + LRU 上限）。
+  CachedBlobStore? get blobStore => _blobStore;
+
+  SyncConfig _config = const SyncConfig();
+  SyncConfig get syncConfig => _config;
+
+  SyncState _syncState = SyncState.unconfigured;
+  SyncState get syncState => _syncState;
+
+  DateTime? _lastSyncedAt;
+  DateTime? get lastSyncedAt => _lastSyncedAt;
+
+  String? _syncError;
+  String? get syncError => _syncError;
+
+  int _cacheLimitBytes = 512 * 1024 * 1024;
+  int get cacheLimitBytes => _cacheLimitBytes;
+
+  WebSocketChannel? _ws;
+  StreamSubscription<dynamic>? _wsSub;
+  Timer? _syncDebounce;
 
   List<Notebook> _notebooks = [];
   List<NoteSummary> _notes = [];
@@ -35,13 +95,19 @@ class AppController extends ChangeNotifier {
   bool get showRevisionPanel => _showRevisionPanel;
   bool get inboxMode => _inboxMode;
 
-  bool get hasSelection => _selectedNotebookId != null || _query.isNotEmpty || _inboxMode;
+  bool get hasSelection =>
+      _selectedNotebookId != null || _query.isNotEmpty || _inboxMode;
 
-  /// 首次加载全部数据。
+  /// 首次加载：读同步配置 → 载入本地数据 → 若已配置则连接并同步。
   Future<void> bootstrap() async {
+    _config = await _settings.loadSyncConfig();
+    _cacheLimitBytes = await _settings.cacheLimitBytes();
     await refreshNotebooks();
     await refreshTags();
     await refreshNotes();
+    if (_config.isConfigured) {
+      await connect(_config, persist: false);
+    }
   }
 
   Future<void> refreshNotebooks() async {
@@ -62,7 +128,8 @@ class AppController extends ChangeNotifier {
     );
     // 收件箱模式：只显示来自剪藏的笔记
     if (_inboxMode) {
-      _notes = _notes.where((n) => n.note.sourceDevice.startsWith('clip:')).toList();
+      _notes =
+          _notes.where((n) => n.note.sourceDevice.startsWith('clip:')).toList();
     }
     notifyListeners();
   }
@@ -105,6 +172,7 @@ class AppController extends ChangeNotifier {
     _selectedNoteId = note.id;
     await refreshNotes();
     notifyListeners();
+    await _enqueueAndSchedule(note);
   }
 
   Future<void> saveNote(
@@ -113,13 +181,14 @@ class AppController extends ChangeNotifier {
     String? content,
     List<String>? tags,
   }) async {
-    await _repository.updateNoteContent(
+    final note = await _repository.updateNoteContent(
       id,
       title: title,
       contentMarkdown: content,
       tags: tags,
     );
     await refreshNotes();
+    await _enqueueAndSchedule(note);
   }
 
   Future<void> deleteNote(String id) async {
@@ -127,6 +196,207 @@ class AppController extends ChangeNotifier {
     if (_selectedNoteId == id) _selectedNoteId = null;
     await refreshNotes();
     notifyListeners();
+    final note = await _repository.getNote(id);
+    if (note != null) await _enqueueAndSchedule(note);
+  }
+
+  // ---- 同步 ----
+
+  /// 配置并连接服务端。[persist] 为真时把配置写入本地库。
+  ///
+  /// 传入未填齐（无地址或无 Token）的配置等价于「断开」。
+  Future<void> connect(SyncConfig cfg, {bool persist = true}) async {
+    await _teardownConnection();
+    final normalized =
+        cfg.copyWith(baseUrl: SyncConfig.normalizeBaseUrl(cfg.baseUrl));
+    _config = normalized;
+    if (persist) {
+      await _settings.saveSyncConfig(
+        baseUrl: normalized.baseUrl,
+        token: normalized.token,
+      );
+    }
+    if (!normalized.isConfigured) {
+      _syncState = SyncState.unconfigured;
+      _syncError = null;
+      notifyListeners();
+      return;
+    }
+
+    _blobStore = CachedBlobStore(
+      local: LocalBlobStore(_blobRoot()),
+      meta: SqliteBlobCacheMeta(_db),
+      maxBytes: _cacheLimitBytes,
+    );
+    _syncClient = SyncClient(
+      repository: _repository,
+      baseUrl: normalized.baseUrl,
+      deviceId: normalized.deviceId,
+      token: normalized.token,
+      blobStore: _blobStore,
+    );
+    _syncState = SyncState.idle;
+    _syncError = null;
+    notifyListeners();
+
+    _openWs();
+    await syncNow();
+  }
+
+  /// 断开连接：清掉地址与 Token（保留 deviceId 与本地数据）。
+  Future<void> disconnect() async {
+    await _settings.clearSyncConfig();
+    _config = _config.copyWith(baseUrl: '', token: '');
+    await _teardownConnection();
+    _syncState = SyncState.unconfigured;
+    _syncError = null;
+    notifyListeners();
+  }
+
+  /// 立即同步（push + pull）。未连接时为空操作。
+  Future<void> syncNow() async {
+    final client = _syncClient;
+    if (client == null) return;
+    if (_syncState == SyncState.syncing) return;
+
+    _syncState = SyncState.syncing;
+    _syncError = null;
+    notifyListeners();
+    try {
+      await client.sync();
+      _lastSyncedAt = DateTime.now();
+      _syncState = SyncState.idle;
+      await refreshNotebooks();
+      await refreshTags();
+      await refreshNotes();
+    } catch (e) {
+      _syncError = _describeError(e);
+      _syncState = SyncState.error;
+    }
+    notifyListeners();
+  }
+
+  /// 探测服务端连通性，成功返回服务端版本号，失败抛异常（UI 捕获展示）。
+  Future<String> testConnection(String baseUrl) =>
+      _authClient().ping(baseUrl);
+
+  /// 注册新账号并连接。成功返回 null，失败返回可展示的错误文案。
+  Future<String?> registerAndConnect({
+    required String baseUrl,
+    required String username,
+    required String password,
+  }) async {
+    try {
+      final token = await _authClient()
+          .register(baseUrl: baseUrl, username: username, password: password);
+      await connect(SyncConfig(
+        baseUrl: baseUrl,
+        token: token,
+        deviceId: _config.deviceId,
+      ));
+      return null;
+    } catch (e) {
+      return _describeError(e);
+    }
+  }
+
+  /// 登录并连接。成功返回 null，失败返回可展示的错误文案。
+  Future<String?> loginAndConnect({
+    required String baseUrl,
+    required String username,
+    required String password,
+  }) async {
+    try {
+      final token = await _authClient()
+          .login(baseUrl: baseUrl, username: username, password: password);
+      await connect(SyncConfig(
+        baseUrl: baseUrl,
+        token: token,
+        deviceId: _config.deviceId,
+      ));
+      return null;
+    } catch (e) {
+      return _describeError(e);
+    }
+  }
+
+  /// 直接以「地址 + 已有 Token」连接。
+  Future<void> connectWithToken({
+    required String baseUrl,
+    required String token,
+  }) =>
+      connect(SyncConfig(
+        baseUrl: baseUrl,
+        token: token,
+        deviceId: _config.deviceId,
+      ));
+
+  /// 调整附件缓存上限（字节）。下次连接生效。
+  Future<void> setCacheLimitBytes(int bytes) async {
+    _cacheLimitBytes = bytes;
+    await _settings.setCacheLimitBytes(bytes);
+    notifyListeners();
+  }
+
+  Future<void> _enqueueAndSchedule(Note note) async {
+    final client = _syncClient;
+    if (client == null) return;
+    await client.enqueue(note);
+    _syncDebounce?.cancel();
+    _syncDebounce = Timer(const Duration(milliseconds: 700), syncNow);
+  }
+
+  String _blobRoot() =>
+      _dataDir == null ? '' : p.join(_dataDir, 'blobs');
+
+  AuthClient _authClient() => _auth ??= AuthClient();
+
+  Future<void> _teardownConnection() async {
+    _syncDebounce?.cancel();
+    _syncDebounce = null;
+    await _wsSub?.cancel();
+    _wsSub = null;
+    await _ws?.sink.close();
+    _ws = null;
+    _syncClient?.close();
+    _syncClient = null;
+    _blobStore = null;
+  }
+
+  /// 订阅服务端变更广播：收到通知即拉取（多端即时感知）。
+  void _openWs() {
+    final base = _config.baseUrl;
+    if (base.isEmpty) return;
+    final scheme = base.startsWith('https') ? 'wss' : 'ws';
+    final host = base.replaceFirst(RegExp('^https?'), scheme);
+    try {
+      final ch = WebSocketChannel.connect(Uri.parse('$host/api/v1/ws'));
+      _ws = ch;
+      _wsSub = ch.stream.listen(
+        (_) => _onRemoteChange(),
+        onError: (_) {}, // WS 不可用不影响手动/定时同步
+        onDone: () {},
+      );
+    } catch (_) {
+      // 连接失败静默降级：同步仍可手动触发。
+    }
+  }
+
+  void _onRemoteChange() {
+    if (_syncState == SyncState.syncing) return;
+    syncNow();
+  }
+
+  String _describeError(Object e) {
+    if (e is HttpException) {
+      return switch (e.statusCode) {
+        409 => '用户已存在，请改用「登录」',
+        401 => '用户名或密码错误',
+        400 => '请求无效（用户名/密码不能为空）',
+        _ => 'HTTP ${e.statusCode}: ${e.body}',
+      };
+    }
+    return e.toString();
   }
 
   // ---- 修订历史 ----
@@ -164,9 +434,16 @@ class AppController extends ChangeNotifier {
 
   /// 附件字节是否已在本地缓存（未下载 ⇄ 已缓存）。
   Future<bool> isAttachmentCached(Attachment a) async {
-    final store = syncClient?.blobStore;
+    final store = _blobStore;
     if (store == null) return false;
     return store.exists(a.sha256);
+  }
+
+  /// 当前附件缓存占用与上限（设置页展示）。
+  Future<(int, int)> attachmentCacheUsage() async {
+    final store = _blobStore;
+    if (store == null) return (0, _cacheLimitBytes);
+    return (await store.cachedBytes, store.capacity);
   }
 
   final Set<String> _downloading = {};
@@ -177,7 +454,7 @@ class AppController extends ChangeNotifier {
   /// 打开 / 下载附件字节：命中缓存直接返回，未命中按需下载。
   /// 未配置同步客户端时返回 null（仅展示元数据）。
   Future<Uint8List?> openAttachment(Attachment a) async {
-    final client = syncClient;
+    final client = _syncClient;
     if (client == null) return null;
     final sha = a.sha256;
     _downloading.add(sha);
@@ -188,5 +465,15 @@ class AppController extends ChangeNotifier {
       _downloading.remove(sha);
       notifyListeners();
     }
+  }
+
+  @override
+  void dispose() {
+    _syncDebounce?.cancel();
+    _wsSub?.cancel();
+    _ws?.sink.close();
+    _syncClient?.close();
+    _auth?.close();
+    super.dispose();
   }
 }
