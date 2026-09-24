@@ -46,3 +46,7 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# drift worker 编译产物（源文件 web/drift_worker.dart；.js 本身需入库作为 Web 资源）
+web/drift_worker.dart.js.deps
+web/drift_worker.dart.js.map

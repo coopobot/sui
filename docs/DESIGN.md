@@ -156,6 +156,9 @@
 
 > 注：附件-笔记映射（attachments 表）的服务端同步、附件选择器/上传 UI 为后续增量项，当前交付聚焦"缓存压力受控"机制本身。
 
+> Web 端补充：浏览器无文件系统，`LocalBlobStore` 在 Web 退化为**进程内内存缓存**
+> （见 §19.5）。这与 BlobStore 的缓存语义一致，不构成数据丢失。
+
 **存储压力结论**
 
 - 移动端：本地占用 ≤ 512MB 上限（可配置），**与附件总量解耦**，压力可控。
@@ -163,3 +166,197 @@
 - 离线：未缓存附件不可看，但有占位提示；已缓存附件完整可用。
 
 ## 17. 项目目录结构（目标）
+
+```
+sui/
+├── Makefile                     # 服务端构建/测试入口
+├── README.md                    # 项目总览
+├── docs/
+│   ├── DESIGN.md                # 本文档（设计决策）
+│   ├── DEVELOPER.md             # 开发者文档（环境/接口/调试）
+│   └── USER_GUIDE.md            # 用户使用说明
+├── protos/                      # 同步协议定义
+├── server/                      # Go 服务端
+│   ├── cmd/sui-server/          # 入口
+│   └── internal/
+│       ├── api/                 # HTTP 路由与 handler
+│       ├── auth/                # 账号与 token
+│       ├── blob/                # 内容寻址 Blob 存储
+│       ├── clip/                # 网页剪藏净化
+│       ├── cors/                # CORS
+│       ├── store/               # SQLite 持久化
+│       ├── sync/                # push/pull 协议与冲突检测
+│       ├── version/             # 版本信息
+│       └── ws/                  # WebSocket 变更广播
+├── extension/                   # Chrome MV3 剪藏扩展
+└── clients/
+    ├── note_core/               # 多端共享核心（纯 Dart，不依赖 Flutter）
+    │   ├── lib/src/
+    │   │   ├── db/
+    │   │   │   ├── app_database.dart      # drift 表定义 + 迁移
+    │   │   │   └── connection/            # 平台条件导入的连接层
+    │   │   │       ├── connection.dart            # 壳（条件导出）
+    │   │   │       ├── connection_io.dart         # 原生：drift/native + 文件
+    │   │   │       ├── connection_web.dart        # Web：drift/wasm + 浏览器持久化
+    │   │   │       └── connection_unsupported.dart
+    │   │   ├── blob/
+    │   │   │   ├── blob_store.dart        # 抽象接口
+    │   │   │   ├── local_blob_store.dart  # 壳（条件导出）
+    │   │   │   ├── local_blob_store_io.dart   # 原生：文件系统分片
+    │   │   │   ├── local_blob_store_web.dart  # Web：内存缓存
+    │   │   │   ├── cached_blob_store.dart # LRU + 容量记账
+    │   │   │   └── sqlite_blob_cache_meta.dart
+    │   │   ├── models/                    # Note/Notebook/Tag/Revision/Attachment
+    │   │   ├── repository/note_repository.dart
+    │   │   ├── sync/sync_client.dart      # push/pull + ensureBlob
+    │   │   └── util/ids.dart
+    │   └── test/                          # 26 用例
+    └── flutter_app/                       # Flutter 客户端
+        ├── lib/src/
+        │   ├── app.dart / main.dart
+        │   ├── bootstrap.dart             # 存储初始化（默认落库）
+        │   ├── platform/                  # 数据目录条件导入
+        │   └── ui/                        # 三栏外壳/编辑器/修订面板
+        ├── web/
+        │   ├── index.html
+        │   ├── sqlite3.wasm               # SQLite 引擎（Web）
+        │   ├── drift_worker.dart          # worker 入口源码
+        │   └── drift_worker.dart.js       # worker 编译产物
+        └── test/widget_test.dart
+```
+
+> 平台脚手架现状：仓库目前只有 `web/`。桌面/移动需执行
+> `flutter create --platforms=windows,linux,macos,android,ios .` 生成后再构建。
+
+## 19. 平台分层：条件导入与构建目标
+
+### 19.1 问题（已修复）
+
+`note_core` 原先在 `app_database.dart`、`local_blob_store.dart` 中**无条件**
+`import 'dart:io'` 与 `package:drift/native.dart`（后者间接引入 `dart:ffi`）。
+两者在 Web 平台都不存在，导致 `flutter build web` 直接编译失败
+（`Dart library 'dart:ffi' is not available on this platform`）。
+而 `flutter_app` 当时只有 `web/` 一个平台目录 —— 即**没有任何可构建目标**。
+
+### 19.2 方案：条件导入分层
+
+平台相关能力下沉为「壳文件 + 各平台实现」，由 Dart 条件导入在编译期选择：
+
+| 能力 | 壳文件 | 原生实现 | Web 实现 |
+|------|--------|----------|----------|
+| 数据库连接 | `db/connection/connection.dart` | `connection_io.dart`：`drift/native` + SQLite 文件 | `connection_web.dart`：`drift/wasm` + 浏览器持久化 |
+| Blob 存储 | `blob/local_blob_store.dart` | `local_blob_store_io.dart`：文件系统分片 | `local_blob_store_web.dart`：内存缓存 |
+| 数据目录 | `flutter_app/src/platform/data_dir.dart` | `data_dir_io.dart`：`path_provider` | `data_dir_web.dart`：返回 `null` |
+
+条件常量用 `dart.library.io`（原生）与 `dart.library.js_interop`（Web）。
+**判定顺序是关键**：`dart.library.io` 必须排在前面 —— 已实测
+`dart.library.js_interop` 在 Dart VM 上为 `false`，但仍以显式顺序兜底，
+避免未来 SDK 行为变化导致 VM 误选 Web 实现。
+
+### 19.3 Web 端持久化
+
+`WasmDatabase.open` 需要 `flutter_app/web/` 下两个资源：
+
+| 资源 | 来源 | 大小 |
+|------|------|------|
+| `sqlite3.wasm` | sqlite3.dart releases（版本需与 `sqlite3` 依赖一致，当前 2.9.4） | ~714KB |
+| `drift_worker.dart.js` | 由 `web/drift_worker.dart` 经 `dart compile js -O4` 生成 | ~355KB |
+
+重新生成命令见 DEVELOPER.md。drift 会探测浏览器能力并按可靠性择优：
+OPFS(shared) → OPFS(locks) → IndexedDB(shared) → IndexedDB(unsafe) → 内存。
+
+> 实测（Chrome、非跨域隔离 `crossOriginIsolated=false`、无 `SharedArrayBuffer`）：
+> 落到 **IndexedDB** 持久化 —— `indexedDB.databases()` 中存在名为 `sui` 的库，
+> 存储占用约 208KB，**非内存回退**。
+
+### 19.4 数据落库位置
+
+| 平台 | 位置 |
+|------|------|
+| 桌面 / 移动 | `<应用支持目录>/sui/sui.sqlite`（`path_provider`，目录不存在时自动创建） |
+| Web | 浏览器 OPFS / IndexedDB（库名 `sui`） |
+| 测试 | 内存库（`AppDatabase.memory()`） |
+
+选「应用支持目录」而非「文档目录」：数据库属应用内部状态，不应出现在用户可见
+的文件列表中，也避免被系统云盘同步误处理。
+
+### 19.5 Web 端 Blob 的取舍
+
+Web 无文件系统，`LocalBlobStore` 在 Web 退化为**进程内内存缓存**。这是可接受的：
+方案 B 中 BlobStore 本就是缓存语义（正本在服务端、按需拉取），刷新页面后重新
+下载即可，不构成数据丢失。若后续需要 Web 端跨会话缓存附件字节，可再补一个
+IndexedDB 实现（壳文件的第三个分支）。
+
+### 19.6 构建目标现状
+
+| 目标 | 状态 |
+|------|------|
+| Web | ✅ 可构建、已在真实浏览器验证启动（无控制台错误） |
+| 桌面（Windows/macOS/Linux） | ⚠️ 代码路径已就绪，缺平台脚手架目录 |
+| 移动（Android/iOS） | ⚠️ 代码路径已就绪，缺平台脚手架目录 |
+
+## 20. 当前状态与已知缺口（滚动更新）
+
+> 本节随修复进度滚动更新，用于区分「设计目标」与「已落地」。
+
+### 20.1 已落地并验证
+
+- 服务端：Go 构建通过、7/7 测试通过；`ping`/`register`/`login`/`push`/`pull`/
+  `blobs`(HEAD/PUT/GET)/`revisions`/`clips` 全部实测正常，鉴权 401、重复注册 409、
+  坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
+- note_core：26/26 测试通过（含新增落盘持久化 2 用例）。
+- Web 构建：`flutter build web` 成功；真实浏览器验证启动、IndexedDB 落库。
+- 代码质量：`flutter analyze` 两个包 0 问题。
+
+### 20.2 待修复缺口
+
+| # | 缺口 | 影响 |
+|---|------|------|
+| 1 | **同步链路未接线**：`SyncClient` 从未实例化，`blobStore` 从未注入 | 客户端实为纯本地编辑器；附件按需下载/LRU 机制是死代码 |
+| 2 | 无登录 / 服务端地址配置 UI | 客户端无法连接服务端 |
+| 3 | 服务端 `attachments` 表为半成品（建表但无读写方法与协议字段） | 附件-笔记映射无法跨端重建 |
+| 4 | 无附件上传 / 选择器 | 用户无法添加附件 |
+| 5 | 缺桌面/移动平台脚手架目录 | 这些端暂不可构建（代码路径已就绪） |
+| 6 | `lib/src/home_page.dart` 为 M0 死代码 | 冗余，易误导 |
+| 7 | README/DEVELOPER 的运行命令与实际不符 | 按文档操作会失败 |
+| 8 | 文档「核心特性」全 ✅ 但部分未在客户端生效 | 认知偏差 |
+
+### 20.3 未实现的设计项
+
+- 缩略图生成（§18 方案 C）。
+- 桌面端「全量镜像」开关。
+- Web 端 BlobStore 的 IndexedDB 实现（当前为内存）。
+
+### 20.4 修复日志（按顺序滚动更新）
+
+#### 修复 1 ✅ 客户端可构建性 + 数据持久化
+
+对应 §19（条件导入分层）与 §19.4（数据落库位置）。原状：`note_core` 无条件
+`import 'dart:io'` / `package:drift/native.dart`（间接引入 `dart:ffi`），Web 构建
+直接失败；且 `flutter_app` 只有 `web/` 一个平台目录，客户端实际无可构建目标。
+持久化侧原用内存库、未接 `path_provider`，重启即丢数据。
+
+落地内容：
+
+| 项 | 文件 | 说明 |
+|----|------|------|
+| 连接层条件导入 | `note_core/lib/src/db/connection/` | 壳 + io / web / unsupported 三实现 |
+| Blob 层条件导入 | `note_core/lib/src/blob/local_blob_store*.dart` | 原生文件系统分片 / Web 内存缓存 |
+| 数据目录 | `flutter_app/lib/src/platform/data_dir*.dart` | 原生 `path_provider` 应用支持目录 / Web `null` |
+| 存储初始化 | `flutter_app/lib/src/bootstrap.dart` + `main.dart` | 启动即落库，`AppDatabase.file()` 默认持久化 |
+| Web 引擎资源 | `flutter_app/web/sqlite3.wasm`、`drift_worker.dart(.js)` | `drift/wasm` 运行必需，已入库 |
+| 回归测试 | `note_core/test/persistence_test.dart` | 落盘 → 关闭 → 重开，数据保留；目录自动创建 |
+
+验收（本次实测）：
+
+| 检查 | 命令 | 结果 |
+|------|------|------|
+| 服务端 | `go build ./... && go test -count=1 -v ./internal/api/` | 构建通过，7/7 PASS |
+| note_core 测试 | `dart test` | 26/26 通过 |
+| note_core 静态检查 | `dart analyze` | No issues found |
+| 客户端测试 | `flutter test` | 2/2 通过 |
+| 客户端静态检查 | `flutter analyze` | No issues found |
+| Web 构建 | `flutter build web --release` | ✓ Built build/web |
+
+> 环境备注：WSL 内 Go 工具链位于 `/home/aiuser/go-sdk/go/bin`、Flutter 位于
+> `/home/aiuser/flutter/bin`，二者均不在默认 `PATH`，需显式指定绝对路径调用。

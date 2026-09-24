@@ -72,9 +72,12 @@ dart --version
 
 > 国内网络建议配置镜像：`PUB_HOSTED_URL` 与 `FLUTTER_STORAGE_BASE_URL` 指向镜像站。
 
-### 1.4 SQLite3 native 库（drift 依赖）
+### 1.4 SQLite3 native 库（drift 依赖，仅原生平台）
 
-note_core 使用 drift 访问 SQLite，运行需要 `libsqlite3` 动态库：
+`note_core` 在**原生平台**（桌面 / 移动 / Dart VM 测试）通过 `drift/native` 访问
+SQLite，运行需要 `libsqlite3` 动态库：
+
+> **Web 端不需要本节的配置** —— Web 走 `drift/wasm`，引擎是 `web/sqlite3.wasm`，见 §3.4。
 
 **Ubuntu / Debian（WSL 或 Linux）**
 
@@ -177,10 +180,54 @@ cd clients/flutter_app
 flutter pub get
 flutter analyze                # 静态检查（当前 0 问题）
 flutter test                   # widget 测试
-flutter run -d windows|chrome|linux|android
+
+# 运行 / 构建
+flutter run -d chrome          # Web（当前唯一已配置的平台）
+flutter build web              # 产出 build/web
 ```
 
-### 3.4 顶层 Makefile
+> **平台脚手架现状**：仓库目前只包含 `web/` 平台目录，因此**只有 Web 可直接运行**。
+> `note_core` 的桌面/移动代码路径已就绪（`path_provider` + 文件库），但需先生成脚手架：
+>
+> ```bash
+> cd clients/flutter_app
+> flutter create --platforms=windows,linux,macos,android,ios .
+> ```
+>
+> 生成后即可 `flutter run -d windows` / `-d linux` / `-d android` 等。
+
+### 3.4 Web 端资源（sqlite3.wasm 与 drift worker）
+
+Web 端用 `drift/wasm` 访问 SQLite，需要 `clients/flutter_app/web/` 下两个**已入库**的资源：
+
+| 资源 | 说明 |
+|------|------|
+| `sqlite3.wasm` | SQLite 的 WebAssembly 引擎 |
+| `drift_worker.dart.js` | drift worker（承载 sqlite3 与浏览器文件系统模拟） |
+
+`drift_worker.dart.js` 是编译产物，源码为 `web/drift_worker.dart`。**修改源码后需重新生成**：
+
+```bash
+cd clients/flutter_app
+dart compile js -O4 --no-source-maps web/drift_worker.dart -o web/drift_worker.dart.js
+```
+
+> 编译会额外产生 `drift_worker.dart.js.deps`（依赖清单，运行不需要），已在
+> `.gitignore` 中忽略，可随时删除。
+
+`sqlite3.wasm` 的版本必须与 `note_core` 的 `sqlite3` 依赖版本一致（当前 `2.9.4`）：
+
+```bash
+cd clients/flutter_app/web
+curl -L -o sqlite3.wasm \
+  https://github.com/simolus3/sqlite3.dart/releases/download/sqlite3-2.9.4/sqlite3.wasm
+```
+
+> 缺失任一资源时，浏览器控制台会出现 drift worker / wasm 相关报错，数据库将回退为
+> **内存实现**（数据不持久化）。验证是否落库：DevTools 中执行
+> `indexedDB.databases()`，应能看到名为 `sui` 的库。
+
+### 3.5 顶层 Makefile
 
 ```bash
 make build-server   # 编译服务端到 server/bin/sui-server
@@ -189,15 +236,18 @@ make test           # 服务端测试
 make clean
 ```
 
-### 3.5 端到端验证
+### 3.6 端到端验证
 
 手动联调流程：
 
 1. 启动服务端：`make run-server`
 2. 注册账号获取 token（见 USER_GUIDE §3）
-3. 启动客户端：`cd clients/flutter_app && flutter run -d windows`
-4. 新建一篇笔记 → 再开第二个客户端（`-d chrome`）→ 观察 WebSocket 通知触发同步
+3. 启动客户端：`cd clients/flutter_app && flutter run -d chrome`
+4. 新建一篇笔记 → 再开第二个客户端窗口 → 观察 WebSocket 通知触发同步
 5. 双端同时编辑同一笔记制造冲突 → 验证自动合并不丢字
+
+> 注：客户端与服务端的连接（登录 / 服务器地址配置）UI 尚未实现，当前端到端
+> 联调需通过代码注入 `SyncClient`，见 DESIGN.md §20.2。
 
 ---
 

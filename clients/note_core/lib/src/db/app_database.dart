@@ -1,8 +1,6 @@
-import 'dart:io';
-
 import 'package:drift/drift.dart';
-import 'package:drift/native.dart';
-import 'package:path/path.dart' as p;
+
+import 'connection/connection.dart';
 
 part 'app_database.g.dart';
 
@@ -132,14 +130,11 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase(super.executor);
 
   /// 纯内存库（测试用）。
-  AppDatabase.memory() : super(NativeDatabase.memory());
+  AppDatabase.memory() : super(openConnection(inMemory: true));
 
-  /// 落地库：文件在 [basePath]/sui.sqlite；[basePath] 为空则用当前目录。
-  factory AppDatabase.file({String? basePath}) {
-    final dir = basePath ?? Directory.current.path;
-    final file = p.join(dir, 'sui.sqlite');
-    return AppDatabase(NativeDatabase(File(file)));
-  }
+  /// 落地库：原生在 [basePath]/sui.sqlite；Web 走浏览器持久化（忽略 [basePath]）。
+  factory AppDatabase.file({String? basePath}) =>
+      AppDatabase(openConnection(basePath: basePath));
 
   @override
   int get schemaVersion => 3;
