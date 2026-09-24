@@ -69,10 +69,25 @@ func (s *Store) migrate() error {
 			refcount INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS attachments (
+			id TEXT PRIMARY KEY,
+			note_id TEXT NOT NULL,
+			filename TEXT NOT NULL DEFAULT '',
+			mime_kind TEXT NOT NULL DEFAULT '',
+			byte_size INTEGER NOT NULL DEFAULT 0,
+			sha256 TEXT NOT NULL DEFAULT '',
+			storage_ref TEXT NOT NULL DEFAULT '',
+			thumbnail_ref TEXT NOT NULL DEFAULT '',
+			embedded_pos INTEGER NOT NULL DEFAULT 0,
+			is_deleted INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_revisions_note ON revisions(note_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_revisions_note_ver ON revisions(note_id, version DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_notes_isdel ON notes(is_deleted, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_attachments_note ON attachments(note_id)`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
@@ -298,6 +313,189 @@ func (s *Store) GetRevision(noteID string, version int) (*RevisionRow, error) {
 	return &r, nil
 }
 
+// ---- 附件映射 ----
+
+// AttachmentRow 表示服务端附件元数据。字节存 Blob（sha256 内容寻址），
+// 这里只存映射与引用，因此可随笔记一起全量交换（数据极小）。
+type AttachmentRow struct {
+	ID           string
+	NoteID       string
+	Filename     string
+	MimeKind     string
+	ByteSize     int
+	SHA256       string
+	StorageRef   string
+	ThumbnailRef string
+	EmbeddedPos  int
+	IsDeleted    bool
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+const attachmentCols = `id, note_id, filename, mime_kind, byte_size, sha256,
+	storage_ref, thumbnail_ref, embedded_pos, is_deleted, created_at, updated_at`
+
+func scanAttachment(scan func(dest ...any) error) (AttachmentRow, error) {
+	var a AttachmentRow
+	var del int
+	var created, updated string
+	if err := scan(&a.ID, &a.NoteID, &a.Filename, &a.MimeKind, &a.ByteSize, &a.SHA256,
+		&a.StorageRef, &a.ThumbnailRef, &a.EmbeddedPos, &del, &created, &updated); err != nil {
+		return a, err
+	}
+	a.IsDeleted = del != 0
+	a.CreatedAt = parseTime(created)
+	a.UpdatedAt = parseTime(updated)
+	return a, nil
+}
+
+// ListAttachments 返回指定笔记的全部附件映射（含墓碑，供客户端收敛删除）。
+func (s *Store) ListAttachments(noteID string) ([]AttachmentRow, error) {
+	rows, err := s.db.Query(
+		`SELECT `+attachmentCols+` FROM attachments WHERE note_id = ? ORDER BY embedded_pos, id`,
+		noteID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AttachmentRow
+	for rows.Next() {
+		a, err := scanAttachment(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ListAttachmentsForNotes 批量取多篇笔记的附件映射，按 note_id 分组。
+func (s *Store) ListAttachmentsForNotes(noteIDs []string) (map[string][]AttachmentRow, error) {
+	out := map[string][]AttachmentRow{}
+	if len(noteIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(noteIDs))
+	for i, id := range noteIDs {
+		args[i] = id
+	}
+	q := `SELECT ` + attachmentCols + ` FROM attachments WHERE note_id IN (` +
+		placeholders(len(noteIDs)) + `) ORDER BY note_id, embedded_pos, id`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		a, err := scanAttachment(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out[a.NoteID] = append(out[a.NoteID], a)
+	}
+	return out, rows.Err()
+}
+
+// SyncAttachments 以 id 为键 upsert 一篇笔记的附件映射，并维护 blobs 引用计数。
+//
+// 引用计数语义：refcount = 指向该 sha256 的「有效」附件映射条数。
+// 新增有效映射 +1；映射被墓碑化 -1；同一映射改指另一个 sha256 则旧 -1 新 +1。
+// 计数只增不减的重复推送因此是幂等的。
+func (s *Store) SyncAttachments(noteID string, items []AttachmentRow) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	for _, it := range items {
+		var prevHash string
+		var prevDel int
+		prevErr := tx.QueryRow(
+			`SELECT sha256, is_deleted FROM attachments WHERE id = ?`, it.ID,
+		).Scan(&prevHash, &prevDel)
+
+		created := it.CreatedAt
+		if created.IsZero() {
+			created = time.Now()
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO attachments (`+attachmentCols+`)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   note_id=excluded.note_id, filename=excluded.filename,
+			   mime_kind=excluded.mime_kind, byte_size=excluded.byte_size,
+			   sha256=excluded.sha256, storage_ref=excluded.storage_ref,
+			   thumbnail_ref=excluded.thumbnail_ref, embedded_pos=excluded.embedded_pos,
+			   is_deleted=excluded.is_deleted, updated_at=excluded.updated_at`,
+			it.ID, noteID, it.Filename, it.MimeKind, it.ByteSize, it.SHA256,
+			it.StorageRef, it.ThumbnailRef, it.EmbeddedPos, b2i(it.IsDeleted),
+			created.UTC().Format(time.RFC3339), ts,
+		); err != nil {
+			return err
+		}
+
+		wasActive := prevErr == nil && prevDel == 0 && prevHash != ""
+		nowActive := !it.IsDeleted && it.SHA256 != ""
+		switch {
+		case !wasActive && nowActive:
+			if err := adjustBlobRef(tx, it.SHA256, +1, it.ByteSize); err != nil {
+				return err
+			}
+		case wasActive && !nowActive:
+			if err := adjustBlobRef(tx, prevHash, -1, 0); err != nil {
+				return err
+			}
+		case wasActive && nowActive && prevHash != it.SHA256:
+			if err := adjustBlobRef(tx, prevHash, -1, 0); err != nil {
+				return err
+			}
+			if err := adjustBlobRef(tx, it.SHA256, +1, it.ByteSize); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// adjustBlobRef 在事务内调整 blob 引用计数（不存在且 delta>0 时补建记录）。
+func adjustBlobRef(tx *sql.Tx, hash string, delta, size int) error {
+	if hash == "" || delta == 0 {
+		return nil
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM blobs WHERE sha256 = ?`, hash).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		if delta < 0 {
+			return nil
+		}
+		_, err := tx.Exec(
+			`INSERT INTO blobs (sha256, size, refcount, created_at) VALUES (?, ?, ?, ?)`,
+			hash, size, delta, time.Now().UTC().Format(time.RFC3339),
+		)
+		return err
+	}
+	_, err := tx.Exec(
+		`UPDATE blobs SET refcount = MAX(0, refcount + ?) WHERE sha256 = ?`, delta, hash,
+	)
+	return err
+}
+
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	out := "?"
+	for i := 1; i < n; i++ {
+		out += ",?"
+	}
+	return out
+}
+
 func upsert(tx *sql.Tx, q string, args ...any) error {
 	_, err := tx.Exec(q, args...)
 	return err
@@ -312,21 +510,33 @@ func (s *Store) BlobExists(hash string) (bool, error) {
 	return n > 0, err
 }
 
-// AddBlobRef 记录新 blob（幂等），或对已存在的引用计数 +1。返回是否存在。
-func (s *Store) AddBlobRef(hash string, size int) (exists bool, err error) {
+// EnsureBlob 登记 blob 记录（幂等），返回此前是否已存在。
+//
+// 引用计数不在这里维护：refcount 唯一来源是附件映射（见 [Store.SyncAttachments]），
+// 否则「上传字节」与「挂载附件」会对同一 blob 重复计数。
+func (s *Store) EnsureBlob(hash string, size int) (exists bool, err error) {
 	existing, err := s.BlobExists(hash)
 	if err != nil {
 		return false, err
 	}
 	if existing {
-		_, err = s.db.Exec(`UPDATE blobs SET refcount = refcount + 1 WHERE sha256 = ?`, hash)
-		return true, err
+		return true, nil
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO blobs (sha256, size, refcount, created_at) VALUES (?, ?, 1, ?)`,
+		`INSERT INTO blobs (sha256, size, refcount, created_at) VALUES (?, ?, 0, ?)`,
 		hash, size, time.Now().UTC().Format(time.RFC3339),
 	)
 	return false, err
+}
+
+// BlobRefCount 返回 blob 当前引用计数（不存在返回 0）。
+func (s *Store) BlobRefCount(hash string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT refcount FROM blobs WHERE sha256 = ?`, hash).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return n, err
 }
 
 // GC 清理 refcount<=0 的孤儿 blob，返回被清理的 hash。

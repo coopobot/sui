@@ -102,8 +102,8 @@ func TestSyncPushAndPull(t *testing.T) {
 	}
 	var pushResp struct {
 		Results []struct {
-			ID string `json:"id"`
-			Accepted bool `json:"accepted"`
+			ID       string `json:"id"`
+			Accepted bool   `json:"accepted"`
 		} `json:"results"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&pushResp); err != nil {
@@ -160,9 +160,9 @@ func TestSyncConflictReturned(t *testing.T) {
 	rec := authReq(srv, token, http.MethodPost, "/api/v1/sync/push", body)
 	var resp struct {
 		Results []struct {
-			ID string `json:"id"`
-			Accepted bool `json:"accepted"`
-			ServerVersion int `json:"serverVersion"`
+			ID            string `json:"id"`
+			Accepted      bool   `json:"accepted"`
+			ServerVersion int    `json:"serverVersion"`
 		} `json:"results"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
@@ -255,6 +255,148 @@ func TestRevisionListAndGet(t *testing.T) {
 	rec = authReq(srv, token, http.MethodGet, "/api/v1/notes/note-r1/revisions/99", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing revision, got %d", rec.Code)
+	}
+}
+
+func TestAttachmentMappingSync(t *testing.T) {
+	srv := newTestServer(t)
+	token := register(t, srv)
+
+	type attJSON struct {
+		ID           string `json:"id"`
+		Filename     string `json:"filename"`
+		MimeKind     string `json:"mimeKind"`
+		ByteSize     int    `json:"byteSize"`
+		SHA256       string `json:"sha256"`
+		StorageRef   string `json:"storageRef"`
+		ThumbnailRef string `json:"thumbnailRef"`
+		EmbeddedPos  int    `json:"embeddedPos"`
+		IsDeleted    bool   `json:"isDeleted"`
+		CreatedAt    string `json:"createdAt"`
+	}
+
+	push := func(base int, atts []attJSON) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"clientId": "dev-a", "items": []map[string]any{
+				{
+					"id": "note-a1", "title": "带附件的笔记", "content": "![](sui://sha1)",
+					"baseVersion": base, "version": base + 1, "sourceDevice": "dev-a",
+					"attachments": atts,
+				},
+			},
+		})
+		rec := authReq(srv, token, http.MethodPost, "/api/v1/sync/push", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("push failed: %d %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Results []struct {
+				Accepted bool `json:"accepted"`
+			} `json:"results"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Results) != 1 || !resp.Results[0].Accepted {
+			t.Fatalf("expected accepted, got %+v", resp.Results)
+		}
+	}
+
+	// 1) 首次推送：笔记 + 一个附件映射 → 引用计数 +1
+	push(0, []attJSON{{
+		ID: "att-1", Filename: "图.png", MimeKind: "image",
+		ByteSize: 2048, SHA256: "sha1", StorageRef: "sha1",
+		EmbeddedPos: 0, CreatedAt: "2026-01-01T00:00:00Z",
+	}})
+
+	n, err := srv.store.BlobRefCount("sha1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected refcount=1 after first push, got %d", n)
+	}
+
+	// 另一台设备 pull → 拿到笔记与其附件映射
+	rec := authReq(srv, token, http.MethodGet, "/api/v1/sync/pull?since=1970-01-01T00:00:00Z", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pull failed: %d", rec.Code)
+	}
+	var pullResp struct {
+		Notes []struct {
+			ID          string    `json:"id"`
+			Attachments []attJSON `json:"attachments"`
+		} `json:"notes"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&pullResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(pullResp.Notes) != 1 || len(pullResp.Notes[0].Attachments) != 1 {
+		t.Fatalf("expected 1 note with 1 attachment, got %+v", pullResp.Notes)
+	}
+	got := pullResp.Notes[0].Attachments[0]
+	if got.ID != "att-1" || got.SHA256 != "sha1" || got.Filename != "图.png" || got.ByteSize != 2048 {
+		t.Fatalf("unexpected attachment payload: %+v", got)
+	}
+
+	// 2) 重复推送同一映射（幂等）→ 引用计数仍为 1，不重复累加
+	push(1, []attJSON{{
+		ID: "att-1", Filename: "图.png", MimeKind: "image",
+		ByteSize: 2048, SHA256: "sha1", StorageRef: "sha1",
+	}})
+	if n, _ = srv.store.BlobRefCount("sha1"); n != 1 {
+		t.Fatalf("expected refcount=1 after idempotent re-push, got %d", n)
+	}
+
+	// 3) 同一映射改指另一个 blob → 旧 -1、新 +1
+	push(2, []attJSON{{
+		ID: "att-1", Filename: "图.png", MimeKind: "image",
+		ByteSize: 4096, SHA256: "sha2", StorageRef: "sha2",
+	}})
+	if n, _ = srv.store.BlobRefCount("sha1"); n != 0 {
+		t.Fatalf("expected refcount=0 for old blob, got %d", n)
+	}
+	if n, _ = srv.store.BlobRefCount("sha2"); n != 1 {
+		t.Fatalf("expected refcount=1 for new blob, got %d", n)
+	}
+
+	// 4) 墓碑化附件 → 引用计数归零，且 pull 能带回墓碑（供对端收敛删除）
+	push(3, []attJSON{{
+		ID: "att-1", Filename: "图.png", MimeKind: "image",
+		ByteSize: 4096, SHA256: "sha2", StorageRef: "sha2", IsDeleted: true,
+	}})
+	if n, _ = srv.store.BlobRefCount("sha2"); n != 0 {
+		t.Fatalf("expected refcount=0 after tombstone, got %d", n)
+	}
+
+	rec = authReq(srv, token, http.MethodGet, "/api/v1/sync/pull?since=1970-01-01T00:00:00Z", nil)
+	pullResp.Notes = nil
+	if err := json.NewDecoder(rec.Body).Decode(&pullResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(pullResp.Notes) != 1 || len(pullResp.Notes[0].Attachments) != 1 {
+		t.Fatalf("expected tombstoned attachment still listed, got %+v", pullResp.Notes)
+	}
+	if !pullResp.Notes[0].Attachments[0].IsDeleted {
+		t.Fatal("expected isDeleted=true on tombstoned attachment")
+	}
+
+	// 5) 孤儿 blob 可被 GC 回收（refcount=0）
+	orphans, err := srv.store.GCOrphanBlobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	has := func(hash string) bool {
+		for _, h := range orphans {
+			if h == hash {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("sha1") || !has("sha2") {
+		t.Fatalf("expected both orphan blobs collected, got %v", orphans)
 	}
 }
 

@@ -14,6 +14,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import '../blob/blob_store.dart';
+import '../models/attachment.dart';
 import '../models/note.dart';
 import '../repository/note_repository.dart';
 
@@ -71,23 +72,31 @@ class SyncClient {
 
   /// 把本地出站队列推给服务端，并处理冲突。
   ///
+  /// 每条笔记会带上它当前的**全部**附件映射（含墓碑，否则删除无法传播）——
+  /// 映射只是元数据、极小，随笔记走天然幂等；附件字节另走 `/blobs/{hash}`。
+  ///
   /// 返回每条的结果；冲突条目保留在 Outbox（将在本地合并后重新提交）。
   Future<List<PushResultItem>> push() async {
     if (_outbox.isEmpty) return const [];
-    final body = jsonEncode({
-      'clientId': deviceId,
-      'items': _outbox
-          .map((e) => {
-                'id': e.noteId,
-                'title': e.title,
-                'content': e.content,
-                'baseVersion': e.baseVersion,
-                'version': e.version,
-                'isDeleted': e.isDeleted,
-                'sourceDevice': deviceId,
-              })
-          .toList(),
-    });
+    final items = <Map<String, dynamic>>[];
+    for (final e in _outbox) {
+      final attachments = await repository.listAttachments(
+        noteId: e.noteId,
+        includeDeleted: true,
+      );
+      items.add({
+        'id': e.noteId,
+        'title': e.title,
+        'content': e.content,
+        'baseVersion': e.baseVersion,
+        'version': e.version,
+        'isDeleted': e.isDeleted,
+        'sourceDevice': deviceId,
+        if (attachments.isNotEmpty)
+          'attachments': attachments.map((a) => a.toJson()).toList(),
+      });
+    }
+    final body = jsonEncode({'clientId': deviceId, 'items': items});
     final resp = await _authPost('/api/v1/sync/push', body);
     final data = jsonDecode(resp) as Map<String, dynamic>;
     final results = (data['results'] as List)
@@ -145,6 +154,7 @@ class SyncClient {
           sourceDevice: (n['sourceDevice'] as String?) ?? '',
         );
         _baseVersion[id] = ver;
+        await _applyRemoteAttachments(id, n);
         count++;
         continue;
       }
@@ -153,12 +163,30 @@ class SyncClient {
       // 简单实现：远端为权威线，本地草稿保持为"基于新 base 的草稿"——
       // 因为 Outbox 中已存在本地变更，下次 push 会以新 base 声明。
       _baseVersion[id] = ver;
+      await _applyRemoteAttachments(id, n);
       if (isDeleted && !local.isDeleted) {
         await repository.markNoteDeleted(id);
         count++;
       }
     }
     return count;
+  }
+
+  /// 落库服务端随笔记下行的附件映射（幂等）。
+  ///
+  /// 只写元数据与本地引用计数；**字节不在这里拉**——打开附件时才走
+  /// [ensureBlob] 按需下载（方案 B）。
+  Future<void> _applyRemoteAttachments(
+    String noteId,
+    Map<String, dynamic> note,
+  ) async {
+    final list = (note['attachments'] as List?)?.cast<Map<String, dynamic>>();
+    if (list == null || list.isEmpty) return;
+    for (final a in list) {
+      await repository.upsertRemoteAttachment(
+        Attachment.fromJson(a, noteId: noteId),
+      );
+    }
   }
 
   /// 一次性：push + pull。返回 (推送结果数, 拉取条数)。

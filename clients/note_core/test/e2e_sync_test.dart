@@ -3,7 +3,9 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart';
 import 'package:note_core/note_core.dart';
 import 'package:test/test.dart';
@@ -125,5 +127,90 @@ void main() {
     client.close();
     await dbA.close();
     await dbB.close();
+  });
+
+  test('端到端：附件映射随笔记同步，字节按需下载', () async {
+    final client = Client();
+    final regResp = await client.post(
+      Uri.parse('$serverUrl/api/v1/register'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'username': 'bob', 'password': 'x'}),
+    );
+    expect(regResp.statusCode, 200);
+    final token = (jsonDecode(regResp.body) as Map)['token'] as String;
+
+    // 附件字节内容寻址：hash = sha256(bytes)
+    final bytes = Uint8List.fromList(utf8.encode('附件字节内容 hello'));
+    final hash = sha256.convert(bytes).toString();
+
+    // 设备 A：上传字节 → 建笔记 → 挂附件 → 推送
+    final putResp = await client.put(
+      Uri.parse('$serverUrl/api/v1/blobs/$hash'),
+      headers: {'Authorization': 'Bearer $token'},
+      body: bytes,
+    );
+    expect(putResp.statusCode, 200);
+
+    final dbA = AppDatabase.memory();
+    final repoA = NoteRepository(dbA, deviceId: 'dev-a');
+    final syncA = SyncClient(
+      repository: repoA,
+      baseUrl: serverUrl,
+      deviceId: 'dev-a',
+      token: token,
+    );
+    final note = await repoA.createNote(
+      title: '带附件的笔记',
+      contentMarkdown: '![](sui://$hash)',
+    );
+    await repoA.addAttachment(
+      noteId: note.id,
+      filename: '说明.txt',
+      mimeKind: 'text',
+      byteSize: bytes.length,
+      sha256: hash,
+    );
+    await syncA.enqueue(note);
+    final pushA = await syncA.push();
+    expect(pushA.first.accepted, isTrue);
+
+    // 设备 B：拉取 → 拿到附件映射（字节尚未下载）
+    final blobRoot =
+        '${Directory.systemTemp.path}/sui-e2e-blobs-${DateTime.now().millisecondsSinceEpoch}';
+    final dbB = AppDatabase.memory();
+    final repoB = NoteRepository(dbB, deviceId: 'dev-b');
+    final blobStore = CachedBlobStore(
+      local: LocalBlobStore(blobRoot),
+      meta: SqliteBlobCacheMeta(dbB),
+    );
+    final syncB = SyncClient(
+      repository: repoB,
+      baseUrl: serverUrl,
+      deviceId: 'dev-b',
+      token: token,
+      blobStore: blobStore,
+    );
+    await syncB.pull();
+
+    final attsB = await repoB.listAttachments(noteId: note.id);
+    expect(attsB.length, 1);
+    expect(attsB.first.filename, '说明.txt');
+    expect(attsB.first.sha256, hash);
+    expect(await blobStore.exists(hash), isFalse, reason: '映射同步不应顺带拉字节');
+
+    // 按需下载：首次拉字节，之后命中本地缓存
+    final fetched = await syncB.ensureBlob(hash);
+    expect(utf8.decode(fetched), '附件字节内容 hello');
+    expect(await blobStore.exists(hash), isTrue);
+    expect(await blobStore.read(hash), isNotNull);
+
+    syncA.close();
+    syncB.close();
+    client.close();
+    await dbA.close();
+    await dbB.close();
+    try {
+      await Directory(blobRoot).delete(recursive: true);
+    } catch (_) {}
   });
 }

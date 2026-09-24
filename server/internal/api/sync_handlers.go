@@ -59,7 +59,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // handlePush 处理客户端批量推送（逐条调用 sync.Push，汇总结果）。
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ClientID string        `json:"clientId"`
+		ClientID string          `json:"clientId"`
 		Items    []sync.PushItem `json:"items"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -67,10 +67,10 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type itemResult struct {
-		ID       string `json:"id"`
-		Accepted bool   `json:"accepted"`
-		ServerVersion int `json:"serverVersion,omitempty"`
-		AppliedVersion int `json:"appliedVersion,omitempty"`
+		ID             string `json:"id"`
+		Accepted       bool   `json:"accepted"`
+		ServerVersion  int    `json:"serverVersion,omitempty"`
+		AppliedVersion int    `json:"appliedVersion,omitempty"`
 	}
 	results := make([]itemResult, 0, len(req.Items))
 	for _, it := range req.Items {
@@ -104,23 +104,47 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	type out struct {
+	type attOut struct {
 		ID           string `json:"id"`
-		Title        string `json:"title"`
-		Content      string `json:"content"`
-		Version      int    `json:"version"`
+		Filename     string `json:"filename"`
+		MimeKind     string `json:"mimeKind"`
+		ByteSize     int    `json:"byteSize"`
+		SHA256       string `json:"sha256"`
+		StorageRef   string `json:"storageRef"`
+		ThumbnailRef string `json:"thumbnailRef"`
+		EmbeddedPos  int    `json:"embeddedPos"`
 		IsDeleted    bool   `json:"isDeleted"`
-		SourceDevice string `json:"sourceDevice"`
-		UpdatedAt    string `json:"updatedAt"`
+		CreatedAt    string `json:"createdAt"`
+	}
+	type out struct {
+		ID           string   `json:"id"`
+		Title        string   `json:"title"`
+		Content      string   `json:"content"`
+		Version      int      `json:"version"`
+		IsDeleted    bool     `json:"isDeleted"`
+		SourceDevice string   `json:"sourceDevice"`
+		UpdatedAt    string   `json:"updatedAt"`
+		Attachments  []attOut `json:"attachments,omitempty"`
 	}
 	list := make([]out, 0, len(rows))
-	for _, rw := range rows {
-		list = append(list, out{
+	for _, pn := range rows {
+		rw := pn.Note
+		item := out{
 			ID: rw.ID, Title: rw.Title, Content: rw.ContentMarkdown,
 			Version: rw.Version, IsDeleted: rw.IsDeleted,
 			SourceDevice: rw.SourceDevice,
 			UpdatedAt:    rw.UpdatedAt.UTC().Format(time.RFC3339),
-		})
+		}
+		for _, a := range pn.Attachments {
+			item.Attachments = append(item.Attachments, attOut{
+				ID: a.ID, Filename: a.Filename, MimeKind: a.MimeKind,
+				ByteSize: a.ByteSize, SHA256: a.SHA256, StorageRef: a.StorageRef,
+				ThumbnailRef: a.ThumbnailRef, EmbeddedPos: a.EmbeddedPos,
+				IsDeleted: a.IsDeleted,
+				CreatedAt: a.CreatedAt.UTC().Format(time.RFC3339),
+			})
+		}
+		list = append(list, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "notes": list})
 }
@@ -141,10 +165,11 @@ func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBlobPut 上传 hash 对应的字节；已存在则幂等返回。
+//
+// 只负责字节与登记，不调整引用计数——refcount 由附件映射（sync/push 携带的
+// attachments）驱动，见 store.SyncAttachments。
 func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 	hash := r.PathValue("hash")
-	// 先登记引用（即使已存在也 +1）。字节尚未写入时对已有 blob 寄存器冲突，
-	// 这里简化：先 PUT 字节，再 +1 引用。若内容已存在则直接 +1。
 	exists, err := s.store.BlobExists(hash)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -156,7 +181,7 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, err := s.store.AddBlobRef(hash, int(r.ContentLength)); err != nil {
+	if _, err := s.store.EnsureBlob(hash, int(r.ContentLength)); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}

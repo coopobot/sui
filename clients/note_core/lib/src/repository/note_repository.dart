@@ -346,14 +346,97 @@ class NoteRepository {
     return (await getNote(noteId))!;
   }
 
-  Future<List<Attachment>> listAttachments({String? noteId}) async {
-    final q = db.select(db.attachments)
-      ..where((t) => t.isDeleted.equals(false));
+  Future<List<Attachment>> listAttachments({
+    String? noteId,
+    bool includeDeleted = false,
+  }) async {
+    final q = db.select(db.attachments);
+    if (!includeDeleted) {
+      q.where((t) => t.isDeleted.equals(false));
+    }
     if (noteId != null) {
       q.where((t) => t.noteId.isValue(noteId));
     }
     final rows = await q.get();
     return rows.map((r) => r.toModel()).toList();
+  }
+
+  /// 应用一条远端附件映射（以 id 为键 upsert，幂等）。
+  ///
+  /// 与 [addAttachment] 的分工：这是同步下行路径，除了写 `attachments` 表，
+  /// 还要维护 `blob_refs` 引用计数——否则本地 LRU 会把仍被笔记引用的附件
+  /// 当孤儿淘汰掉（方案 B 的记账侧）。
+  Future<void> upsertRemoteAttachment(Attachment att) async {
+    await db.transaction(() async {
+      final prev = await (db.select(db.attachments)
+            ..where((t) => t.id.equals(att.id)))
+          .getSingleOrNull();
+
+      if (prev == null) {
+        await db.into(db.attachments).insert(AttachmentsCompanion.insert(
+              id: att.id,
+              noteId: Value(att.noteId),
+              filename: att.filename,
+              mimeKind: att.mimeKind,
+              byteSize: Value(att.byteSize),
+              sha256: att.sha256,
+              storageRef: att.storageRef,
+              thumbnailRef: Value(att.thumbnailRef),
+              embeddedPos: Value(att.embeddedPos),
+              isDeleted: Value(att.isDeleted),
+              createdAt: att.createdAt,
+            ));
+      } else {
+        await (db.update(db.attachments)..where((t) => t.id.equals(att.id)))
+            .write(AttachmentsCompanion(
+          noteId: Value(att.noteId),
+          filename: Value(att.filename),
+          mimeKind: Value(att.mimeKind),
+          byteSize: Value(att.byteSize),
+          sha256: Value(att.sha256),
+          storageRef: Value(att.storageRef),
+          thumbnailRef: Value(att.thumbnailRef),
+          embeddedPos: Value(att.embeddedPos),
+          isDeleted: Value(att.isDeleted),
+        ));
+      }
+
+      final wasActive = prev != null && !prev.isDeleted && prev.sha256.isNotEmpty;
+      final nowActive = !att.isDeleted && att.sha256.isNotEmpty;
+      if (!wasActive && nowActive) {
+        await _adjustBlobRef(att.sha256, 1, byteSize: att.byteSize);
+      } else if (wasActive && !nowActive) {
+        await _adjustBlobRef(prev.sha256, -1);
+      } else if (wasActive && nowActive && prev.sha256 != att.sha256) {
+        await _adjustBlobRef(prev.sha256, -1);
+        await _adjustBlobRef(att.sha256, 1, byteSize: att.byteSize);
+      }
+    });
+  }
+
+  /// 调整本地 `blob_refs` 引用计数（不存在且 delta>0 时补建记账行）。
+  Future<void> _adjustBlobRef(
+    String sha256,
+    int delta, {
+    int byteSize = 0,
+  }) async {
+    if (sha256.isEmpty || delta == 0) return;
+    final existing = await (db.select(db.blobRefs)
+          ..where((t) => t.sha256.equals(sha256)))
+        .getSingleOrNull();
+    if (existing == null) {
+      if (delta < 0) return;
+      await db.into(db.blobRefs).insert(BlobRefsCompanion.insert(
+            sha256: sha256,
+            byteSize: Value(byteSize),
+            lastAccessAt: DateTime.now(),
+            refCount: Value(delta),
+          ));
+      return;
+    }
+    final next = existing.refCount + delta;
+    await (db.update(db.blobRefs)..where((t) => t.sha256.equals(sha256)))
+        .write(BlobRefsCompanion(refCount: Value(next < 0 ? 0 : next)));
   }
 
   /// 为笔记挂载一个附件（写入附件元数据行）。

@@ -288,10 +288,11 @@ make clean
 | `users` | 用户（username / password_hash / token） |
 | `notes` | 笔记元数据（title / content_markdown / version / is_deleted / source_device / updated_at） |
 | `revisions` | 修订历史（note_id / version / title / content / source_device / created_at） |
-| `blobs` | 附件引用（hash / ref_count / size） |
+| `blobs` | 附件字节登记（sha256 / size / refcount）。**refcount 唯一来源是 `attachments` 映射**：指向该 hash 的有效映射条数 |
+| `attachments` | 附件-笔记映射（id / note_id / filename / mime_kind / byte_size / sha256 / storage_ref / thumbnail_ref / embedded_pos / is_deleted / created_at / updated_at） |
 | `outbox` | （服务端侧预留）推送队列 |
 
-关键索引：`idx_notes_updated`、`idx_revisions_note_ver`、`idx_notes_isdel`。
+关键索引：`idx_notes_updated`、`idx_revisions_note_ver`、`idx_notes_isdel`、`idx_attachments_note`。
 
 ### 5.2 分层
 
@@ -326,6 +327,7 @@ make clean
 | TestConflictDetection | base_version 冲突判定 |
 | TestAuthReject | 无 token / 坏 token 拒绝 |
 | TestRevisionListAndGet | 修订列表 + 详情 |
+| TestAttachmentMappingSync | 附件映射往返 + refcount 幂等/改指/墓碑归零 + 孤儿 GC |
 | TestClipEndpoint | 剪藏净化 + URL 幂等 + 同步集成 |
 
 ---
@@ -342,8 +344,9 @@ make clean
 |----|------|
 | `NoteRepository` | 本地数据访问门面：笔记本 CRUD、标签、笔记 CRUD、修订追加、搜索 |
 | `SyncClient` | 同步引擎：Outbox 合并、增量 pull、冲突本地合并、重发 |
-| `AppDatabase` | drift 数据库（6 表 + 迁移） |
+| `AppDatabase` | drift 数据库（8 表 + 迁移） |
 | `LocalBlobStore` | 附件本地存储实现 |
+| `CachedBlobStore` | 附件缓存层：LRU 上限 + 按需下载（`blob_refs` 记账） |
 | `DeviceId` | 设备标识（冲突合并 / 来源标记用） |
 
 **新增表 / 字段时**：修改 `lib/src/db/app_database.dart` → 增加迁移版本 → `dart run build_runner build` → 同步域模型与 `NoteRepository`。
@@ -442,16 +445,33 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 
 ### push 请求体示例
 
+`items[].attachments` 可选，携带该笔记的**全部**附件映射（含墓碑，否则对端删除不收敛）。
+映射只在笔记被接受（`accepted=true`）时落库；字节不在此通道，另走 `/blobs/{hash}`。
+
 ```json
 {
   "items": [
     {
       "id": "note-1",
       "title": "示例",
-      "content": "# 标题\n正文",
+      "content": "# 标题\n正文\n![](sui://<sha256>)",
       "baseVersion": 3,
       "version": 4,
-      "sourceDevice": "device-windows"
+      "sourceDevice": "device-windows",
+      "attachments": [
+        {
+          "id": "att-1",
+          "filename": "图.png",
+          "mimeKind": "image",
+          "byteSize": 20480,
+          "sha256": "<sha256>",
+          "storageRef": "<sha256>",
+          "thumbnailRef": null,
+          "embeddedPos": 0,
+          "isDeleted": false,
+          "createdAt": "2026-09-24T07:00:00Z"
+        }
+      ]
     }
   ]
 }
@@ -462,16 +482,29 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 ```json
 {
   "ok": true,
-  "serverTime": "2026-09-24T08:00:00Z",
   "notes": [
     {
       "id": "note-1",
       "title": "示例",
-      "content": "# 标题\n正文",
+      "content": "# 标题\n正文\n![](sui://<sha256>)",
       "version": 4,
       "isDeleted": false,
       "sourceDevice": "clip:web-extension",
-      "updatedAt": "2026-09-24T08:00:00Z"
+      "updatedAt": "2026-09-24T08:00:00Z",
+      "attachments": [
+        {
+          "id": "att-1",
+          "filename": "图.png",
+          "mimeKind": "image",
+          "byteSize": 20480,
+          "sha256": "<sha256>",
+          "storageRef": "<sha256>",
+          "thumbnailRef": null,
+          "embeddedPos": 0,
+          "isDeleted": false,
+          "createdAt": "2026-09-24T07:00:00Z"
+        }
+      ]
     }
   ]
 }

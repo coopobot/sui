@@ -22,20 +22,54 @@ func New(st *store.Store) *Protocol {
 
 // PushItem 是客户端推送的一条笔记变更。
 type PushItem struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Content     string `json:"content"`
-	BaseVersion int    `json:"baseVersion"`
-	Version     int    `json:"version"`
-	IsDeleted   bool   `json:"isDeleted"`
-	SourceDevice string `json:"sourceDevice"`
+	ID           string           `json:"id"`
+	Title        string           `json:"title"`
+	Content      string           `json:"content"`
+	BaseVersion  int              `json:"baseVersion"`
+	Version      int              `json:"version"`
+	IsDeleted    bool             `json:"isDeleted"`
+	SourceDevice string           `json:"sourceDevice"`
+	Attachments  []AttachmentItem `json:"attachments,omitempty"`
+}
+
+// AttachmentItem 是随笔记一起交换的附件映射（不含字节）。
+//
+// 字节按 sha256 内容寻址单独走 `/blobs/{hash}`，因此这里的数据极小，
+// 可以随每次笔记推送全量携带，天然幂等。
+type AttachmentItem struct {
+	ID           string `json:"id"`
+	Filename     string `json:"filename"`
+	MimeKind     string `json:"mimeKind"`
+	ByteSize     int    `json:"byteSize"`
+	SHA256       string `json:"sha256"`
+	StorageRef   string `json:"storageRef"`
+	ThumbnailRef string `json:"thumbnailRef"`
+	EmbeddedPos  int    `json:"embeddedPos"`
+	IsDeleted    bool   `json:"isDeleted"`
+	CreatedAt    string `json:"createdAt"`
+}
+
+func (a AttachmentItem) toRow(noteID string) store.AttachmentRow {
+	return store.AttachmentRow{
+		ID:           a.ID,
+		NoteID:       noteID,
+		Filename:     a.Filename,
+		MimeKind:     a.MimeKind,
+		ByteSize:     a.ByteSize,
+		SHA256:       a.SHA256,
+		StorageRef:   a.StorageRef,
+		ThumbnailRef: a.ThumbnailRef,
+		EmbeddedPos:  a.EmbeddedPos,
+		IsDeleted:    a.IsDeleted,
+		CreatedAt:    parseOptionalTime(a.CreatedAt),
+	}
 }
 
 // PushResponse 反映服务端接受或冲突的裁决结果。
 type PushResponse struct {
 	Accepted bool `json:"accepted"`
 	// Conflict 时给出服务端当前权威版本，供客户端字段级合并/双版本保留。
-	ServerVersion int  `json:"serverVersion,omitempty"`
+	ServerVersion  int `json:"serverVersion,omitempty"`
 	AppliedVersion int `json:"appliedVersion,omitempty"`
 }
 
@@ -43,9 +77,13 @@ type PushResponse struct {
 //
 //	客户端声明的 BaseVersion 与 服务端当前权威版本 是否一致（设计 §6.4/6.6）。
 //
-// - 一致 → 直接应用（version 取服务端当前+1，落修订），Accepted=true。
-// - 不一致 → 不覆盖，返回冲突（ServerVersion=服务端当前），Accepted=false。
-//   客户端据此走字段级合并/diff3/双版本保留。
+//   - 一致 → 直接应用（version 取服务端当前+1，落修订），Accepted=true。
+//     同时落该笔记的附件映射（以 id 为键 upsert，幂等）。
+//   - 不一致 → 不覆盖，返回冲突（ServerVersion=服务端当前），Accepted=false。
+//     客户端据此走字段级合并/diff3/双版本保留。
+//
+// 附件映射只在笔记被接受时落库：被拒绝的是「本地草稿」，其引用的附件
+// 尚未成为权威内容的一部分；客户端合并后重发时会一并带来。
 func (p *Protocol) Push(it PushItem) (*PushResponse, error) {
 	current, err := p.store.GetNote(it.ID)
 	if err != nil {
@@ -65,6 +103,18 @@ func (p *Protocol) Push(it PushItem) (*PushResponse, error) {
 		); err != nil {
 			return nil, err
 		}
+		if len(it.Attachments) > 0 {
+			rows := make([]store.AttachmentRow, 0, len(it.Attachments))
+			for _, a := range it.Attachments {
+				if a.ID == "" {
+					continue
+				}
+				rows = append(rows, a.toRow(it.ID))
+			}
+			if err := p.store.SyncAttachments(it.ID, rows); err != nil {
+				return nil, err
+			}
+		}
 		return &PushResponse{Accepted: true, AppliedVersion: nextVer}, nil
 	}
 
@@ -75,9 +125,48 @@ func (p *Protocol) Push(it PushItem) (*PushResponse, error) {
 	}, nil
 }
 
-// Pull 返回自 since 之后的服务端权威变更（增量拉取）。
-func (p *Protocol) Pull(since time.Time) ([]store.NoteRow, error) {
-	return p.store.UpdatedSince(since)
+// PullNote 是一条增量笔记及其当前附件映射。
+type PullNote struct {
+	Note        store.NoteRow
+	Attachments []store.AttachmentRow
+}
+
+// Pull 返回自 since 之后的服务端权威变更（增量拉取），并带上各笔记的附件映射。
+//
+// 附件映射随笔记交换：映射本身极小，且脱离笔记没有意义；这样客户端只需一个
+// `since` 游标即可同时收敛正文与附件引用。
+func (p *Protocol) Pull(since time.Time) ([]PullNote, error) {
+	notes, err := p.store.UpdatedSince(since)
+	if err != nil {
+		return nil, err
+	}
+	if len(notes) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(notes))
+	for _, n := range notes {
+		ids = append(ids, n.ID)
+	}
+	byNote, err := p.store.ListAttachmentsForNotes(ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PullNote, 0, len(notes))
+	for _, n := range notes {
+		out = append(out, PullNote{Note: n, Attachments: byNote[n.ID]})
+	}
+	return out, nil
+}
+
+func parseOptionalTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // GCOrphans 触发一次孤儿 Blob 清理。

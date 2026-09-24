@@ -139,7 +139,9 @@
 
 **关键点**
 
-- **映射同步**：笔记附件清单（attachment 表）随同步协议走，字节永远不随 pull 下发。
+- **映射同步**：笔记附件清单随笔记一起走 push/pull（`items[].attachments` /
+  `notes[].attachments`，含墓碑，否则删除无法传播），字节永远不随 pull 下发。
+  映射随笔记而非独立游标，是因为映射脱离笔记没有意义，且省掉一个同步游标。
 - **惰性下载**：附件打开 / 预览时才请求 `GET /api/v1/blobs/{hash}`；Web 端同理（浏览器沙箱缓存）。
 - **LRU 淘汰**：容量超限时淘汰最久未访问的 hash（先删物理字节，再清元数据）；被淘汰后再次打开触发重新下载。
 - **占位 UX**：未缓存的附件显示「未下载」占位 + 手动下载按钮；离线时未缓存附件不可看（可接受权衡）。
@@ -148,13 +150,13 @@
 **实现清单（后续）**
 
 1. ✅ note_core：`CachedBlobStore`（实现 `BlobStore`，内部 = LocalBlobStore + 容量记账 + LRU 淘汰 + 下载回调）。
-2. ✅ 附件元数据表：`blob_refs`（hash / size / last_access_at / ref_count），随同步协议交换（表已建 + drift 迁移 v3）。
-3. ✅ SyncClient：`ensureBlob(hash)` 按需下载入口（`GET /blobs/{hash}` + 写入缓存）；pull 附件映射同步待扩展。
+2. ✅ 附件映射表：客户端 `blob_refs`（hash / size / last_access_at / ref_count，drift v3）与服务端 `attachments`（映射本体 + refcount 驱动，见修复 3）。
+3. ✅ SyncClient：`ensureBlob(hash)` 按需下载入口（`GET /blobs/{hash}` + 写入缓存）；附件映射随 push/pull 交换（修复 3）。
 4. ✅ Flutter UI：编辑器底部附件卡片区（文件名/大小/「未下载 ⇄ 已缓存」状态 + 下载进度提示）；`AppController` 暴露 `attachments` / `isAttachmentCached` / `openAttachment`。
 5. ✅ 服务端：`GET /blobs/{hash}` 已就绪（M5），无需改动；缩略图生成（C 方案）留后续。
-6. ✅ 测试：`cached_blob_store_test.dart` 7 用例（幂等 / 按需下载 / 无源返回 null / LRU 淘汰 / 孤儿优先 / 引用归零清理 / 删除联动）通过；note_core 全量 24 用例通过；flutter analyze 零问题、widget 测试通过。
+6. ✅ 测试：`cached_blob_store_test.dart` 7 用例（幂等 / 按需下载 / 无源返回 null / LRU 淘汰 / 孤儿优先 / 引用归零清理 / 删除联动）通过；note_core 全量 38 用例通过；flutter analyze 零问题、widget 测试通过。
 
-> 注：附件-笔记映射（attachments 表）的服务端同步、附件选择器/上传 UI 为后续增量项，当前交付聚焦"缓存压力受控"机制本身。
+> 注：附件选择器/上传 UI（缺口 4）仍为后续增量项——同步通道已打通，缺的是「从哪来附件」的入口。
 
 > Web 端补充：浏览器无文件系统，`LocalBlobStore` 在 Web 退化为**进程内内存缓存**
 > （见 §19.5）。这与 BlobStore 的缓存语义一致，不构成数据丢失。
@@ -301,13 +303,15 @@ IndexedDB 实现（壳文件的第三个分支）。
 
 ### 20.1 已落地并验证
 
-- 服务端：Go 构建通过、7/7 测试通过；`ping`/`register`/`login`/`push`/`pull`/
+- 服务端：Go 构建通过、8/8 测试通过；`ping`/`register`/`login`/`push`/`pull`/
   `blobs`(HEAD/PUT/GET)/`revisions`/`clips` 全部实测正常，鉴权 401、重复注册 409、
   坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
-- note_core：35/35 测试通过（落盘持久化 2 用例 + 配置存取 9 用例）。
+- note_core：38/38 测试通过（落盘持久化 2 用例 + 配置存取 9 用例 + 附件映射 3 用例）。
 - flutter_app：5/5 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
   第二台设备拉取到）。
 - 同步链路：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
+- 附件映射：随笔记 push/pull 全量交换（含墓碑），服务端 blob `refcount` 由映射驱动；
+  字节仍按需下载，映射同步不触发字节传输。
 - Web 构建：`flutter build web --release` 成功；真实浏览器验证启动、IndexedDB 落库。
 - 代码质量：`flutter analyze` 两个包 0 问题。
 
@@ -317,7 +321,7 @@ IndexedDB 实现（壳文件的第三个分支）。
 |---|------|------|------|
 | 1 | **同步链路未接线**：`SyncClient` 从未实例化，`blobStore` 从未注入 | ✅ 修复 2 | 客户端原为纯本地编辑器；附件按需下载/LRU 机制曾是死代码 |
 | 2 | 无登录 / 服务端地址配置 UI | ✅ 修复 2 | 客户端原无法连接服务端 |
-| 3 | 服务端 `attachments` 表为半成品（建表但无读写方法与协议字段） | ⏳ 待修复 | 附件-笔记映射无法跨端重建 |
+| 3 | 服务端 `attachments` 表为半成品（建表但无读写方法与协议字段） | ✅ 修复 3 | 附件-笔记映射无法跨端重建 |
 | 4 | 无附件上传 / 选择器 | ⏳ 待修复 | 用户无法添加附件 |
 | 5 | 缺桌面/移动平台脚手架目录 | ⏳ 待修复 | 这些端暂不可构建（代码路径已就绪） |
 | 6 | `lib/src/home_page.dart` 为 M0 死代码 | ⏳ 待修复 | 冗余，易误导 |
@@ -414,3 +418,52 @@ IndexedDB 实现（壳文件的第三个分支）。
 
 > 环境备注：WSL 内 Go 工具链位于 `/home/aiuser/go-sdk/go/bin`、Flutter 位于
 > `/home/aiuser/flutter/bin`，二者均不在默认 `PATH`，需显式指定绝对路径调用。
+
+#### 修复 3 ✅ 附件-笔记映射跨端同步（服务端 `attachments` 表补全）
+
+对应 §20.2 #3 与 §18.2「映射同步」。原状：服务端 `attachments` 表建了但没有任何
+读写方法与协议字段，push/pull 载荷里也没有附件——客户端即便本地有映射，跨端也无法
+重建；`blobs.refcount` 只在上传字节时 +1，与「有多少笔记引用它」脱钩，GC 语义不成立。
+
+设计要点：
+
+- **映射随笔记走**：push 载荷 `items[].attachments[]`、pull 载荷 `notes[].attachments[]`。
+  不引入独立同步游标——映射脱离笔记没有意义，随笔记走还能复用 `base_version` 的冲突语义。
+- **含墓碑**：客户端推送该笔记**全部**附件映射（`includeDeleted: true`），
+  否则对端的删除永远收敛不了。
+- **只在笔记被接受时落库**：冲突（`accepted=false`）时服务端不落映射——被拒的是本地
+  草稿，其引用尚未成为权威内容的一部分；客户端合并重发时会一并带来。
+- **refcount 唯一来源是映射**：语义定为「指向该 sha256 的有效映射条数」。新增 +1、
+  墓碑化 -1、改指别的 sha 则旧 -1 新 +1，因此重复推送天然幂等。据此把上传接口
+  `PUT /blobs/{hash}` 的 `AddBlobRef(+1)` 换成 `EnsureBlob`（只登记、不动计数），
+  避免「上传字节」与「挂载附件」对同一 blob 重复计数。
+- **客户端记账对称**：`upsertRemoteAttachment()` 除写 `attachments` 表外，还同步维护
+  本地 `blob_refs.refCount`，否则 LRU 会把仍被笔记引用的附件当孤儿淘汰掉——
+  这正是 §18 方案 B 一直缺的那一环。
+- **字节依旧不随映射走**：pull 只写元数据，`CachedBlobStore.exists()` 仍为 false；
+  打开附件才走 `ensureBlob()` 按需下载。
+
+落地内容：
+
+| 项 | 文件 | 说明 |
+|----|------|------|
+| 服务端表 | `server/internal/store/store.go` | `attachments` 补 `updated_at`；新增 `AttachmentRow` + `ListAttachments` / `ListAttachmentsForNotes` / `SyncAttachments`（含 refcount 调整） |
+| 服务端协议 | `server/internal/sync/sync.go` | `PushItem.Attachments`、`AttachmentItem`；`Push` 落映射；`Pull` 返回 `PullNote{Note, Attachments}` |
+| 服务端接口 | `server/internal/api/sync_handlers.go` | pull 响应带 `attachments`；blob 上传改用 `EnsureBlob`（不再 +refcount） |
+| 客户端模型 | `note_core/lib/src/models/attachment.dart` | `toJson` / `fromJson`（协议载荷，不含 noteId） |
+| 客户端仓储 | `note_core/lib/src/repository/note_repository.dart` | `listAttachments(includeDeleted:)`；`upsertRemoteAttachment()` + `_adjustBlobRef()` |
+| 客户端同步 | `note_core/lib/src/sync/sync_client.dart` | push 携带附件；pull 落附件（`_applyRemoteAttachments`） |
+
+验收（本次实测）：
+
+| 检查 | 命令 | 结果 |
+|------|------|------|
+| 服务端 | `go build ./... && go test -count=1 ./internal/api/` | 构建通过，8/8 PASS（新增 `TestAttachmentMappingSync`：映射往返 / refcount 幂等 / 改指 / 墓碑归零 / 孤儿 GC） |
+| note_core 测试 | `dart test` | 38/38 通过（新增 push 携带附件、pull 落映射 + 记账、e2e 映射同步 + 字节按需下载） |
+| note_core 静态检查 | `dart analyze` | No issues found |
+| 客户端测试 | `flutter test` | 5/5 通过 |
+| 客户端静态检查 | `flutter analyze` | No issues found |
+| Web 构建 | `flutter build web --release` | ✓ Built build/web |
+
+> 顺带把本次改动的 Go 文件跑了 `gofmt -w`；仓库其余文件存在既有格式漂移，
+> 未一并处理以免产生无关 diff。

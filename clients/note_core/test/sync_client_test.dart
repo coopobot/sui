@@ -147,6 +147,87 @@ void main() {
       expect(syncer.pull(), throwsA(isA<HttpException>()));
       syncer.close();
     });
+
+    test('push 携带附件映射（含墓碑，供对端收敛删除）', () async {
+      final note = await repo.createNote(title: 'A', contentMarkdown: '# A');
+      await repo.addAttachment(
+        noteId: note.id,
+        filename: '图.png',
+        mimeKind: 'image',
+        byteSize: 1024,
+        sha256: 'sha-att',
+      );
+      Map<String, dynamic>? sentItem;
+      final syncer = newClient((req) async {
+        final body = jsonDecode(req.body) as Map<String, dynamic>;
+        sentItem =
+            ((body['items'] as List).first as Map).cast<String, dynamic>();
+        return jsonResponse(200, {
+          'ok': true,
+          'results': [
+            {'id': note.id, 'accepted': true, 'appliedVersion': 1}
+          ]
+        });
+      });
+
+      await syncer.enqueue(note);
+      await syncer.push();
+
+      final atts =
+          (sentItem!['attachments'] as List).cast<Map<String, dynamic>>();
+      expect(atts.length, 1);
+      expect(atts.first['filename'], '图.png');
+      expect(atts.first['sha256'], 'sha-att');
+      expect(atts.first['byteSize'], 1024);
+      expect(atts.first['isDeleted'], isFalse);
+      syncer.close();
+    });
+
+    test('pull 落库附件映射并计入本地引用（LRU 保护）；墓碑后归零', () async {
+      var tombstoned = false;
+      final syncer = newClient((req) async => jsonResponse(200, {
+            'ok': true,
+            'notes': [
+              {
+                'id': 'remote-note',
+                'title': '带附件',
+                'content': '![](sui://sha-att)',
+                'version': 1,
+                'isDeleted': false,
+                'updatedAt': '2026-09-23T12:00:00Z',
+                'attachments': [
+                  {
+                    'id': 'att-r1',
+                    'filename': '远端图.png',
+                    'mimeKind': 'image',
+                    'byteSize': 2048,
+                    'sha256': 'sha-att',
+                    'storageRef': 'sha-att',
+                    'embeddedPos': 0,
+                    'isDeleted': tombstoned,
+                    'createdAt': '2026-09-23T11:00:00Z',
+                  }
+                ],
+              }
+            ]
+          }));
+
+      await syncer.pull();
+      final atts = await repo.listAttachments(noteId: 'remote-note');
+      expect(atts.length, 1);
+      expect(atts.first.filename, '远端图.png');
+      expect(atts.first.byteSize, 2048);
+
+      final meta = SqliteBlobCacheMeta(db);
+      expect((await meta.entry('sha-att'))!.refCount, 1);
+
+      // 远端墓碑化：默认查询不再返回，引用计数归零（可被 LRU 回收）
+      tombstoned = true;
+      await syncer.pull();
+      expect(await repo.listAttachments(noteId: 'remote-note'), isEmpty);
+      expect((await meta.entry('sha-att'))!.refCount, 0);
+      syncer.close();
+    });
   });
 }
 
