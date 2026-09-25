@@ -119,8 +119,7 @@ sui/
 │   │   ├── version/         # 版本号
 │   │   └── ws/              # WebSocket 变更通知 Hub
 │   ├── configs/             # 配置样例
-│   ├── go.mod / go.sum
-│   └── Makefile             # 顶层构建工具
+│   └── go.mod / go.sum
 ├── clients/
 │   ├── note_core/           # 纯 Dart 共享核心（无 Flutter 依赖）
 │   │   └── lib/src/
@@ -141,9 +140,9 @@ sui/
 │   ├── popup.html / popup.js        # 弹窗剪藏
 │   ├── options.html / options.js    # 服务端配置页
 │   └── background.js                # 右键菜单 + badge
-├── protos/                  # 共享接口契约
-├── scripts/                 # 构建 / 部署脚本
-└── Makefile
+├── protos/                  # 预留（当前为空目录，未入库）
+├── scripts/                 # 预留（当前为空目录，未入库）
+└── Makefile                 # 顶层构建入口：build-server / run-server / test / clean
 ```
 
 ---
@@ -158,7 +157,7 @@ go mod tidy                # 首次拉取依赖（国内可用 GOPROXY=https://g
 go build ./...             # 编译
 go build -o bin/sui-server ./cmd/sui-server   # 输出二进制
 go vet ./...               # 静态检查
-go test ./... -count=1     # 全部测试（当前 7 个用例）
+go test ./... -count=1     # 全部测试（当前 8 个用例，均在 internal/api）
 ```
 
 ### 3.2 note_core（纯 Dart 包）
@@ -168,7 +167,7 @@ cd clients/note_core
 dart pub get
 dart run build_runner build   # 生成 drift 代码（app_database.g.dart）
 dart analyze                  # 静态检查
-dart test                     # 单元测试（17 个）+ e2e（1 个）
+dart test                     # 全部用例（当前 51 个，含 2 个 e2e）
 ```
 
 > 注意：drift schema 变更后必须重新执行 `build_runner build`。
@@ -179,22 +178,26 @@ dart test                     # 单元测试（17 个）+ e2e（1 个）
 cd clients/flutter_app
 flutter pub get
 flutter analyze                # 静态检查（当前 0 问题）
-flutter test                   # widget 测试
+flutter test                   # widget 测试（当前 5 个）
 
 # 运行 / 构建
-flutter run -d chrome          # Web（当前唯一已配置的平台）
+flutter run -d chrome          # Web（本机已验证）
 flutter build web              # 产出 build/web
 ```
 
-> **平台脚手架现状**：仓库目前只包含 `web/` 平台目录，因此**只有 Web 可直接运行**。
-> `note_core` 的桌面/移动代码路径已就绪（`path_provider` + 文件库），但需先生成脚手架：
->
-> ```bash
-> cd clients/flutter_app
-> flutter create --platforms=windows,linux,macos,android,ios .
-> ```
->
-> 生成后即可 `flutter run -d windows` / `-d linux` / `-d android` 等。
+> **平台脚手架现状**：`web/` 与 `android/ ios/ linux/ macos/ windows/` 六个平台目录**均已入库**，
+> 应用显示名统一为「随手记 Sui」。但**可构建性取决于本机工具链**，不是代码问题：
+
+| 目标 | 脚手架 | 本机可构建 | 缺什么 |
+|------|--------|-----------|--------|
+| Web | ✅ | ✅ 已实测 | — |
+| Linux 桌面 | ✅ | ⚠️ | `clang` / `ninja-build` / `pkg-config` / `libgtk-3-dev` |
+| Windows 桌面 | ✅ | ➖ | 只能在 Windows 宿主构建 |
+| macOS 桌面 | ✅ | ➖ | 只能在 macOS 宿主构建 |
+| Android | ✅ | ⚠️ | Android SDK（+ 设备/模拟器） |
+| iOS | ✅ | ➖ | 只能在 macOS 宿主构建 |
+
+> 即：`flutter run -d linux` 之类命令在装齐工具链后即可用，无需再生成脚手架。
 
 ### 3.4 Web 端资源（sqlite3.wasm 与 drift worker）
 

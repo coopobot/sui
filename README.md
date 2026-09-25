@@ -50,8 +50,8 @@ sui/
 │   ├── note_core/           # 多端共享核心逻辑（纯 Dart：模型 / 本地库 / 同步引擎）
 │   └── flutter_app/         # Flutter 多端客户端
 ├── extension/               # Chrome 剪藏扩展（Manifest V3）
-├── protos/                  # 共享接口契约定义
-├── scripts/                 # 构建 / 部署脚本
+├── protos/                  # 预留（当前为空目录，未入库）
+├── scripts/                 # 预留（当前为空目录，未入库）
 └── Makefile                 # 顶层构建工具
 ```
 
@@ -87,10 +87,17 @@ curl -X POST http://localhost:8080/api/v1/register \
 
 ```bash
 cd clients/flutter_app
-flutter run -d windows   # 或 -d chrome / -d linux / -d android
+flutter run -d chrome    # Web（本机已验证可运行）
 ```
 
-客户端默认连接 `http://127.0.0.1:8080`。
+六个平台目录（`web` + 桌面/移动五端）均已入库，能否运行取决于本机工具链：
+`-d linux` 需 `clang ninja-build pkg-config libgtk-3-dev`，`-d android` 需 Android SDK，
+`-d windows` / `-d macos` / iOS 只能在对应宿主系统构建。详见
+[开发者文档 §3.3](docs/DEVELOPER.md#33-flutter-客户端)。
+
+客户端**不预设服务端地址**：首次使用点顶栏「同步设置」，填入地址（如
+`http://127.0.0.1:8080`）并用上一步拿到的账号「注册并连接」或「登录并连接」，
+配置会存入本地库，之后自动防抖同步。
 
 ### 4. 安装剪藏扩展
 

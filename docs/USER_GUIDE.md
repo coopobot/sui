@@ -75,9 +75,14 @@ data/
 ### 2.3 验证服务已启动
 
 ```bash
-curl http://localhost:8080/healthz      # → ok
-curl http://localhost:8080/api/v1/ping  # → {"ok":true}
+curl http://localhost:8080/healthz
+# → {"ok":true,"service":"sui-server","version":"0.1.0","time":"..."}
+
+curl http://localhost:8080/api/v1/ping
+# → {"ok":true,"service":"sui-server","version":"0.1.0","time":"...","msg":"pong"}
 ```
+
+两个接口都返回 JSON 且 `ok` 为 `true`，即表示服务端已就绪。
 
 ### 2.4 公网 / 局域网访问（可选）
 
@@ -135,15 +140,18 @@ curl -X POST http://localhost:8080/api/v1/login \
 
 ### 4.1 运行 Flutter 客户端
 
-客户端默认连接 `http://127.0.0.1:8080`。
+客户端**不预设服务端地址**，地址在应用内的「同步设置」里填写（见 §4.3）。
 
 ```bash
 cd clients/flutter_app
-flutter run -d windows   # Windows 桌面
-flutter run -d linux     # Linux 桌面
-flutter run -d chrome    # 浏览器（Web）
-flutter run -d android   # Android 手机 / 平板（需连接设备）
+flutter run -d chrome    # 浏览器（Web，本机已验证可运行）
+flutter run -d windows   # Windows 桌面（需在 Windows 宿主构建）
+flutter run -d linux     # Linux 桌面（需 clang / ninja-build / pkg-config / libgtk-3-dev）
+flutter run -d android   # Android 手机 / 平板（需 Android SDK + 连接设备）
 ```
+
+六个平台目录（`web` + 桌面/移动五端）均已随仓库提供，无需再执行 `flutter create`；
+能否运行只取决于本机是否装了对应工具链。Web 端最省事，适合先跑起来体验。
 
 ### 4.2 客户端界面
 
@@ -162,6 +170,24 @@ flutter run -d android   # Android 手机 / 平板（需连接设备）
 ```
 
 手机窄屏自动切换为抽屉式导航，点击左上角菜单展开笔记本树。
+
+### 4.3 连接服务端（首次配置）
+
+客户端开箱即用（纯本地也能写），要同步才需要连服务端。点顶栏的**云图标 /「同步设置」**
+打开对话框：
+
+| 区域 | 内容 |
+|------|------|
+| 状态行 | 未连接 / 已连接 / 同步中… / 同步失败（附原因） |
+| 服务端地址 | 如 `http://127.0.0.1:8080`（局域网用机器 IP，公网用你的域名） |
+| 用户名 / 密码 | 配「注册并连接」（新建账号）或「登录并连接」（已有账号） |
+| 测试连接 | 只探活，不保存 —— 先确认地址通不通 |
+| Token | 已有 Token 可直接粘贴，点「保存并连接」；已连接时旁边出现「断开连接」 |
+| 本机设备 ID | 自动生成、随配置持久化，用于标识修订来源设备 |
+| 附件缓存 | 当前占用 / 上限，可改上限（单位 MB，默认 512） |
+
+配置会存入本机数据库，**重启后仍在**，之后编辑自动防抖推送。若地址或 Token 为空，
+状态会停在「未连接」。
 
 ---
 
