@@ -95,6 +95,14 @@ class AppController extends ChangeNotifier {
   WebSocketChannel? _ws;
   StreamSubscription<dynamic>? _wsSub;
   Timer? _syncDebounce;
+  Timer? _syncTicker;
+
+  /// 周期兜底同步间隔。
+  ///
+  /// 离线期间的本地改动只能积在 Outbox：WS 断了等不到广播，用户也可能不再编辑
+  /// 触发防抖推送。没有这个定时器，「断网可读可写、联网后自动同步」就只在
+  /// 「用户恰好又编辑了一次」时才成立。空闲时 push 无内容、pull 无增量，开销极小。
+  static const _syncInterval = Duration(seconds: 30);
 
   List<Notebook> _notebooks = [];
   List<NoteSummary> _notes = [];
@@ -266,6 +274,8 @@ class AppController extends ChangeNotifier {
     notifyListeners();
 
     _openWs();
+    _syncTicker?.cancel();
+    _syncTicker = Timer.periodic(_syncInterval, (_) => syncNow());
     await syncNow();
   }
 
@@ -381,6 +391,8 @@ class AppController extends ChangeNotifier {
   Future<void> _teardownConnection() async {
     _syncDebounce?.cancel();
     _syncDebounce = null;
+    _syncTicker?.cancel();
+    _syncTicker = null;
     await _wsSub?.cancel();
     _wsSub = null;
     await _ws?.sink.close();
@@ -401,11 +413,11 @@ class AppController extends ChangeNotifier {
       _ws = ch;
       _wsSub = ch.stream.listen(
         (_) => _onRemoteChange(),
-        onError: (_) {}, // WS 不可用不影响手动/定时同步
+        onError: (_) {}, // WS 不可用不影响手动触发与周期兜底同步
         onDone: () {},
       );
     } catch (_) {
-      // 连接失败静默降级：同步仍可手动触发。
+      // 连接失败静默降级：同步仍可手动触发与周期兜底。
     }
   }
 
@@ -560,6 +572,7 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _syncDebounce?.cancel();
+    _syncTicker?.cancel();
     _wsSub?.cancel();
     _ws?.sink.close();
     _syncClient?.close();

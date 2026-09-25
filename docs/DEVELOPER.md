@@ -369,7 +369,7 @@ make clean
 | `note_editor.dart` | 编辑器（标题 / Markdown 双轨 / 标签 / 附件卡片 / 历史 / 导出 / 删除） |
 | `markdown_editor.dart` | 源码编辑 + 预览切换（`sizedImageBuilder` 渲染 `sui://` 附件图） |
 | `revision_panel.dart` | 版本历史侧栏 + 一键恢复 |
-| `app_controller.dart` | 全局状态与业务编排（含附件增删 / 上传 / 缓存状态） |
+| `app_controller.dart` | 全局状态与业务编排（附件增删 / 上传 / 缓存状态）；同步调度：编辑防抖 0.7s 推送、WS 通知拉取、30s 周期兜底 |
 | `sync_settings_dialog.dart` | 同步设置对话框（服务端地址 / Token / 设备 ID 的录入与校验） |
 | `platform/attachment_picker.dart` | 跨端文件选择（`file_picker`，返回文件名 + 字节） |
 
