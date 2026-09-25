@@ -240,11 +240,13 @@ sui/
         │   ├── sqlite3.wasm               # SQLite 引擎（Web）
         │   ├── drift_worker.dart          # worker 入口源码
         │   └── drift_worker.dart.js       # worker 编译产物
+        ├── android/ ios/                  # 移动端脚手架（flutter create 生成）
+        ├── linux/ windows/ macos/         # 桌面端脚手架（flutter create 生成）
         └── test/widget_test.dart
 ```
 
-> 平台脚手架现状：仓库目前只有 `web/`。桌面/移动需执行
-> `flutter create --platforms=windows,linux,macos,android,ios .` 生成后再构建。
+> 平台脚手架现状：`web/` + 桌面/移动五个平台目录均已就位（修复 5）。
+> 各端能否构建取决于本机工具链，见 §19.6。
 
 ## 19. 平台分层：条件导入与构建目标
 
@@ -307,11 +309,45 @@ IndexedDB 实现（壳文件的第三个分支）。
 
 ### 19.6 构建目标现状
 
-| 目标 | 状态 |
-|------|------|
-| Web | ✅ 可构建、已在真实浏览器验证启动（无控制台错误） |
-| 桌面（Windows/macOS/Linux） | ⚠️ 代码路径已就绪，缺平台脚手架目录 |
-| 移动（Android/iOS） | ⚠️ 代码路径已就绪，缺平台脚手架目录 |
+修复 5 已生成全部平台脚手架目录（`flutter create --platforms=android,ios,linux,macos,windows`），
+`web/` 为原有目录未动。各目标的**可构建性**取决于本机工具链：
+
+| 目标 | 脚手架 | 本机可构建 | 说明 |
+|------|--------|-----------|------|
+| Web | ✅ `web/` | ✅ 已实测 | `flutter build web --release` 通过，真实浏览器验证启动 |
+| Linux 桌面 | ✅ `linux/` | ⚠️ 缺工具链 | 缺 `clang` / `ninja` / `pkg-config` / `libgtk-3-dev`；装齐后可构建 |
+| Windows 桌面 | ✅ `windows/` | ➖ 不可在本机构建 | Windows 目标只能在 Windows 主机上构建 |
+| macOS 桌面 | ✅ `macos/` | ➖ 不可在本机构建 | 只能在 macOS 主机上构建 |
+| Android | ✅ `android/` | ⚠️ 缺工具链 | 缺 Android SDK |
+| iOS | ✅ `ios/` | ➖ 不可在本机构建 | 只能在 macOS 主机上构建 |
+
+Linux 工具链安装（需要 sudo）：
+
+```bash
+sudo apt install -y clang ninja-build pkg-config libgtk-3-dev
+```
+
+> 实测记录：`flutter build linux --release` 已成功拉取 Flutter 的 Linux GTK 引擎产物
+> （`linux-x64-flutter-gtk`），随后停在宿主工具链 ——
+> `CMake Error: CMake was unable to find a build program corresponding to "Ninja"` /
+> `CMAKE_CXX_COMPILER not set`。即**只差宿主编译工具链**，代码与脚手架本身没有问题。
+
+**平台相关配置（修复 5 补齐）**
+
+| 项 | 位置 | 说明 |
+|----|------|------|
+| 应用显示名 | `linux/runner/my_application.cc`、`windows/runner/main.cpp`、`android/app/src/main/AndroidManifest.xml`、`ios/Runner/Info.plist`、`macos/Runner/Configs/AppInfo.xcconfig` | 统一为「随手记 Sui」（Windows 资源元数据用 ASCII `Sui`，见下） |
+| MSVC 源码编码 | `windows/runner/CMakeLists.txt` | 加 `/utf-8`：窗口标题含中文，MSVC 默认按系统 ANSI 代码页解析无 BOM 源文件会乱码 |
+| Android 网络权限 | `android/app/src/main/AndroidManifest.xml` | 模板只在 debug/profile 清单声明 `INTERNET`，release 包必须补在 main 清单 |
+
+> Windows 的 `Runner.rc` 里 `FileDescription` / `ProductName` 用 ASCII `Sui`：`.rc` 由 `rc.exe`
+> 编译，无 BOM 的 UTF-8 中文会被按代码页误读，不值得为此引入 BOM。
+> `InternalName` / `OriginalFilename` 必须保持 `sui_flutter_app`（与可执行文件名绑定）。
+
+> 明文 HTTP 说明：iOS 的 ATS 与 Android 的 Network Security Config 都只约束**平台原生**
+> 网络栈（`NSURLSession` / OkHttp 等）。本客户端走 `package:http` → `dart:io` 的
+> Dart 自有 socket，Flutter 不在 socket 层施加策略，因此自托管的 `http://` 服务端无需
+> 任何明文豁免配置（详见 Flutter 官方 breaking change 说明）。生产环境仍建议 HTTPS。
 
 ## 20. 当前状态与已知缺口（滚动更新）
 
@@ -334,6 +370,8 @@ IndexedDB 实现（壳文件的第三个分支）。
 - 附件 UI：编辑器工具条「添加附件」入口（`file_picker` 跨端取字节）+ 底部卡片四态
   （已同步 / 待上传 / 仅本机 / 未下载）+ 预览内 `sui://<sha256>` 图片渲染。
 - Web 构建：`flutter build web --release` 成功；真实浏览器验证启动、IndexedDB 落库。
+- 平台脚手架：`web/` + 桌面/移动五端目录（`android` `ios` `linux` `macos` `windows`）均已就位，
+  应用显示名统一为「随手记 Sui」；Linux 桌面实测只差宿主编译工具链（见 §19.6）。
 - 代码质量：`flutter analyze` 两个包 0 问题。
 
 ### 20.2 待修复缺口
@@ -344,7 +382,7 @@ IndexedDB 实现（壳文件的第三个分支）。
 | 2 | 无登录 / 服务端地址配置 UI | ✅ 修复 2 | 客户端原无法连接服务端 |
 | 3 | 服务端 `attachments` 表为半成品（建表但无读写方法与协议字段） | ✅ 修复 3 | 附件-笔记映射无法跨端重建 |
 | 4 | 无附件上传 / 选择器 | ✅ 修复 4 | 用户无法添加附件 |
-| 5 | 缺桌面/移动平台脚手架目录 | ⏳ 待修复 | 这些端暂不可构建（代码路径已就绪） |
+| 5 | 缺桌面/移动平台脚手架目录 | ✅ 修复 5 | 这些端暂不可构建（代码路径已就绪） |
 | 6 | `lib/src/home_page.dart` 为 M0 死代码 | ⏳ 待修复 | 冗余，易误导 |
 | 7 | README/DEVELOPER 的运行命令与实际不符 | ⏳ 待修复 | 按文档操作会失败 |
 | 8 | 文档「核心特性」全 ✅ 但部分未在客户端生效 | ⏳ 待修复 | 认知偏差 |
@@ -541,3 +579,40 @@ IndexedDB 实现（壳文件的第三个分支）。
 
 > 环境备注：`flutter test` / `dart test` 在 WSL 下需 `LD_LIBRARY_PATH=/home/aiuser/.local/lib`
 > （`libsqlite3.so` 软链所在目录），否则 drift 报 `Failed to load dynamic library 'libsqlite3.so'`。
+
+#### 修复 5 ✅ 桌面/移动平台脚手架
+
+对应 §20.2 #5 与 §19.6。原状：`flutter_app` 只有 `web/` 一个平台目录，README 里写的
+`flutter run -d windows / linux / android` 全部无处可跑 —— 平台无关代码早已就绪，缺的只是脚手架。
+
+落地内容：
+
+| 项 | 说明 |
+|----|------|
+| 生成命令 | `flutter create --platforms=android,ios,linux,macos,windows --org com.sui --project-name sui_flutter_app .`（112 个文件，未改动 `web/`） |
+| 应用显示名 | Linux GTK 标题 / Windows 窗口标题 / Android `android:label` / iOS `CFBundleDisplayName` / macOS `PRODUCT_NAME` 统一为「随手记 Sui」 |
+| MSVC 编码 | `windows/runner/CMakeLists.txt` 增加 `/utf-8`，避免中文窗口标题乱码 |
+| Android 网络权限 | main 清单补 `INTERNET`（模板只在 debug/profile 声明，release 包会缺失） |
+| 分析排除 | `analysis_options.yaml` 排除 `android/ ios/ windows/ macos/ linux/`，避免分析器扫描生成代码 |
+| `.metadata` | 登记五个新平台（并保留原有 `web` 条目） |
+
+两处刻意**不做**的事：
+
+- **不加明文 HTTP 豁免**（iOS ATS / Android Network Security Config）。这两套策略只约束平台原生
+  网络栈，而客户端走 Dart 自有 socket，不受其约束；加了反而是无用的安全放宽。
+- **`Runner.rc` 不用中文**：`.rc` 由 `rc.exe` 编译，无 BOM 的 UTF-8 中文会按代码页误读，
+  因此 `FileDescription` / `ProductName` 用 ASCII `Sui`。
+
+验收（本次实测）：
+
+| 检查 | 命令 | 结果 |
+|------|------|------|
+| 客户端静态检查 | `flutter analyze` | No issues found |
+| 客户端测试 | `flutter test` | 5/5 通过 |
+| Web 构建 | `flutter build web --release` | ✓ Built build/web（脚手架未影响 Web） |
+| Linux 桌面构建 | `flutter build linux --release` | ⚠️ 引擎产物已拉取成功，停在宿主工具链：缺 `ninja` / C++ 编译器（本机 sudo 需密码，未安装） |
+| Android / iOS / Windows / macOS 构建 | — | 本机无对应工具链（SDK / 非宿主平台），未验证 |
+
+> 结论：脚手架与平台配置已就位，**未验证的部分是工具链而非代码**。
+> Linux 端装齐 `clang ninja-build pkg-config libgtk-3-dev` 后即可构建；
+> Windows/macOS/iOS 需在对应宿主系统上构建。
