@@ -2662,9 +2662,15 @@ class $BlobRefsTable extends BlobRefs
       type: DriftSqlType.int,
       requiredDuringInsert: false,
       defaultValue: const Constant(0));
+  static const VerificationMeta _uploadedAtMeta =
+      const VerificationMeta('uploadedAt');
+  @override
+  late final GeneratedColumn<DateTime> uploadedAt = GeneratedColumn<DateTime>(
+      'uploaded_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
   @override
   List<GeneratedColumn> get $columns =>
-      [sha256, byteSize, lastAccessAt, refCount];
+      [sha256, byteSize, lastAccessAt, refCount, uploadedAt];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -2697,6 +2703,12 @@ class $BlobRefsTable extends BlobRefs
       context.handle(_refCountMeta,
           refCount.isAcceptableOrUnknown(data['ref_count']!, _refCountMeta));
     }
+    if (data.containsKey('uploaded_at')) {
+      context.handle(
+          _uploadedAtMeta,
+          uploadedAt.isAcceptableOrUnknown(
+              data['uploaded_at']!, _uploadedAtMeta));
+    }
     return context;
   }
 
@@ -2714,6 +2726,8 @@ class $BlobRefsTable extends BlobRefs
           DriftSqlType.dateTime, data['${effectivePrefix}last_access_at'])!,
       refCount: attachedDatabase.typeMapping
           .read(DriftSqlType.int, data['${effectivePrefix}ref_count'])!,
+      uploadedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}uploaded_at']),
     );
   }
 
@@ -2728,11 +2742,13 @@ class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
   final int byteSize;
   final DateTime lastAccessAt;
   final int refCount;
+  final DateTime? uploadedAt;
   const BlobRefRow(
       {required this.sha256,
       required this.byteSize,
       required this.lastAccessAt,
-      required this.refCount});
+      required this.refCount,
+      this.uploadedAt});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -2740,6 +2756,9 @@ class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
     map['byte_size'] = Variable<int>(byteSize);
     map['last_access_at'] = Variable<DateTime>(lastAccessAt);
     map['ref_count'] = Variable<int>(refCount);
+    if (!nullToAbsent || uploadedAt != null) {
+      map['uploaded_at'] = Variable<DateTime>(uploadedAt);
+    }
     return map;
   }
 
@@ -2749,6 +2768,9 @@ class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
       byteSize: Value(byteSize),
       lastAccessAt: Value(lastAccessAt),
       refCount: Value(refCount),
+      uploadedAt: uploadedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(uploadedAt),
     );
   }
 
@@ -2760,6 +2782,7 @@ class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
       byteSize: serializer.fromJson<int>(json['byteSize']),
       lastAccessAt: serializer.fromJson<DateTime>(json['lastAccessAt']),
       refCount: serializer.fromJson<int>(json['refCount']),
+      uploadedAt: serializer.fromJson<DateTime?>(json['uploadedAt']),
     );
   }
   @override
@@ -2770,6 +2793,7 @@ class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
       'byteSize': serializer.toJson<int>(byteSize),
       'lastAccessAt': serializer.toJson<DateTime>(lastAccessAt),
       'refCount': serializer.toJson<int>(refCount),
+      'uploadedAt': serializer.toJson<DateTime?>(uploadedAt),
     };
   }
 
@@ -2777,12 +2801,14 @@ class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
           {String? sha256,
           int? byteSize,
           DateTime? lastAccessAt,
-          int? refCount}) =>
+          int? refCount,
+          Value<DateTime?> uploadedAt = const Value.absent()}) =>
       BlobRefRow(
         sha256: sha256 ?? this.sha256,
         byteSize: byteSize ?? this.byteSize,
         lastAccessAt: lastAccessAt ?? this.lastAccessAt,
         refCount: refCount ?? this.refCount,
+        uploadedAt: uploadedAt.present ? uploadedAt.value : this.uploadedAt,
       );
   BlobRefRow copyWithCompanion(BlobRefsCompanion data) {
     return BlobRefRow(
@@ -2792,6 +2818,8 @@ class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
           ? data.lastAccessAt.value
           : this.lastAccessAt,
       refCount: data.refCount.present ? data.refCount.value : this.refCount,
+      uploadedAt:
+          data.uploadedAt.present ? data.uploadedAt.value : this.uploadedAt,
     );
   }
 
@@ -2801,13 +2829,15 @@ class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
           ..write('sha256: $sha256, ')
           ..write('byteSize: $byteSize, ')
           ..write('lastAccessAt: $lastAccessAt, ')
-          ..write('refCount: $refCount')
+          ..write('refCount: $refCount, ')
+          ..write('uploadedAt: $uploadedAt')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(sha256, byteSize, lastAccessAt, refCount);
+  int get hashCode =>
+      Object.hash(sha256, byteSize, lastAccessAt, refCount, uploadedAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -2815,7 +2845,8 @@ class BlobRefRow extends DataClass implements Insertable<BlobRefRow> {
           other.sha256 == this.sha256 &&
           other.byteSize == this.byteSize &&
           other.lastAccessAt == this.lastAccessAt &&
-          other.refCount == this.refCount);
+          other.refCount == this.refCount &&
+          other.uploadedAt == this.uploadedAt);
 }
 
 class BlobRefsCompanion extends UpdateCompanion<BlobRefRow> {
@@ -2823,12 +2854,14 @@ class BlobRefsCompanion extends UpdateCompanion<BlobRefRow> {
   final Value<int> byteSize;
   final Value<DateTime> lastAccessAt;
   final Value<int> refCount;
+  final Value<DateTime?> uploadedAt;
   final Value<int> rowid;
   const BlobRefsCompanion({
     this.sha256 = const Value.absent(),
     this.byteSize = const Value.absent(),
     this.lastAccessAt = const Value.absent(),
     this.refCount = const Value.absent(),
+    this.uploadedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   BlobRefsCompanion.insert({
@@ -2836,6 +2869,7 @@ class BlobRefsCompanion extends UpdateCompanion<BlobRefRow> {
     this.byteSize = const Value.absent(),
     required DateTime lastAccessAt,
     this.refCount = const Value.absent(),
+    this.uploadedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : sha256 = Value(sha256),
         lastAccessAt = Value(lastAccessAt);
@@ -2844,6 +2878,7 @@ class BlobRefsCompanion extends UpdateCompanion<BlobRefRow> {
     Expression<int>? byteSize,
     Expression<DateTime>? lastAccessAt,
     Expression<int>? refCount,
+    Expression<DateTime>? uploadedAt,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -2851,6 +2886,7 @@ class BlobRefsCompanion extends UpdateCompanion<BlobRefRow> {
       if (byteSize != null) 'byte_size': byteSize,
       if (lastAccessAt != null) 'last_access_at': lastAccessAt,
       if (refCount != null) 'ref_count': refCount,
+      if (uploadedAt != null) 'uploaded_at': uploadedAt,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -2860,12 +2896,14 @@ class BlobRefsCompanion extends UpdateCompanion<BlobRefRow> {
       Value<int>? byteSize,
       Value<DateTime>? lastAccessAt,
       Value<int>? refCount,
+      Value<DateTime?>? uploadedAt,
       Value<int>? rowid}) {
     return BlobRefsCompanion(
       sha256: sha256 ?? this.sha256,
       byteSize: byteSize ?? this.byteSize,
       lastAccessAt: lastAccessAt ?? this.lastAccessAt,
       refCount: refCount ?? this.refCount,
+      uploadedAt: uploadedAt ?? this.uploadedAt,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -2885,6 +2923,9 @@ class BlobRefsCompanion extends UpdateCompanion<BlobRefRow> {
     if (refCount.present) {
       map['ref_count'] = Variable<int>(refCount.value);
     }
+    if (uploadedAt.present) {
+      map['uploaded_at'] = Variable<DateTime>(uploadedAt.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -2898,6 +2939,7 @@ class BlobRefsCompanion extends UpdateCompanion<BlobRefRow> {
           ..write('byteSize: $byteSize, ')
           ..write('lastAccessAt: $lastAccessAt, ')
           ..write('refCount: $refCount, ')
+          ..write('uploadedAt: $uploadedAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -4414,6 +4456,7 @@ typedef $$BlobRefsTableCreateCompanionBuilder = BlobRefsCompanion Function({
   Value<int> byteSize,
   required DateTime lastAccessAt,
   Value<int> refCount,
+  Value<DateTime?> uploadedAt,
   Value<int> rowid,
 });
 typedef $$BlobRefsTableUpdateCompanionBuilder = BlobRefsCompanion Function({
@@ -4421,6 +4464,7 @@ typedef $$BlobRefsTableUpdateCompanionBuilder = BlobRefsCompanion Function({
   Value<int> byteSize,
   Value<DateTime> lastAccessAt,
   Value<int> refCount,
+  Value<DateTime?> uploadedAt,
   Value<int> rowid,
 });
 
@@ -4444,6 +4488,9 @@ class $$BlobRefsTableFilterComposer
 
   ColumnFilters<int> get refCount => $composableBuilder(
       column: $table.refCount, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get uploadedAt => $composableBuilder(
+      column: $table.uploadedAt, builder: (column) => ColumnFilters(column));
 }
 
 class $$BlobRefsTableOrderingComposer
@@ -4467,6 +4514,9 @@ class $$BlobRefsTableOrderingComposer
 
   ColumnOrderings<int> get refCount => $composableBuilder(
       column: $table.refCount, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get uploadedAt => $composableBuilder(
+      column: $table.uploadedAt, builder: (column) => ColumnOrderings(column));
 }
 
 class $$BlobRefsTableAnnotationComposer
@@ -4489,6 +4539,9 @@ class $$BlobRefsTableAnnotationComposer
 
   GeneratedColumn<int> get refCount =>
       $composableBuilder(column: $table.refCount, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get uploadedAt => $composableBuilder(
+      column: $table.uploadedAt, builder: (column) => column);
 }
 
 class $$BlobRefsTableTableManager extends RootTableManager<
@@ -4518,6 +4571,7 @@ class $$BlobRefsTableTableManager extends RootTableManager<
             Value<int> byteSize = const Value.absent(),
             Value<DateTime> lastAccessAt = const Value.absent(),
             Value<int> refCount = const Value.absent(),
+            Value<DateTime?> uploadedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               BlobRefsCompanion(
@@ -4525,6 +4579,7 @@ class $$BlobRefsTableTableManager extends RootTableManager<
             byteSize: byteSize,
             lastAccessAt: lastAccessAt,
             refCount: refCount,
+            uploadedAt: uploadedAt,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -4532,6 +4587,7 @@ class $$BlobRefsTableTableManager extends RootTableManager<
             Value<int> byteSize = const Value.absent(),
             required DateTime lastAccessAt,
             Value<int> refCount = const Value.absent(),
+            Value<DateTime?> uploadedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               BlobRefsCompanion.insert(
@@ -4539,6 +4595,7 @@ class $$BlobRefsTableTableManager extends RootTableManager<
             byteSize: byteSize,
             lastAccessAt: lastAccessAt,
             refCount: refCount,
+            uploadedAt: uploadedAt,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0

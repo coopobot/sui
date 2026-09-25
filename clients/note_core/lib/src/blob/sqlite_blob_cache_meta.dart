@@ -21,6 +21,7 @@ class SqliteBlobCacheMeta implements BlobCacheMeta {
       byteSize: row.byteSize,
       lastAccessAt: row.lastAccessAt,
       refCount: row.refCount,
+      uploadedAt: row.uploadedAt,
     );
   }
 
@@ -30,6 +31,7 @@ class SqliteBlobCacheMeta implements BlobCacheMeta {
     required int byteSize,
     int refCountDelta = 0,
     DateTime? lastAccessAt,
+    DateTime? uploadedAt,
   }) async {
     final at = lastAccessAt ?? DateTime.now();
     final existing = await entry(sha256);
@@ -39,6 +41,7 @@ class SqliteBlobCacheMeta implements BlobCacheMeta {
             byteSize: Value(byteSize),
             lastAccessAt: at,
             refCount: Value(refCountDelta),
+            uploadedAt: Value(uploadedAt),
           ));
       return;
     }
@@ -47,6 +50,8 @@ class SqliteBlobCacheMeta implements BlobCacheMeta {
       byteSize: Value(byteSize > 0 ? byteSize : existing.byteSize),
       lastAccessAt: Value(at),
       refCount: Value(existing.refCount + refCountDelta),
+      // 只在显式传入时覆盖：null 表示「本次不表态」，而非「清空」。
+      uploadedAt: uploadedAt == null ? const Value.absent() : Value(uploadedAt),
     ));
   }
 
@@ -54,6 +59,12 @@ class SqliteBlobCacheMeta implements BlobCacheMeta {
   Future<void> touch(String sha256, DateTime at) async {
     await (db.update(db.blobRefs)..where((t) => t.sha256.equals(sha256)))
         .write(BlobRefsCompanion(lastAccessAt: Value(at)));
+  }
+
+  @override
+  Future<void> markUploaded(String sha256, DateTime at) async {
+    await (db.update(db.blobRefs)..where((t) => t.sha256.equals(sha256)))
+        .write(BlobRefsCompanion(uploadedAt: Value(at)));
   }
 
   @override
@@ -65,6 +76,7 @@ class SqliteBlobCacheMeta implements BlobCacheMeta {
               byteSize: r.byteSize,
               lastAccessAt: r.lastAccessAt,
               refCount: r.refCount,
+              uploadedAt: r.uploadedAt,
             ))
         .toList();
   }

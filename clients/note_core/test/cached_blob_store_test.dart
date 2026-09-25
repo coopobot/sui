@@ -18,6 +18,7 @@ class MemoryBlobCacheMeta implements BlobCacheMeta {
     required int byteSize,
     int refCountDelta = 0,
     DateTime? lastAccessAt,
+    DateTime? uploadedAt,
   }) async {
     final at = lastAccessAt ?? DateTime.now();
     final existing = _map[sha256];
@@ -27,6 +28,7 @@ class MemoryBlobCacheMeta implements BlobCacheMeta {
         byteSize: byteSize,
         lastAccessAt: at,
         refCount: refCountDelta,
+        uploadedAt: uploadedAt,
       );
       return;
     }
@@ -35,6 +37,7 @@ class MemoryBlobCacheMeta implements BlobCacheMeta {
       byteSize: byteSize > 0 ? byteSize : existing.byteSize,
       lastAccessAt: at,
       refCount: existing.refCount + refCountDelta,
+      uploadedAt: uploadedAt ?? existing.uploadedAt,
     );
   }
 
@@ -47,6 +50,20 @@ class MemoryBlobCacheMeta implements BlobCacheMeta {
       byteSize: e.byteSize,
       lastAccessAt: at,
       refCount: e.refCount,
+      uploadedAt: e.uploadedAt,
+    );
+  }
+
+  @override
+  Future<void> markUploaded(String sha256, DateTime at) async {
+    final e = _map[sha256];
+    if (e == null) return;
+    _map[sha256] = BlobCacheEntry(
+      sha256: e.sha256,
+      byteSize: e.byteSize,
+      lastAccessAt: e.lastAccessAt,
+      refCount: e.refCount,
+      uploadedAt: at,
     );
   }
 
@@ -125,7 +142,45 @@ void main() {
     expect(await store.read('nohash00'), isNull);
   });
 
-  test('容量超限按 LRU 淘汰最旧（含引用）', () async {
+  test('put 不动引用计数（计数唯一来源是附件映射）', () async {
+    final store = CachedBlobStore(local: local, meta: meta, maxBytes: 1024);
+    await store.put(
+        sha256: 'h1', bytes: Uint8List.fromList('data'.codeUnits));
+
+    final e = await store.entry('h1');
+    expect(e, isNotNull);
+    expect(e!.refCount, 0, reason: 'put 只登记字节，计数由 NoteRepository 维护');
+    expect(e.uploadedAt, isNull, reason: '新写入的字节尚未确认上传');
+  });
+
+  test('read 按需下载后标记为「服务端已持有」', () async {
+    final store = CachedBlobStore(
+      local: local,
+      meta: meta,
+      maxBytes: 1024,
+      fetcher: (h) async => Uint8List.fromList('downloaded-$h'.codeUnits),
+    );
+    const h = 'abc12345';
+    await store.read(h);
+
+    final e = await store.entry(h);
+    expect(e!.uploadedAt, isNotNull, reason: '字节来自服务端 ⇒ 无需再补传');
+    expect(await store.pendingUploads(), isEmpty);
+  });
+
+  test('pendingUploads 只含本地有字节且未确认上传的项', () async {
+    final store = CachedBlobStore(local: local, meta: meta, maxBytes: 1024);
+    await store.put(sha256: 'h1', bytes: Uint8List.fromList('a'.codeUnits));
+    await store.put(sha256: 'h2', bytes: Uint8List.fromList('b'.codeUnits));
+    await store.markUploaded('h2');
+    // h3 只有记账行（远端映射下行），本地并没有字节 → 不应出现在待上传里。
+    await store.updateRef('h3', 1);
+
+    final pending = await store.pendingUploads();
+    expect(pending.map((e) => e.sha256), ['h1']);
+  });
+
+  test('容量超限按 LRU 淘汰最旧（全部有引用）', () async {
     final store = CachedBlobStore(local: local, meta: meta, maxBytes: 100);
     // 每个 40 字节 × 3 = 120 > 100，写入第三个时触发淘汰。
     final b1 = Uint8List.fromList(List.filled(40, 1));
@@ -134,6 +189,9 @@ void main() {
 
     await store.put(sha256: 'h1', bytes: b1);
     await store.put(sha256: 'h2', bytes: b2);
+    // 都挂上引用，淘汰就只能走「按最旧访问」这一支。
+    await store.updateRef('h1', 1);
+    await store.updateRef('h2', 1);
     await store.put(sha256: 'h3', bytes: b3);
 
     // 最旧的 h1 被淘汰：物理字节删除 + 记账清除。
@@ -149,10 +207,10 @@ void main() {
     final b1 = Uint8List.fromList(List.filled(40, 1));
     final b2 = Uint8List.fromList(List.filled(40, 2));
 
-    // h1 保留引用；h2 引用归零成为孤儿。
+    // h1 保留引用；h2 无人引用（挂载后被删掉的附件就是这种状态）。
     await store.put(sha256: 'h1', bytes: b1);
     await store.put(sha256: 'h2', bytes: b2);
-    await store.updateRef('h2', -1);
+    await store.updateRef('h1', 1);
     // 让孤儿 h2 反而更新（验证淘汰不看新旧，看引用状态）。
     await meta.touch('h2', DateTime.now().add(const Duration(seconds: 5)));
 
@@ -170,10 +228,23 @@ void main() {
     final bytes = Uint8List.fromList('x'.codeUnits);
 
     await store.put(sha256: 'h1', bytes: bytes);
+    await store.updateRef('h1', 1);
     await store.updateRef('h1', -1); // 引用归零
 
     await store.sweepOrphans();
     expect(await store.exists('h1'), isFalse);
+  });
+
+  test('setCapacity 调小后立即回收', () async {
+    final store = CachedBlobStore(local: local, meta: meta, maxBytes: 1024);
+    await store.put(
+        sha256: 'h1', bytes: Uint8List.fromList(List.filled(40, 1)));
+    await store.put(
+        sha256: 'h2', bytes: Uint8List.fromList(List.filled(40, 2)));
+    expect(await store.exists('h1'), isTrue);
+
+    await store.setCapacity(40);
+    expect(await store.cachedBytes, lessThanOrEqualTo(40));
   });
 
   test('delete 同时清除物理字节与记账', () async {

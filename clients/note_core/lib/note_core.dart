@@ -18,5 +18,6 @@ export 'src/repository/note_repository.dart';
 export 'src/repository/settings_store.dart';
 export 'src/db/app_database.dart';
 export 'src/util/ids.dart';
+export 'src/util/mime_kind.dart';
 export 'src/sync/auth_client.dart';
 export 'src/sync/sync_client.dart';

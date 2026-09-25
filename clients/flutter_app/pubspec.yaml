@@ -18,6 +18,9 @@ dependencies:
   path: ^1.9.0
   path_provider: ^2.1.0
   web_socket_channel: ^3.0.0
+  # 附件选择：一套 API 覆盖 Web / 桌面 / 移动（`withData: true` 直接拿字节，
+  # 因此客户端无需 `dart:io`，Web 构建不受影响）。
+  file_picker: ^8.1.0
 
 dev_dependencies:
   flutter_test:

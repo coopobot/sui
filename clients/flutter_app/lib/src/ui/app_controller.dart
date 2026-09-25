@@ -20,6 +20,24 @@ enum SyncState {
   error,
 }
 
+/// 附件的可用性：字节在本地还是只在服务端，以及服务端是否已持有。
+///
+/// 方案 B 下「本地有字节」与「服务端有字节」是两个独立事实，UI 必须分开表达，
+/// 否则用户看到「已缓存」会误以为换台设备也一定能打开。
+enum AttachmentAvailability {
+  /// 本地有字节，且服务端已确认持有 —— 真正的多端可用。
+  cached,
+
+  /// 本地有字节，但服务端还没拿到（刚挂上、尚未上传成功）。
+  pendingUpload,
+
+  /// 本地有字节，但当前没连服务端 —— 仅本机可用。
+  localOnly,
+
+  /// 本地没有字节，需要按需下载。
+  remoteOnly,
+}
+
 /// 应用状态中枢：持有仓储与同步客户端，向 UI 暴露笔记本树/笔记列表/同步状态。
 ///
 /// 离线优先：所有编辑先落本地 SQLite，再入 Outbox 异步推送；同步失败不影响
@@ -54,6 +72,9 @@ class AppController extends ChangeNotifier {
   CachedBlobStore? _blobStore;
 
   /// 附件缓存（方案 B：按需拉取 + LRU 上限）。
+  ///
+  /// 生命周期与「连接」解耦：启动即建、断开连接后保留 —— 离线也要能挂载与
+  /// 查看附件，不该因为没连服务端就连本地附件都用不了。
   CachedBlobStore? get blobStore => _blobStore;
 
   SyncConfig _config = const SyncConfig();
@@ -98,10 +119,15 @@ class AppController extends ChangeNotifier {
   bool get hasSelection =>
       _selectedNotebookId != null || _query.isNotEmpty || _inboxMode;
 
-  /// 首次加载：读同步配置 → 载入本地数据 → 若已配置则连接并同步。
+  /// 首次加载：读同步配置 → 装配附件缓存 → 载入本地数据 → 若已配置则连接。
   Future<void> bootstrap() async {
     _config = await _settings.loadSyncConfig();
     _cacheLimitBytes = await _settings.cacheLimitBytes();
+    _blobStore = CachedBlobStore(
+      local: LocalBlobStore(_blobRoot()),
+      meta: SqliteBlobCacheMeta(_db),
+      maxBytes: _cacheLimitBytes,
+    );
     await refreshNotebooks();
     await refreshTags();
     await refreshNotes();
@@ -223,7 +249,7 @@ class AppController extends ChangeNotifier {
       return;
     }
 
-    _blobStore = CachedBlobStore(
+    _blobStore ??= CachedBlobStore(
       local: LocalBlobStore(_blobRoot()),
       meta: SqliteBlobCacheMeta(_db),
       maxBytes: _cacheLimitBytes,
@@ -331,10 +357,11 @@ class AppController extends ChangeNotifier {
         deviceId: _config.deviceId,
       ));
 
-  /// 调整附件缓存上限（字节）。下次连接生效。
+  /// 调整附件缓存上限（字节）。立即对已装配的缓存生效并回收超出部分。
   Future<void> setCacheLimitBytes(int bytes) async {
     _cacheLimitBytes = bytes;
     await _settings.setCacheLimitBytes(bytes);
+    await _blobStore?.setCapacity(bytes);
     notifyListeners();
   }
 
@@ -360,7 +387,7 @@ class AppController extends ChangeNotifier {
     _ws = null;
     _syncClient?.close();
     _syncClient = null;
-    _blobStore = null;
+    // 附件缓存不随连接销毁：本地字节与记账都要留着（离线可用）。
   }
 
   /// 订阅服务端变更广播：收到通知即拉取（多端即时感知）。
@@ -432,11 +459,66 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 附件字节是否已在本地缓存（未下载 ⇄ 已缓存）。
-  Future<bool> isAttachmentCached(Attachment a) async {
+  /// 把选中的文件挂到笔记上：落本地字节 → 建映射（引用计数 +1）→
+  /// 尝试上传字节 → 入队同步。返回新建的 [Attachment]。
+  ///
+  /// 上传失败不算失败：字节已在本地、映射已入库，同步周期会自动补传
+  /// （[SyncClient.backfillBlobs]），因此断网也能照常添加附件。
+  Future<Attachment> addAttachmentFromBytes({
+    required String noteId,
+    required String filename,
+    required Uint8List bytes,
+  }) async {
     final store = _blobStore;
-    if (store == null) return false;
-    return store.exists(a.sha256);
+    if (store == null) {
+      throw StateError('附件缓存未初始化');
+    }
+    final hash = sha256Hex(bytes);
+    await store.put(sha256: hash, bytes: bytes);
+    final att = await _repository.addAttachment(
+      noteId: noteId,
+      filename: filename,
+      mimeKind: mimeKindFor(filename),
+      byteSize: bytes.length,
+      sha256: hash,
+    );
+    await refreshAttachments(noteId);
+
+    final client = _syncClient;
+    if (client != null) {
+      try {
+        await client.uploadBlob(hash);
+      } on Exception {
+        // 断网/服务端不可用：留给同步周期补传。
+      }
+    }
+    final note = await _repository.getNote(noteId);
+    if (note != null) await _enqueueAndSchedule(note);
+    return att;
+  }
+
+  /// 摘除附件（墓碑 + 释放引用），并入队同步让对端收敛。
+  Future<void> removeAttachment(Attachment a) async {
+    await _repository.removeAttachment(a.id);
+    final noteId = a.noteId;
+    if (noteId != null) {
+      await refreshAttachments(noteId);
+      final note = await _repository.getNote(noteId);
+      if (note != null) await _enqueueAndSchedule(note);
+    }
+  }
+
+  /// 附件在「本地 / 服务端」两侧的可用状态（卡片展示用）。
+  Future<AttachmentAvailability> attachmentAvailability(Attachment a) async {
+    final store = _blobStore;
+    if (store == null) return AttachmentAvailability.remoteOnly;
+    if (!await store.exists(a.sha256)) return AttachmentAvailability.remoteOnly;
+    final client = _syncClient;
+    if (client == null) return AttachmentAvailability.localOnly;
+    final entry = await store.entry(a.sha256);
+    return entry?.uploadedAt == null
+        ? AttachmentAvailability.pendingUpload
+        : AttachmentAvailability.cached;
   }
 
   /// 当前附件缓存占用与上限（设置页展示）。
@@ -451,16 +533,24 @@ class AppController extends ChangeNotifier {
   /// 附件是否正在按需下载中（用于 UI 展示下载进度状态）。
   bool isDownloading(String sha256) => _downloading.contains(sha256);
 
-  /// 打开 / 下载附件字节：命中缓存直接返回，未命中按需下载。
-  /// 未配置同步客户端时返回 null（仅展示元数据）。
-  Future<Uint8List?> openAttachment(Attachment a) async {
+  /// 取附件字节：本地命中直接返回，未命中按需下载；未配置同步时返回 null。
+  Future<Uint8List?> loadAttachmentBytes(String sha256) async {
+    final store = _blobStore;
+    if (store == null) return null;
+    final local = await store.read(sha256);
+    if (local != null) return local;
     final client = _syncClient;
     if (client == null) return null;
+    return client.ensureBlob(sha256);
+  }
+
+  /// 打开附件（带下载状态标记，供卡片展示进度）。
+  Future<Uint8List?> openAttachment(Attachment a) async {
     final sha = a.sha256;
     _downloading.add(sha);
     notifyListeners();
     try {
-      return await client.ensureBlob(sha);
+      return await loadAttachmentBytes(sha);
     } finally {
       _downloading.remove(sha);
       notifyListeners();
@@ -473,6 +563,7 @@ class AppController extends ChangeNotifier {
     _wsSub?.cancel();
     _ws?.sink.close();
     _syncClient?.close();
+    _blobStore?.dispose();
     _auth?.close();
     super.dispose();
   }

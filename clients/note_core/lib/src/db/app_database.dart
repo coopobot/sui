@@ -104,14 +104,19 @@ class Attachments extends Table {
 
 /// 本地附件缓存记账（CachedBlobStore 的 LRU 元数据）。
 ///
-/// 每行 = 一个已缓存的字节内容：size 用于容量记账，lastAccessAt 用于
+/// 每行 = 一个已知的字节内容：size 用于容量记账，lastAccessAt 用于
 /// LRU 淘汰排序，refCount 表示被多少篇笔记引用（>0 才允许保留）。
+///
+/// [uploadedAt] 记录「服务端已确认持有该字节」的时刻，null 表示尚未确认：
+/// 本机新挂载的附件在字节成功 PUT 到服务端前都是 null，由同步周期补齐。
+/// 注意本表存在行 **不等于** 本地有字节（远端映射下行时也会建行）。
 @DataClassName('BlobRefRow')
 class BlobRefs extends Table {
   TextColumn get sha256 => text()();
   IntColumn get byteSize => integer().withDefault(const Constant(0))();
   DateTimeColumn get lastAccessAt => dateTime()();
   IntColumn get refCount => integer().withDefault(const Constant(0))();
+  DateTimeColumn get uploadedAt => dateTime().nullable()();
 
   @override
   Set<Column> get primaryKey => {sha256};
@@ -151,7 +156,7 @@ class AppDatabase extends _$AppDatabase {
       AppDatabase(openConnection(basePath: basePath));
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -165,6 +170,9 @@ class AppDatabase extends _$AppDatabase {
           }
           if (from <= 3) {
             await m.createTable(settings);
+          }
+          if (from <= 4) {
+            await m.addColumn(blobRefs, blobRefs.uploadedAt);
           }
         },
       );

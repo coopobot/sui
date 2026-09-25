@@ -152,11 +152,27 @@
 1. ✅ note_core：`CachedBlobStore`（实现 `BlobStore`，内部 = LocalBlobStore + 容量记账 + LRU 淘汰 + 下载回调）。
 2. ✅ 附件映射表：客户端 `blob_refs`（hash / size / last_access_at / ref_count，drift v3）与服务端 `attachments`（映射本体 + refcount 驱动，见修复 3）。
 3. ✅ SyncClient：`ensureBlob(hash)` 按需下载入口（`GET /blobs/{hash}` + 写入缓存）；附件映射随 push/pull 交换（修复 3）。
-4. ✅ Flutter UI：编辑器底部附件卡片区（文件名/大小/「未下载 ⇄ 已缓存」状态 + 下载进度提示）；`AppController` 暴露 `attachments` / `isAttachmentCached` / `openAttachment`。
+4. ✅ Flutter UI：编辑器工具条「添加附件」入口（`file_picker`，`withData: true` 统一拿字节）
+   + 底部附件卡片区（文件名/大小/可用性状态/移除）+ 预览内 `sui://<sha256>` 图片渲染（修复 4）。
 5. ✅ 服务端：`GET /blobs/{hash}` 已就绪（M5），无需改动；缩略图生成（C 方案）留后续。
-6. ✅ 测试：`cached_blob_store_test.dart` 7 用例（幂等 / 按需下载 / 无源返回 null / LRU 淘汰 / 孤儿优先 / 引用归零清理 / 删除联动）通过；note_core 全量 38 用例通过；flutter analyze 零问题、widget 测试通过。
+6. ✅ 测试：`cached_blob_store_test.dart`（幂等 / 按需下载 / 无源返回 null / LRU 淘汰 / 孤儿优先 /
+   引用归零清理 / 删除联动 / 待上传清单）+ `attachment_test.dart`（引用计数增删 / 共享 sha / 墓碑连带）
+   + `sync_client_test.dart`（先补传字节再 push 映射 / 不重复上传）；note_core 全量 51 用例通过；
+   flutter analyze 零问题、widget 测试通过。
 
-> 注：附件选择器/上传 UI（缺口 4）仍为后续增量项——同步通道已打通，缺的是「从哪来附件」的入口。
+**上传方向（修复 4 补齐）**
+
+方案 B 只规定了「字节按需下行」，上行方向必须同时明确，否则新增的附件永远留在本机：
+
+- **新增即上传，失败不阻断**：挂载附件时先落本地字节、再写映射（引用计数 +1），然后尽力
+  `PUT /blobs/{hash}`。上传失败（断网 / 未连服务端）不算失败——字节已在本地、映射已入库，
+  属于「待上传」状态。
+- **同步周期补传**：`blob_refs.uploaded_at` 为 null 即「服务端尚未确认持有」，`SyncClient.backfillBlobs()`
+  在每轮同步开头扫一遍待上传清单补齐。挂在同步周期而非独立重试队列，天然幂等、断网恢复后自愈。
+- **顺序：先补传字节，再 push 映射**。反过来会出现对端已收到映射、却下载不到字节的空窗。
+- **四态可用性**：UI 用 `AttachmentAvailability`（`cached` / `pendingUpload` / `localOnly` / `remoteOnly`）
+  而非布尔「已缓存」。只显示「已缓存」会让用户误以为换台设备也一定能打开——「本地有字节」与
+  「服务端有字节」是两件独立事实。
 
 > Web 端补充：浏览器无文件系统，`LocalBlobStore` 在 Web 退化为**进程内内存缓存**
 > （见 §19.5）。这与 BlobStore 的缓存语义一致，不构成数据丢失。
@@ -210,15 +226,15 @@ sui/
     │   │   │   └── sqlite_blob_cache_meta.dart
     │   │   ├── models/                    # Note/Notebook/Tag/Revision/Attachment
     │   │   ├── repository/note_repository.dart
-    │   │   ├── sync/sync_client.dart      # push/pull + ensureBlob
-    │   │   └── util/ids.dart
-    │   └── test/                          # 26 用例
+    │   │   ├── sync/sync_client.dart      # push/pull + ensureBlob + uploadBlob/backfillBlobs
+    │   │   └── util/                      # ids.dart（sha256Hex）/ mime_kind.dart（附件大类）
+    │   └── test/                          # 51 用例
     └── flutter_app/                       # Flutter 客户端
         ├── lib/src/
         │   ├── app.dart / main.dart
         │   ├── bootstrap.dart             # 存储初始化（默认落库）
-        │   ├── platform/                  # 数据目录条件导入
-        │   └── ui/                        # 三栏外壳/编辑器/修订面板
+        │   ├── platform/                  # 数据目录条件导入 + attachment_picker（file_picker 封装）
+        │   └── ui/                        # 三栏外壳/编辑器/修订面板/附件卡片
         ├── web/
         │   ├── index.html
         │   ├── sqlite3.wasm               # SQLite 引擎（Web）
@@ -306,12 +322,17 @@ IndexedDB 实现（壳文件的第三个分支）。
 - 服务端：Go 构建通过、8/8 测试通过；`ping`/`register`/`login`/`push`/`pull`/
   `blobs`(HEAD/PUT/GET)/`revisions`/`clips` 全部实测正常，鉴权 401、重复注册 409、
   坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
-- note_core：38/38 测试通过（落盘持久化 2 用例 + 配置存取 9 用例 + 附件映射 3 用例）。
+- note_core：51/51 测试通过（落盘持久化 2 + 配置存取 9 + 附件映射 3 + 引用计数 4 + 附件上传 3
+  + e2e 同步 2 等）。
 - flutter_app：5/5 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
   第二台设备拉取到）。
 - 同步链路：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
 - 附件映射：随笔记 push/pull 全量交换（含墓碑），服务端 blob `refcount` 由映射驱动；
   字节仍按需下载，映射同步不触发字节传输。
+- 附件上传：新增附件先落本地 → 写映射 → 尽力上传，失败留待 `backfillBlobs()` 在同步周期补传；
+  push 前先补字节，避免对端拿到映射却下不到字节。
+- 附件 UI：编辑器工具条「添加附件」入口（`file_picker` 跨端取字节）+ 底部卡片四态
+  （已同步 / 待上传 / 仅本机 / 未下载）+ 预览内 `sui://<sha256>` 图片渲染。
 - Web 构建：`flutter build web --release` 成功；真实浏览器验证启动、IndexedDB 落库。
 - 代码质量：`flutter analyze` 两个包 0 问题。
 
@@ -322,7 +343,7 @@ IndexedDB 实现（壳文件的第三个分支）。
 | 1 | **同步链路未接线**：`SyncClient` 从未实例化，`blobStore` 从未注入 | ✅ 修复 2 | 客户端原为纯本地编辑器；附件按需下载/LRU 机制曾是死代码 |
 | 2 | 无登录 / 服务端地址配置 UI | ✅ 修复 2 | 客户端原无法连接服务端 |
 | 3 | 服务端 `attachments` 表为半成品（建表但无读写方法与协议字段） | ✅ 修复 3 | 附件-笔记映射无法跨端重建 |
-| 4 | 无附件上传 / 选择器 | ⏳ 待修复 | 用户无法添加附件 |
+| 4 | 无附件上传 / 选择器 | ✅ 修复 4 | 用户无法添加附件 |
 | 5 | 缺桌面/移动平台脚手架目录 | ⏳ 待修复 | 这些端暂不可构建（代码路径已就绪） |
 | 6 | `lib/src/home_page.dart` 为 M0 死代码 | ⏳ 待修复 | 冗余，易误导 |
 | 7 | README/DEVELOPER 的运行命令与实际不符 | ⏳ 待修复 | 按文档操作会失败 |
@@ -467,3 +488,56 @@ IndexedDB 实现（壳文件的第三个分支）。
 
 > 顺带把本次改动的 Go 文件跑了 `gofmt -w`；仓库其余文件存在既有格式漂移，
 > 未一并处理以免产生无关 diff。
+
+#### 修复 4 ✅ 附件上传与选择器（方案 B 上行补齐）
+
+对应 §20.2 #4 与 §18.2「上传方向」。原状：附件只有下行通道（按需下载），没有任何上行入口
+——用户无法从本机添加附件；卡片只区分「未下载 / 已缓存」两态，而 `AppController` 缺
+`addAttachmentFromBytes` / `removeAttachment` 等入口，编辑器里也没有附件按钮。
+
+设计要点：
+
+- **上行三件事**（新增即传 / 同步周期补传 / 先补传再 push）见 §18.2「上传方向」。
+- **引用计数归仓储**：`addAttachment` +1、`removeAttachment` -1、`markNoteDeleted` 连带墓碑化
+  该笔记全部附件并逐个 -1。计数是方案 B 的关键一环——没有它，新挂载的附件会被 LRU 当孤儿淘汰。
+- **`uploaded_at` 标记而非每轮探测**：`blob_refs` 新增该列（drift schema v5），null = 服务端
+  尚未确认持有；上传成功或从服务端下载回来即置位。用本地记账判断待上传清单，不必每轮对全部
+  hash 发 `HEAD`，省网络且离线可用。
+- **字节读取放平台层**：note_core 是纯 Dart 包、不能碰 `dart:io`，故用 `file_picker` 的
+  `withData: true` 在平台层一次拿字节，Web / 桌面 / 移动三端接口一致。
+- **正文引用即事实**：挂载后在 Markdown 正文插入 `![name](sui://<sha256>)`。canonical 正本只有
+  Markdown，附件与正文必须一起同步，否则换台设备拉到笔记却不知道它带附件。
+- **预览图片走缓存**：`sui://` scheme 交给 `_SuiAttachmentImage`（本地命中或按需下载），
+  加载中 / 加载失败都有占位，不留白。
+- **修掉废弃 API**：`flutter_markdown` 的 `imageBuilder` 已废弃，预览改用 `sizedImageBuilder`
+  （额外拿到 `width` / `height`，图片尺寸约束更准）。
+
+落地内容：
+
+| 项 | 文件 | 说明 |
+|----|------|------|
+| schema v5 | `note_core/lib/src/db/app_database.dart` | `blob_refs.uploaded_at` + 迁移 |
+| 记账层 | `note_core/lib/src/blob/sqlite_blob_cache_meta.dart`、`cached_blob_store.dart` | `markUploaded` / `pendingUploads`（只查记账 + 一次本地存在性检查，不发网络） |
+| 引用计数 | `note_core/lib/src/repository/note_repository.dart` | `addAttachment` / `removeAttachment` / `markNoteDeleted` 维护 `blob_refs.refCount` |
+| 上传 | `note_core/lib/src/sync/sync_client.dart` | `uploadBlob`（幂等 `PUT /blobs/{hash}`）/ `backfillBlobs`；`sync()` 先补传再 push |
+| MIME 推断 | `note_core/lib/src/util/mime_kind.dart` | 由扩展名推大类（卡片图标用），不做内容嗅探 |
+| 平台选择器 | `flutter_app/lib/src/platform/attachment_picker.dart` | `file_picker` 封装，返回文件名 + 字节 |
+| 状态中枢 | `flutter_app/lib/src/ui/app_controller.dart` | `addAttachmentFromBytes` / `removeAttachment` / `attachmentAvailability` / `openAttachment` |
+| 编辑器 UI | `flutter_app/lib/src/ui/note_editor.dart` | 工具条「添加附件」+ 卡片四态（已同步/待上传/仅本机/未下载）+ 移除 + `sui://` 预览渲染 |
+| 预览钩子 | `flutter_app/lib/src/ui/markdown_editor.dart` | `imageBuilder` → `sizedImageBuilder` |
+| 依赖 | `flutter_app/pubspec.yaml` | 新增 `file_picker` |
+| 测试 | `note_core/test/attachment_test.dart`、`cached_blob_store_test.dart`、`sync_client_test.dart` | 引用计数增删 / 共享 sha / 墓碑连带 / 待上传清单 / 上传顺序 / 补传幂等 |
+
+验收（本次实测）：
+
+| 检查 | 命令 | 结果 |
+|------|------|------|
+| 服务端 | `go build ./... && go test -count=1 ./internal/api/` | 构建通过，8/8 PASS（本次未改服务端） |
+| note_core 测试 | `dart test` | 51/51 通过（新增引用计数 / 上传 / 补传等 13 用例） |
+| note_core 静态检查 | `dart analyze` | No issues found |
+| 客户端测试 | `flutter test` | 5/5 通过 |
+| 客户端静态检查 | `flutter analyze` | No issues found |
+| Web 构建 | `flutter build web --release` | ✓ Built build/web（含 `file_picker` Web 实现） |
+
+> 环境备注：`flutter test` / `dart test` 在 WSL 下需 `LD_LIBRARY_PATH=/home/aiuser/.local/lib`
+> （`libsqlite3.so` 软链所在目录），否则 drift 报 `Failed to load dynamic library 'libsqlite3.so'`。

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:note_core/note_core.dart';
 import 'package:provider/provider.dart';
 
+import '../platform/attachment_picker.dart';
 import 'app_controller.dart';
 import 'markdown_editor.dart';
 
@@ -164,6 +166,11 @@ class _NoteEditorState extends State<NoteEditor> {
               ),
               const Spacer(),
               IconButton(
+                tooltip: '添加附件',
+                icon: const Icon(Icons.attach_file),
+                onPressed: _pickAndAttach,
+              ),
+              IconButton(
                 tooltip: '版本历史',
                 icon: const Icon(Icons.history),
                 isSelected: context.watch<AppController>().showRevisionPanel,
@@ -190,10 +197,91 @@ class _NoteEditorState extends State<NoteEditor> {
             controller: _content,
             preview: _preview,
             onChanged: () => _save(),
+            imageBuilder: _buildImage,
           ),
         ),
         if (_attachments.isNotEmpty) _buildAttachmentBar(context),
       ],
+    );
+  }
+
+  /// 预览里的图片：`sui://<sha256>` 走附件缓存（本地命中或按需下载），
+  /// 其余交给默认的 `Image.network`。
+  Widget _buildImage(MarkdownImageConfig config) {
+    final uri = config.uri;
+    final label = config.alt ?? config.title ?? uri.toString();
+    if (uri.scheme != 'sui') {
+      return Image.network(
+        uri.toString(),
+        width: config.width,
+        height: config.height,
+        errorBuilder: (_, __, ___) => _AttachmentPlaceholder(label: label),
+      );
+    }
+    return _SuiAttachmentImage(
+      sha256: uri.host,
+      label: config.alt ?? config.title ?? '附件',
+      width: config.width,
+      height: config.height,
+    );
+  }
+
+  /// 选择文件并挂到当前笔记上，同时在正文里插入 `![](sui://<sha256>)` 引用。
+  ///
+  /// 引用写进正文是刻意的：canonical 正本只有 Markdown，附件与正文必须一起
+  /// 同步，否则换台设备拉到笔记却不知道它带附件。
+  Future<void> _pickAndAttach() async {
+    final id = _controller.selectedNoteId;
+    if (id == null) return;
+
+    List<PickedAttachment> picked;
+    try {
+      picked = await pickAttachments();
+    } catch (e) {
+      _toast('打开文件选择器失败：$e');
+      return;
+    }
+    if (picked.isEmpty) return;
+
+    final refs = <String>[];
+    for (final f in picked) {
+      try {
+        final att = await _controller.addAttachmentFromBytes(
+          noteId: id,
+          filename: f.filename,
+          bytes: f.bytes,
+        );
+        refs.add('![${att.filename}](sui://${att.sha256})');
+      } catch (e) {
+        _toast('附件「${f.filename}」添加失败：$e');
+      }
+    }
+    if (refs.isEmpty) return;
+
+    setState(() {
+      _attachments = _controller.attachments;
+      final buf = StringBuffer(_content.text);
+      if (buf.isNotEmpty && !buf.toString().endsWith('\n')) buf.write('\n');
+      for (final r in refs) {
+        buf.write('\n$r\n');
+      }
+      _content.text = buf.toString();
+    });
+    await _save();
+    _toast('已添加 ${refs.length} 个附件');
+  }
+
+  Future<void> _removeAttachment(Attachment a) async {
+    await _controller.removeAttachment(a);
+    if (!mounted) return;
+    setState(() => _attachments = _controller.attachments);
+    _toast('已移除「${a.filename}」');
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
     );
   }
 
@@ -206,43 +294,31 @@ class _NoteEditorState extends State<NoteEditor> {
         itemCount: _attachments.length,
         separatorBuilder: (_, __) => const SizedBox(width: 8),
         itemBuilder: (context, i) => _AttachmentCard(
+          key: ValueKey(_attachments[i].id),
           attachment: _attachments[i],
-          cached: _controller.syncClient != null
-              ? null // 未知 → 卡片自行查询
-              : false,
           onOpen: () => _openAttachment(_attachments[i]),
+          onDelete: () => _removeAttachment(_attachments[i]),
         ),
       ),
     );
   }
 
   Future<void> _openAttachment(Attachment a) async {
-    final Uint8List? bytes;
+    Uint8List? bytes;
     try {
       bytes = await _controller.openAttachment(a);
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('下载「${a.filename}」失败：$e')),
-      );
+      _toast('下载「${a.filename}」失败：$e');
       return;
     }
     if (bytes == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text('附件「${a.filename}」未配置同步客户端，无法下载')),
-      );
+      _toast('附件「${a.filename}」本机没有字节，且当前未连接服务端');
       return;
     }
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-          content: Text('已下载「${a.filename}」（${bytes.length} 字节，已缓存）'),
-          duration: const Duration(seconds: 2)),
-    );
-    // 刷新卡片缓存状态
+    // 刷新卡片状态（未下载 → 已缓存/待上传）。
     setState(() {});
+    _toast('已下载「${a.filename}」（${bytes.length} 字节，已缓存）');
   }
 
   void _addTag() {
@@ -355,86 +431,76 @@ class _EmptyEditor extends StatelessWidget {
   }
 }
 
-/// 单个附件卡片：文件名 + 大小 + 缓存状态（未下载 ⇄ 已缓存）+ 打开/下载。
+/// 单个附件卡片：文件名 + 大小 + 可用性状态 + 打开/移除。
+///
+/// 状态用 [AttachmentAvailability] 而非布尔「已缓存」：方案 B 下「本地有字节」
+/// 与「服务端已持有」是两件事，只显示「已缓存」会让用户误以为换台设备也能打开。
 class _AttachmentCard extends StatefulWidget {
   const _AttachmentCard({
+    super.key,
     required this.attachment,
-    required this.cached,
     required this.onOpen,
+    required this.onDelete,
   });
 
   final Attachment attachment;
-
-  /// 已知缓存状态；null 表示需自行异步查询。
-  final bool? cached;
   final VoidCallback onOpen;
+  final VoidCallback onDelete;
 
   @override
   State<_AttachmentCard> createState() => _AttachmentCardState();
 }
 
 class _AttachmentCardState extends State<_AttachmentCard> {
-  late bool _cached;
-  bool _checking = true;
+  AttachmentAvailability? _availability;
   bool _downloading = false;
 
   @override
   void initState() {
     super.initState();
-    final known = widget.cached;
-    if (known != null) {
-      _cached = known;
-      _checking = false;
-    } else {
-      _cached = false;
-      _downloading = context.read<AppController>().isDownloading(widget.attachment.sha256);
-      _check();
-    }
+    _downloading =
+        context.read<AppController>().isDownloading(widget.attachment.sha256);
+    _refresh();
   }
 
   @override
   void didUpdateWidget(covariant _AttachmentCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final known = widget.cached;
-    if (known != null) {
-      _cached = known;
-      _checking = false;
-      return;
-    }
     final sha = widget.attachment.sha256;
     if (oldWidget.attachment.sha256 != sha) {
-      _check();
+      _availability = null;
+      _refresh();
       return;
     }
-    // 下载完成过渡（下载中 → 结束）后重新确认缓存状态
+    // 「下载中 → 结束」的过渡需要重新确认状态：远端未下载 → 本地已缓存。
     final nowDownloading = context.read<AppController>().isDownloading(sha);
-    if (_downloading && !nowDownloading) {
-      _check();
-    }
+    if (_downloading && !nowDownloading) _refresh();
     _downloading = nowDownloading;
   }
 
-  Future<void> _check() async {
-    final cached = await context.read<AppController>().isAttachmentCached(widget.attachment);
+  Future<void> _refresh() async {
+    final v = await context
+        .read<AppController>()
+        .attachmentAvailability(widget.attachment);
     if (!mounted) return;
-    setState(() {
-      _cached = cached;
-      _checking = false;
-    });
+    setState(() => _availability = v);
   }
 
   @override
   Widget build(BuildContext context) {
     final a = widget.attachment;
     final downloading = context.watch<AppController>().isDownloading(a.sha256);
+    final availability = _availability;
+    final busy = availability == null || downloading;
+
     return Material(
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       borderRadius: BorderRadius.circular(10),
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
-        onTap: widget.onOpen,
+        onTap: busy ? null : widget.onOpen,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          padding: const EdgeInsets.only(left: 10, right: 2),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -445,7 +511,7 @@ class _AttachmentCardState extends State<_AttachmentCard> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 160),
+                    constraints: const BoxConstraints(maxWidth: 150),
                     child: Text(
                       a.filename,
                       overflow: TextOverflow.ellipsis,
@@ -453,7 +519,7 @@ class _AttachmentCardState extends State<_AttachmentCard> {
                     ),
                   ),
                   Text(
-                    '${_formatSize(a.byteSize)} · ${_statusText(downloading)}',
+                    '${_formatSize(a.byteSize)} · ${_statusText(downloading, availability)}',
                     style: Theme.of(context)
                         .textTheme
                         .labelSmall
@@ -462,16 +528,20 @@ class _AttachmentCardState extends State<_AttachmentCard> {
                 ],
               ),
               const SizedBox(width: 8),
-              if (_checking || downloading)
+              if (busy)
                 const SizedBox(
                   width: 14,
                   height: 14,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
-              else if (_cached)
-                const Icon(Icons.cloud_done_outlined, size: 16)
               else
-                const Icon(Icons.download_for_offline_outlined, size: 16),
+                Icon(_statusIcon(availability), size: 16),
+              IconButton(
+                tooltip: '移除附件',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.close, size: 16),
+                onPressed: widget.onDelete,
+              ),
             ],
           ),
         ),
@@ -479,10 +549,31 @@ class _AttachmentCardState extends State<_AttachmentCard> {
     );
   }
 
-  String _statusText(bool downloading) {
-    if (_checking) return '检查中';
+  String _statusText(
+    bool downloading,
+    AttachmentAvailability? availability,
+  ) {
     if (downloading) return '下载中…';
-    return _cached ? '已缓存' : '未下载';
+    if (availability == null) return '检查中';
+    return switch (availability) {
+      AttachmentAvailability.cached => '已同步',
+      AttachmentAvailability.pendingUpload => '待上传',
+      AttachmentAvailability.localOnly => '仅本机',
+      AttachmentAvailability.remoteOnly => '未下载',
+    };
+  }
+
+  IconData _statusIcon(AttachmentAvailability availability) {
+    switch (availability) {
+      case AttachmentAvailability.cached:
+        return Icons.cloud_done_outlined;
+      case AttachmentAvailability.pendingUpload:
+        return Icons.cloud_upload_outlined;
+      case AttachmentAvailability.localOnly:
+        return Icons.smartphone_outlined;
+      case AttachmentAvailability.remoteOnly:
+        return Icons.download_for_offline_outlined;
+    }
   }
 
   IconData _iconFor(String mimeKind) {
@@ -504,6 +595,121 @@ class _AttachmentCardState extends State<_AttachmentCard> {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+}
+
+/// 预览内联的 `sui://<sha256>` 图片：走附件缓存（本地命中或按需下载）。
+///
+/// 与卡片同理，加载不出来时必须给出可读回退而不是留白 —— 换台设备首次打开
+/// 需要一次下载，断网就会落到失败态。
+class _SuiAttachmentImage extends StatefulWidget {
+  const _SuiAttachmentImage({
+    required this.sha256,
+    required this.label,
+    this.width,
+    this.height,
+  });
+
+  final String sha256;
+  final String label;
+  final double? width;
+  final double? height;
+
+  @override
+  State<_SuiAttachmentImage> createState() => _SuiAttachmentImageState();
+}
+
+class _SuiAttachmentImageState extends State<_SuiAttachmentImage> {
+  Uint8List? _bytes;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SuiAttachmentImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sha256 != widget.sha256) {
+      _bytes = null;
+      _failed = false;
+      _load();
+    }
+  }
+
+  Future<void> _load() async {
+    if (widget.sha256.isEmpty) {
+      setState(() => _failed = true);
+      return;
+    }
+    try {
+      final bytes = await context
+          .read<AppController>()
+          .loadAttachmentBytes(widget.sha256);
+      if (!mounted) return;
+      setState(() {
+        _bytes = bytes;
+        _failed = bytes == null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _failed = true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = _bytes;
+    if (bytes != null) {
+      return Image.memory(
+        bytes,
+        width: widget.width,
+        height: widget.height,
+        errorBuilder: (_, __, ___) => _AttachmentPlaceholder(label: widget.label),
+      );
+    }
+    if (_failed) return _AttachmentPlaceholder(label: widget.label);
+    return _AttachmentPlaceholder(label: widget.label, loading: true);
+  }
+}
+
+/// 附件在预览里加载中 / 加载失败时的统一占位。
+class _AttachmentPlaceholder extends StatelessWidget {
+  const _AttachmentPlaceholder({required this.label, this.loading = false});
+
+  final String label;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        border: Border.all(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (loading)
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            const Icon(Icons.broken_image_outlined, size: 18),
+          const SizedBox(width: 6),
+          Text(
+            loading ? '加载「$label」…' : label,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ),
+    );
   }
 }
 

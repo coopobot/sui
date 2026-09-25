@@ -11,16 +11,20 @@ class MarkdownEditor extends StatelessWidget {
     required this.controller,
     required this.preview,
     required this.onChanged,
+    this.imageBuilder,
   });
 
   final TextEditingController controller;
   final bool preview;
   final VoidCallback onChanged;
 
+  /// 预览模式的图片渲染钩子（用于 `sui://<sha256>` 这类附件引用）。
+  final MarkdownSizedImageBuilder? imageBuilder;
+
   @override
   Widget build(BuildContext context) {
     if (preview) {
-      return MarkdownPreview(text: controller.text);
+      return MarkdownPreview(text: controller.text, imageBuilder: imageBuilder);
     }
     return _SourceEditor(controller: controller, onChanged: onChanged);
   }
@@ -92,8 +96,9 @@ class _SourceEditorState extends State<_SourceEditor> {
 
 /// Markdown 预览：flutter_markdown 渲染。
 class MarkdownPreview extends StatelessWidget {
-  const MarkdownPreview({super.key, required this.text});
+  const MarkdownPreview({super.key, required this.text, this.imageBuilder});
   final String text;
+  final MarkdownSizedImageBuilder? imageBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -104,6 +109,7 @@ class MarkdownPreview extends StatelessWidget {
       child: Markdown(
         data: text,
         selectable: true,
+        sizedImageBuilder: imageBuilder,
         styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
       ),
     );

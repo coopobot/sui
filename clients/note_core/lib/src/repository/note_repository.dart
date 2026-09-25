@@ -282,15 +282,28 @@ class NoteRepository {
     ));
   }
 
-  /// 软删除（墓碑）。逻辑删除保持跨端同步收敛。
+  /// 逻辑删除笔记（墓碑，保持跨端同步收敛），并连带墓碑化它的附件映射。
+  ///
+  /// 附件映射必须一起墓碑化：否则对端拉到笔记墓碑后本地附件行仍然「活着」，
+  /// 引用计数不减、映射也收敛不到删除态。
   Future<void> markNoteDeleted(String id, {DateTime? now}) async {
     final t = now ?? DateTime.now();
-    await (db.update(db.notes)..where((n) => n.id.equals(id)))
-        .write(NotesCompanion(
-      isDeleted: const Value(true),
-      deletedAt: Value(t),
-      updatedAt: Value(t),
-    ));
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        isDeleted: const Value(true),
+        deletedAt: Value(t),
+        updatedAt: Value(t),
+      ));
+      final atts = await (db.select(db.attachments)
+            ..where((r) => r.noteId.isValue(id) & r.isDeleted.equals(false)))
+          .get();
+      for (final a in atts) {
+        await (db.update(db.attachments)..where((r) => r.id.equals(a.id)))
+            .write(const AttachmentsCompanion(isDeleted: Value(true)));
+        if (a.sha256.isNotEmpty) await _adjustBlobRef(a.sha256, -1);
+      }
+    });
   }
 
   Future<List<Revision>> listRevisions(String noteId) async {
@@ -439,9 +452,10 @@ class NoteRepository {
         .write(BlobRefsCompanion(refCount: Value(next < 0 ? 0 : next)));
   }
 
-  /// 为笔记挂载一个附件（写入附件元数据行）。
+  /// 为笔记挂载一个附件（写入附件元数据行 + 本地引用计数 +1）。
   ///
   /// [sha256] 为内容地址；字节本身已通过 BlobStore 落盘（此处只管引用）。
+  /// 计数是方案 B 的关键一环：没有它，新挂载的附件会被 LRU 当孤儿淘汰。
   /// 返回新创建的 [Attachment]。
   Future<Attachment> addAttachment({
     String? id,
@@ -457,27 +471,41 @@ class NoteRepository {
   }) async {
     final t = now ?? DateTime.now();
     final aid = id ?? newId();
-    await db.into(db.attachments).insert(AttachmentsCompanion.insert(
-          id: aid,
-          noteId: Value(noteId),
-          filename: filename,
-          mimeKind: mimeKind,
-          byteSize: Value(byteSize),
-          sha256: sha256,
-          storageRef: storageRef ?? sha256,
-          thumbnailRef: Value(thumbnailRef),
-          embeddedPos: Value(embeddedPos),
-          createdAt: t,
-        ));
+    await db.transaction(() async {
+      await db.into(db.attachments).insert(AttachmentsCompanion.insert(
+            id: aid,
+            noteId: Value(noteId),
+            filename: filename,
+            mimeKind: mimeKind,
+            byteSize: Value(byteSize),
+            sha256: sha256,
+            storageRef: storageRef ?? sha256,
+            thumbnailRef: Value(thumbnailRef),
+            embeddedPos: Value(embeddedPos),
+            createdAt: t,
+          ));
+      if (sha256.isNotEmpty) {
+        await _adjustBlobRef(sha256, 1, byteSize: byteSize);
+      }
+    });
     return (await _attachmentById(aid))!;
   }
 
-  /// 软删除附件（附件映射删除时引用计数由上层配合调整）。
+  /// 软删除附件，并把引用计数减回去。
+  ///
+  /// 不减计数的话 blob 永远成不了孤儿，缓存只增不减（LRU 也救不回来）。
   Future<void> removeAttachment(String id) async {
-    await (db.update(db.attachments)..where((t) => t.id.equals(id)))
-        .write(AttachmentsCompanion(
-      isDeleted: const Value(true),
-    ));
+    await db.transaction(() async {
+      final prev = await (db.select(db.attachments)
+            ..where((t) => t.id.equals(id)))
+          .getSingleOrNull();
+      if (prev == null) return;
+      await (db.update(db.attachments)..where((t) => t.id.equals(id)))
+          .write(const AttachmentsCompanion(isDeleted: Value(true)));
+      if (!prev.isDeleted && prev.sha256.isNotEmpty) {
+        await _adjustBlobRef(prev.sha256, -1);
+      }
+    });
   }
 
   Future<Attachment?> _attachmentById(String id) async {

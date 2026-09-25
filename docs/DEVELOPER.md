@@ -345,8 +345,9 @@ make clean
 | `NoteRepository` | 本地数据访问门面：笔记本 CRUD、标签、笔记 CRUD、修订追加、搜索 |
 | `SyncClient` | 同步引擎：Outbox 合并、增量 pull、冲突本地合并、重发 |
 | `AppDatabase` | drift 数据库（8 表 + 迁移） |
-| `LocalBlobStore` | 附件本地存储实现 |
-| `CachedBlobStore` | 附件缓存层：LRU 上限 + 按需下载（`blob_refs` 记账） |
+| `LocalBlobStore` | 附件本地存储实现（原生分片落盘 / Web 内存缓存） |
+| `CachedBlobStore` | 附件缓存层：LRU 上限 + 按需下载 + `uploaded_at` 待上传记账（`blob_refs`） |
+| `mimeKindFor()` | 由扩展名推断附件大类（卡片图标用） |
 | `DeviceId` | 设备标识（冲突合并 / 来源标记用） |
 
 **新增表 / 字段时**：修改 `lib/src/db/app_database.dart` → 增加迁移版本 → `dart run build_runner build` → 同步域模型与 `NoteRepository`。
@@ -362,10 +363,11 @@ make clean
 | `note_shell.dart` | 响应式三栏骨架（宽屏三栏 / 窄屏抽屉 + 导航堆栈） |
 | `notebook_tree.dart` | 笔记本树 + 收件箱 + 全部笔记 + 标签入口 |
 | `note_list.dart` | 笔记列表（置顶 / 剪藏标签 / 搜索过滤） |
-| `note_editor.dart` | 编辑器（标题 / Markdown 双轨 / 标签 / 历史 / 导出 / 删除） |
-| `markdown_editor.dart` | 源码编辑 + 预览切换 |
+| `note_editor.dart` | 编辑器（标题 / Markdown 双轨 / 标签 / 附件卡片 / 历史 / 导出 / 删除） |
+| `markdown_editor.dart` | 源码编辑 + 预览切换（`sizedImageBuilder` 渲染 `sui://` 附件图） |
 | `revision_panel.dart` | 版本历史侧栏 + 一键恢复 |
-| `app_controller.dart` | 全局状态与业务编排 |
+| `app_controller.dart` | 全局状态与业务编排（含附件增删 / 上传 / 缓存状态） |
+| `platform/attachment_picker.dart` | 跨端文件选择（`file_picker`，返回文件名 + 字节） |
 
 **服务端地址**：`lib/src/home_page.dart` 的 `defaultServerUrl`（默认 `http://127.0.0.1:8080`），可按目标平台注入。
 
@@ -373,8 +375,10 @@ make clean
 
 ### 6.3 测试
 
-- note_core：17 个单元测试（仓储 CRUD / 标签 / 搜索 / 修订 / 同步）+ 1 个 e2e（注册→双端 push/pull→冲突合并→重发）。
-- flutter_app：widget 测试。
+- note_core：51 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+  缓存 LRU / 配置存取 / 落盘持久化，另含 2 个 e2e（注册→双端 push/pull→冲突合并→重发；
+  附件映射同步 + 字节按需下载）。
+- flutter_app：widget 测试 + `sync_wiring_test.dart`（起真服务端跑注册连接→同步→第二设备拉取）。
 - 运行前确保 `libsqlite3` 可用（见 §1.4）。
 
 ---
@@ -566,7 +570,7 @@ manifest 可声明 `action.default_icon` / `icons`；生成 16/32/48/128px PNG �
 
 后续可选方向：
 
-- [ ] 附件字节同步接入客户端（API 已就绪，客户端侧待接）
+- [x] 附件字节同步接入客户端（上行：新增即传 + 同步周期补传；下行：按需下载 + LRU 缓存）
 - [ ] 富文本 WYSIWYG 编辑器（flutter_quill 升级）
 - [ ] 行级 Diff 高亮
 - [ ] FTS5 全文搜索正式启用

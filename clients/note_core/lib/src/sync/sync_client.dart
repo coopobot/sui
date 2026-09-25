@@ -14,6 +14,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import '../blob/blob_store.dart';
+import '../blob/cached_blob_store.dart';
 import '../models/attachment.dart';
 import '../models/note.dart';
 import '../repository/note_repository.dart';
@@ -190,10 +191,58 @@ class SyncClient {
   }
 
   /// 一次性：push + pull。返回 (推送结果数, 拉取条数)。
+  ///
+  /// 顺序有意为之：**先补传附件字节，再 push 映射**。反过来会出现对端已经
+  /// 收到映射、却下载不到字节的空窗。
   Future<(int, int)> sync() async {
+    await backfillBlobs();
     final pushResults = await push();
     final pulled = await pull();
     return (pushResults.length, pulled);
+  }
+
+  /// 把本地新增、服务端尚未持有的附件字节补齐上传。返回成功条数。
+  ///
+  /// 挂在同步周期上而非单独的失败重试队列：新增附件时若断网，字节留在本地，
+  /// 联网后自动补传，天然幂等。
+  Future<int> backfillBlobs() async {
+    final store = blobStore;
+    if (store is! CachedBlobStore) return 0;
+    var uploaded = 0;
+    for (final e in await store.pendingUploads()) {
+      try {
+        if (await uploadBlob(e.sha256)) uploaded++;
+      } on Exception {
+        // 单条失败不阻断其余附件；下个周期继续。
+      }
+    }
+    return uploaded;
+  }
+
+  /// 把本地附件字节上传到服务端（幂等）。
+  ///
+  /// 只上传**本机确实持有**的字节；本地没有、[blobStore] 未配置或服务端拒绝
+  /// 时返回 false。成功后标记该 hash「服务端已持有」，后续周期不再重传。
+  Future<bool> uploadBlob(String sha256) async {
+    final store = blobStore;
+    if (store == null || sha256.isEmpty) return false;
+    // exists 走本地物理层，避免 read 未命中时触发一次按需下载。
+    if (!await store.exists(sha256)) return false;
+    final bytes = await store.read(sha256);
+    if (bytes == null || bytes.isEmpty) return false;
+
+    final uri = Uri.parse('$baseUrl/api/v1/blobs/$sha256');
+    final resp = await _http.put(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/octet-stream',
+      },
+      body: bytes,
+    );
+    if (resp.statusCode != 200) return false;
+    if (store is CachedBlobStore) await store.markUploaded(sha256);
+    return true;
   }
 
   /// 确保附件字节已缓存在本地（方案 B 按需下载入口）。
