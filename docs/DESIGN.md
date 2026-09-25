@@ -383,7 +383,7 @@ sudo apt install -y clang ninja-build pkg-config libgtk-3-dev
 | 3 | 服务端 `attachments` 表为半成品（建表但无读写方法与协议字段） | ✅ 修复 3 | 附件-笔记映射无法跨端重建 |
 | 4 | 无附件上传 / 选择器 | ✅ 修复 4 | 用户无法添加附件 |
 | 5 | 缺桌面/移动平台脚手架目录 | ✅ 修复 5 | 这些端暂不可构建（代码路径已就绪） |
-| 6 | `lib/src/home_page.dart` 为 M0 死代码 | ⏳ 待修复 | 冗余，易误导 |
+| 6 | `lib/src/home_page.dart` 为 M0 死代码 | ✅ 修复 6 | 冗余，易误导 |
 | 7 | README/DEVELOPER 的运行命令与实际不符 | ⏳ 待修复 | 按文档操作会失败 |
 | 8 | 文档「核心特性」全 ✅ 但部分未在客户端生效 | ⏳ 待修复 | 认知偏差 |
 
@@ -616,3 +616,22 @@ sudo apt install -y clang ninja-build pkg-config libgtk-3-dev
 > 结论：脚手架与平台配置已就位，**未验证的部分是工具链而非代码**。
 > Linux 端装齐 `clang ninja-build pkg-config libgtk-3-dev` 后即可构建；
 > Windows/macOS/iOS 需在对应宿主系统上构建。
+
+#### 修复 6 ✅ 删除 M0 死代码 `home_page.dart`
+
+对应 §20.2 #6。原状：`lib/src/home_page.dart` 是 M0 阶段「ping 服务端看连通性」的客户端壳，
+M1 起已被 `note_shell.dart` + `AppController` 整体取代，但文件一直留着。
+
+**为何是死代码（实测证据）**：仓库内 `HomePage` 的引用只出现在它自己的定义里，
+无任何 `import`；`defaultServerUrl` 也仅在该文件内被自身构造函数使用。
+
+落地内容：
+
+| 项 | 文件 | 说明 |
+|----|------|------|
+| 删除 | `flutter_app/lib/src/home_page.dart` | 整文件移除（`HomePage` / `_HomePageState` / `defaultServerUrl`） |
+| 文档纠偏 | `docs/DEVELOPER.md` §6.2 | 「服务端地址」原指向 `home_page.dart` 的 `defaultServerUrl`，改为描述真实链路：用户在同步设置对话框录入 → `SyncConfig.normalizeBaseUrl` 规整 → 存本地 SQLite `settings` 表 |
+| 文档补全 | `docs/DEVELOPER.md` §6.2 | UI 组件表补上遗漏的 `sync_settings_dialog.dart` |
+
+> 说明：`defaultServerUrl` 这个名字随文件一起消失是**正确的** —— 服务端地址早已不是编译期常量，
+> 而是运行期用户配置；文档若继续指向它，会让人误以为地址是写死的。

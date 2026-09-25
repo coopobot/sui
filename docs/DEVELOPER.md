@@ -367,9 +367,12 @@ make clean
 | `markdown_editor.dart` | 源码编辑 + 预览切换（`sizedImageBuilder` 渲染 `sui://` 附件图） |
 | `revision_panel.dart` | 版本历史侧栏 + 一键恢复 |
 | `app_controller.dart` | 全局状态与业务编排（含附件增删 / 上传 / 缓存状态） |
+| `sync_settings_dialog.dart` | 同步设置对话框（服务端地址 / Token / 设备 ID 的录入与校验） |
 | `platform/attachment_picker.dart` | 跨端文件选择（`file_picker`，返回文件名 + 字节） |
 
-**服务端地址**：`lib/src/home_page.dart` 的 `defaultServerUrl`（默认 `http://127.0.0.1:8080`），可按目标平台注入。
+**服务端地址**：不写死在代码里，由用户在「同步设置」对话框（`lib/src/ui/sync_settings_dialog.dart`）录入，
+经 `SyncConfig.normalizeBaseUrl` 规整后存入本地 SQLite `settings` 表；未填写时输入框以
+`http://127.0.0.1:8080` 作占位提示。运行时地址一律取自 `AppController` 持有的 `SyncConfig`。
 
 **新增 UI 页面流程**：组件放入 `lib/src/ui/` → 通过 `AppController` 读写状态 → widget 测试（`test/`）→ `flutter analyze`。
 
