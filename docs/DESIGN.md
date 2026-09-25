@@ -363,6 +363,10 @@ sudo apt install -y clang ninja-build pkg-config libgtk-3-dev
 - flutter_app：5/5 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
   第二台设备拉取到）。
 - 同步链路：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
+  同步触发点有三：编辑防抖 0.7s 推送、WS 通知拉取、**30s 周期兜底**（修复 8 补，
+  让「断网改动在恢复网络后自动补上」成立，而不必等用户再编辑一次）。
+- 测试稳定性：两个 e2e 起服务端由固定 `sleep 1.5s` 改为轮询 `/healthz` 探活，
+  消除机器繁忙时的「连接被拒」假失败。
 - 附件映射：随笔记 push/pull 全量交换（含墓碑），服务端 blob `refcount` 由映射驱动；
   字节仍按需下载，映射同步不触发字节传输。
 - 附件上传：新增附件先落本地 → 写映射 → 尽力上传，失败留待 `backfillBlobs()` 在同步周期补传；
@@ -384,14 +388,16 @@ sudo apt install -y clang ninja-build pkg-config libgtk-3-dev
 | 4 | 无附件上传 / 选择器 | ✅ 修复 4 | 用户无法添加附件 |
 | 5 | 缺桌面/移动平台脚手架目录 | ✅ 修复 5 | 这些端暂不可构建（代码路径已就绪） |
 | 6 | `lib/src/home_page.dart` 为 M0 死代码 | ✅ 修复 6 | 冗余，易误导 |
-| 7 | README/DEVELOPER 的运行命令与实际不符 | ⏳ 待修复 | 按文档操作会失败 |
-| 8 | 文档「核心特性」全 ✅ 但部分未在客户端生效 | ⏳ 待修复 | 认知偏差 |
+| 7 | README/DEVELOPER 的运行命令与实际不符 | ✅ 修复 7 | 按文档操作会失败 |
+| 8 | 文档「核心特性」全 ✅ 但部分未在客户端生效 | ✅ 修复 8 | 认知偏差 |
 
 ### 20.3 未实现的设计项
 
 - 缩略图生成（§18 方案 C）。
 - 桌面端「全量镜像」开关。
 - Web 端 BlobStore 的 IndexedDB 实现（当前为内存）。
+- FTS5 全文搜索（当前为 `LIKE` 子串匹配；表结构已预留）。
+- 富文本 WYSIWYG 编辑器（`flutter_quill` 升级，当前为源码 + 预览双轨）。
 
 ### 20.4 修复日志（按顺序滚动更新）
 
@@ -635,3 +641,61 @@ M1 起已被 `note_shell.dart` + `AppController` 整体取代，但文件一直�
 
 > 说明：`defaultServerUrl` 这个名字随文件一起消失是**正确的** —— 服务端地址早已不是编译期常量，
 > 而是运行期用户配置；文档若继续指向它，会让人误以为地址是写死的。
+
+#### 修复 7 ✅ 运行命令与文档对齐
+
+对应 §20.2 #7。做法：把文档里每条「照着敲会失败 / 会误导」的语句，逐条拿实测结果改写。
+
+| 位置 | 原状 | 改为 |
+|------|------|------|
+| README 结构树 | `protos/`（共享接口契约）、`scripts/`（构建/部署脚本） | 实测两目录为空且未入库，标注「预留（当前为空目录，未入库）」 |
+| README 运行客户端 | `flutter run -d windows`，并称「客户端默认连接 `http://127.0.0.1:8080`」 | Web 为本机已验证目标；各端列出所需工具链；地址改为「不预设，在同步设置里填」 |
+| DEVELOPER §2 结构树 | `Makefile` 被误嵌在 `server/` 下（`server/` 实无此文件） | 移到根层，并写明可用的 make 目标 |
+| DEVELOPER §3.1 | `go test`「当前 7 个用例」 | 8 个（实测，均在 `internal/api`） |
+| DEVELOPER §3.2 | 「单元测试（17 个）+ e2e（1 个）」 | 51 个（含 2 个 e2e，实测） |
+| DEVELOPER §3.3 | 「仓库只含 `web/`，需先 `flutter create`」 | 修复 5 已生成五端，改为「脚手架 ✅ / 本机可构建 / 缺什么」实况表 |
+| USER_GUIDE §2.3 | `healthz → ok`、`ping → {"ok":true}` | 贴实测返回体（两者都是 JSON，字段含 service/version/time） |
+| USER_GUIDE §4.1 | 「客户端默认连接 `http://127.0.0.1:8080`」 | 改为不预设地址，并新增 §4.3 逐字段说明「同步设置」对话框 |
+
+验收：`curl` 实测 `/healthz` 与 `/api/v1/ping` 返回体、`go test` 与 `dart test` 用例数、
+`ls` 目录实际内容，均与改后文档一致。
+
+#### 修复 8 ✅ 核心特性清单与实际能力对齐
+
+对应 §20.2 #8。核对「核心特性」每一行，发现的问题分两类：
+
+**(a) 文档把「没做的」写成了「做了」**
+
+| 位置 | 原状 | 实际 | 改为 |
+|------|------|------|------|
+| README/DESIGN 简介 | 「全文搜索」 | 实现是 `title/contentMarkdown` 的 `LIKE` 子串匹配，FTS5 未启用 | 「标题/正文关键字搜索」 |
+| DESIGN「核心特性」 | `✅ 全文搜索：SQLite FTS5 架构预留`（✅ 与「预留」自相矛盾） | 同上 | `⚠️ 关键字搜索：LIKE 子串匹配（FTS5 仅架构预留）` |
+| README/DESIGN「Markdown 编辑」 | 「源码 / 预览双模式，所见即所得渲染」 | 无富文本编辑，`flutter_quill` 未引入（依赖表可证） | 「源码 / 预览双模式（预览由 flutter_markdown 渲染；WYSIWYG 为后续增强）」 |
+| DESIGN「核心特性」附件行 | 「内容寻址 Blob 存储，云端与本地一致」 | 方案 B 下字节按需拉取、本地与云端**并不**一致（这正是 §18 的设计） | 「映射全量同步 + 字节按需拉取 + LRU 上限」 |
+
+**(b) 代码确实没做到文档承诺的**
+
+`离线优先 = 断网可读可写，联网后自动同步` 这半句当时不成立：同步只有
+「编辑防抖 0.7s 推送」和「WS 通知拉取」两个触发点，断网期间积压的 Outbox
+在恢复网络后**没有任何触发点**（WS 断了等不到广播；用户也可能不再编辑），
+只有手动点同步才会补上。
+
+落地：
+
+| 项 | 文件 | 说明 |
+|----|------|------|
+| 周期兜底同步 | `flutter_app/lib/src/ui/app_controller.dart` | 新增 `_syncTicker`（`Timer.periodic`，30s）→ `syncNow()`；`connect()` 启动，`disconnect()` / `dispose()` 停止。空闲时 push 无内容、pull 无增量，开销极小 |
+| 过期注释 | 同上 | `onError` / 连接失败两处原写「不影响手动/定时同步」，但当时并无定时同步；现已名副其实并写清是「周期兜底」 |
+
+验收（本次实测）：
+
+| 检查 | 命令 | 结果 |
+|------|------|------|
+| 服务端 | `go build ./... && go vet ./... && go test ./... -count=1` | 构建 / vet 通过，8/8 PASS |
+| note_core | `dart analyze && dart test` | No issues found；51/51 通过 |
+| 客户端 | `flutter analyze && flutter test` | No issues found；5/5 通过 |
+| Web 构建 | `flutter build web --release` | ✓ Built build/web |
+
+> 附带修掉一个测试可靠性问题：两个 e2e 起服务端后固定 `sleep 1.5s`，机器繁忙时
+> 服务端尚未监听，测试以「连接被拒」假失败（全量跑 `dart test` 时出现过，单跑却通过）。
+> 改为轮询 `GET /healthz` 探活（100ms 一次，上限 20s）。
