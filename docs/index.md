@@ -1,0 +1,49 @@
+# 文档索引
+
+欢迎来到 **随手记 Sui** 的文档中心。本目录收录项目的全部详细文档；根目录的
+`README.md`（总览）、`ARCHITECTURE.md`（架构入口）、`DEVELOPMENT.md`（开发入口）
+只作薄入口，深入内容都在这里。
+
+## 按角色找文档
+
+| 你的角色 | 建议阅读顺序 |
+|----------|--------------|
+| 想先跑起来 | [快速开始](getting-started.md) → [用户指南](guides/user-guide.md) |
+| 想理解系统 | [系统架构](architecture.md) → [架构决策记录](adr/) |
+| 要对接接口 | [API 参考](api-reference.md) |
+| 要部署上线 | [部署指南](deployment.md) |
+| 遇到问题 | [故障排查](troubleshooting.md) |
+
+## 目录
+
+### 入门
+
+- [快速开始](getting-started.md) —— 环境搭建、构建、测试、端到端联调
+- [用户指南](guides/user-guide.md) —— 整体概念、安装客户端、日常使用、多端同步、版本历史、数据导出
+- [网页剪藏](guides/web-clipper.md) —— Chrome / Edge 扩展的安装、配置与使用
+
+### 深入
+
+- [系统架构](architecture.md) —— 分层、数据模型、同步协议、附件策略、平台分层、目录结构
+- [API 参考](api-reference.md) —— HTTP 端点清单与 push / pull 载荷
+- [架构决策记录（ADR）](adr/) —— 关键决策的背景与权衡
+- [代码示例](examples/api-usage.md) —— 端到端 REST 调用示例
+
+### 运维
+
+- [部署指南](deployment.md) —— 服务端部署、反向代理、备份恢复、安全与生产化
+- [故障排查](troubleshooting.md) —— 常见问题与排查思路
+
+## 项目现状速览
+
+- **版本**：`0.1.0`
+- **里程碑**：M0–M5 全部完成（骨架 / 本地核心 / 多端同步 / 修订历史 / 网页剪藏 / 多端打磨）
+- **测试**：服务端 8/8、note_core 51/51、flutter_app 5/5 全绿；两个 Dart 包 `analyze` 零问题
+- **已知限制**：
+  - 搜索为 `title` / `content` 的 `LIKE` 子串匹配（FTS5 仅架构预留，未启用）
+  - 编辑器为「Markdown 源码 + 预览」双轨，暂无富文本 WYSIWYG
+  - Web 端附件缓存为进程内内存态（刷新后按需重下）
+  - 鉴权为演示级（明文密码前缀比对、无 Token 过期、无内置 HTTPS、CORS 全放开），公网部署前必须加固
+
+> 变更历史见根目录 [CHANGELOG.md](../CHANGELOG.md)；缺口明细见
+> [系统架构 · 当前状态与已知缺口](architecture.md#8-当前状态与已知缺口)。

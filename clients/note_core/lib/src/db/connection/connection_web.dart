@@ -3,7 +3,7 @@ import 'package:drift/wasm.dart';
 
 /// Web 连接：drift wasm + 浏览器持久化。
 ///
-/// 需要 `web/` 下存在两个资源（见 DEVELOPER.md §Web 端）：
+/// 需要 `web/` 下存在两个资源（见 `docs/getting-started.md`）：
 /// - `sqlite3.wasm`
 /// - `drift_worker.dart.js`
 ///

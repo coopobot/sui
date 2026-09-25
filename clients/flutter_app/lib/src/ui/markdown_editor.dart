@@ -58,28 +58,30 @@ class _SourceEditorState extends State<_SourceEditor> {
       color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: SingleChildScrollView(
-          child: TextField(
-            controller: widget.controller,
-            focusNode: _focus,
-            // Auto-grow: 以内容高度承载，避免滚动条噪。
-            expands: true,
-            maxLines: null,
-            keyboardType: TextInputType.multiline,
-            style: const TextStyle(
-              fontFamily: 'monospace',
-              fontSize: 14,
-              height: 1.6,
-            ),
-            decoration: InputDecoration(
-              border: InputBorder.none,
-              hintText:
-                  '# 标题\n\n在这里用 Markdown 书写…\n- 列表项\n- 加粗 **重要**',
-              hintStyle:
-                  TextStyle(color: scheme.outline.withValues(alpha: 0.6)),
-            ),
-            onChanged: (_) => _scheduleSave(),
+        // 不要套 SingleChildScrollView：它给子节点的高度约束是无界的，而
+        // `expands: true` 要求有界高度，两者相遇会在 layout 阶段断言失败
+        // （_RenderDecoration given an infinite size）。父级是 Expanded，
+        // 高度本来就有限，让 TextField 自己撑满并内部滚动即可。
+        child: TextField(
+          controller: widget.controller,
+          focusNode: _focus,
+          // 撑满编辑区高度，滚动交给 TextField 自己处理。
+          expands: true,
+          maxLines: null,
+          keyboardType: TextInputType.multiline,
+          style: const TextStyle(
+            fontFamily: 'monospace',
+            fontSize: 14,
+            height: 1.6,
           ),
+          decoration: InputDecoration(
+            border: InputBorder.none,
+            hintText:
+                '# 标题\n\n在这里用 Markdown 书写…\n- 列表项\n- 加粗 **重要**',
+            hintStyle:
+                TextStyle(color: scheme.outline.withValues(alpha: 0.6)),
+          ),
+          onChanged: (_) => _scheduleSave(),
         ),
       ),
     );

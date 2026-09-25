@@ -4,7 +4,9 @@
 
 > 项目英文名：**Sui**（音近「随手」）
 
-随手记 Sui 是一款面向个人知识管理的极简笔记应用：笔记以 Markdown 为唯一正本，本地 SQLite 离线优先存储，通过自托管 Go 服务端在多端之间同步；支持网页一键剪藏、版本历史恢复、标题/正文关键字搜索、附件与分组，数据完全由你自己掌控。
+随手记 Sui 是一款面向个人知识管理的极简笔记应用：笔记以 Markdown 为唯一正本，
+本地 SQLite 离线优先存储，通过自托管 Go 服务端在多端之间同步；支持网页一键剪藏、
+版本历史恢复、标题/正文关键字搜索、附件与分组，数据完全由你自己掌控。
 
 ## 核心特性
 
@@ -15,7 +17,7 @@
 | Markdown 编辑 | 源码 / 预览双模式（预览由 flutter_markdown 渲染；富文本 WYSIWYG 为后续可选增强） |
 | 网页剪藏 | Chrome MV3 扩展一键剪藏，服务端类 Readability 净化转 Markdown，自动进「收件箱」 |
 | 版本历史 | 每条修订记录可查看、可一键恢复，历史永不重写 |
-| 全局搜索 | 标题 / 正文关键字搜索 |
+| 全局搜索 | 标题 / 正文关键字搜索（`LIKE` 子串匹配，非 FTS5） |
 | 附件管理 | 内容寻址 Blob（sha256 去重）；映射全量同步、字节按需拉取 + LRU 缓存上限，本地占用与附件总量解耦 |
 | 笔记分组 | 笔记本（嵌套）+ 标签（多对多） |
 | 实时通知 | WebSocket 变更广播，多端即时感知 |
@@ -39,10 +41,18 @@
 
 ```
 sui/
-├── docs/                    # 文档中心
-│   ├── DESIGN.md            # 设计与规划文档（同步协议、冲突解决等）
-│   ├── USER_GUIDE.md        # 产品使用说明（部署 / 客户端 / 剪藏扩展）
-│   └── DEVELOPER.md         # 开发者文档（环境搭建 / 构建 / 测试 / 架构 / API）
+├── README.md  LICENSE  CONTRIBUTING.md  CHANGELOG.md    # 根级：社区/协作文件（全大写）
+├── CODE_OF_CONDUCT.md  SECURITY.md  DEVELOPMENT.md  ARCHITECTURE.md
+├── docs/                    # 文档中心（入口：docs/index.md）
+│   ├── index.md             # 文档索引
+│   ├── getting-started.md   # 环境搭建 / 构建测试 / 快速开始
+│   ├── architecture.md      # 系统架构 / 数据模型 / 同步协议
+│   ├── api-reference.md     # HTTP API 参考
+│   ├── deployment.md        # 部署与生产化
+│   ├── troubleshooting.md   # 故障排查
+│   ├── adr/                 # 架构决策记录
+│   ├── guides/              # 用户指南
+│   └── examples/            # 代码示例
 ├── server/                  # Go 同步服务端（自托管友好）
 │   ├── cmd/sui-server/      # 服务端入口
 │   └── internal/            # api / auth / blob / clip / cors / store / sync / ws 等
@@ -50,8 +60,6 @@ sui/
 │   ├── note_core/           # 多端共享核心逻辑（纯 Dart：模型 / 本地库 / 同步引擎）
 │   └── flutter_app/         # Flutter 多端客户端
 ├── extension/               # Chrome 剪藏扩展（Manifest V3）
-├── protos/                  # 预留（当前为空目录，未入库）
-├── scripts/                 # 预留（当前为空目录，未入库）
 └── Makefile                 # 顶层构建工具
 ```
 
@@ -90,11 +98,6 @@ cd clients/flutter_app
 flutter run -d chrome    # Web（本机已验证可运行）
 ```
 
-六个平台目录（`web` + 桌面/移动五端）均已入库，能否运行取决于本机工具链：
-`-d linux` 需 `clang ninja-build pkg-config libgtk-3-dev`，`-d android` 需 Android SDK，
-`-d windows` / `-d macos` / iOS 只能在对应宿主系统构建。详见
-[开发者文档 §3.3](docs/DEVELOPER.md#33-flutter-客户端)。
-
 客户端**不预设服务端地址**：首次使用点顶栏「同步设置」，填入地址（如
 `http://127.0.0.1:8080`）并用上一步拿到的账号「注册并连接」或「登录并连接」，
 配置会存入本地库，之后自动防抖同步。
@@ -105,13 +108,23 @@ flutter run -d chrome    # Web（本机已验证可运行）
 2. 「加载已解压的扩展程序」→ 选择 `extension/` 目录
 3. 点击扩展图标 → 右键「选项」→ 填入服务端地址与 Token
 
-详细步骤见 [docs/USER_GUIDE.md](docs/USER_GUIDE.md)。
+> 详细步骤与各平台构建说明见 [docs/getting-started.md](docs/getting-started.md)。
 
-## 文档索引
+## 文档导航
 
-- [📖 产品使用说明](docs/USER_GUIDE.md) —— 服务端部署、客户端使用、剪藏扩展、账号与同步
-- [🛠 开发者文档](docs/DEVELOPER.md) —— 环境搭建、构建测试、架构说明、API 参考
-- [📐 设计与规划](docs/DESIGN.md) —— 需求设计、同步协议、冲突解决、里程碑记录
+| 文档 | 内容 |
+|------|------|
+| [📚 文档中心](docs/index.md) | 全部文档的索引入口 |
+| [🚀 快速开始](docs/getting-started.md) | 环境搭建、构建测试、端到端验证 |
+| [🏛 系统架构](docs/architecture.md) | 分层设计、数据模型、同步协议 |
+| [🔌 API 参考](docs/api-reference.md) | HTTP 接口与载荷示例 |
+| [📦 部署指南](docs/deployment.md) | 生产部署、反代、备份、安全加固 |
+| [🧭 故障排查](docs/troubleshooting.md) | 常见问题与已知坑 |
+| [📖 用户指南](docs/guides/user-guide.md) | 客户端日常使用 |
+| [🧩 网页剪藏](docs/guides/web-clipper.md) | 浏览器扩展使用 |
+| [📐 决策记录](docs/adr/) | 架构决策记录（ADR） |
+| [🛠 开发指南](DEVELOPMENT.md) | 开发者根级入口 |
+| [🏗 架构总览](ARCHITECTURE.md) | 架构根级入口 |
 
 ## 里程碑
 
@@ -122,6 +135,13 @@ flutter run -d chrome    # Web（本机已验证可运行）
 - [x] **M4 网页剪藏** — 服务端净化 API + Chrome MV3 扩展 + 客户端收件箱
 - [x] **M5 多端打磨** — CORS + Blob 下载 + WebSocket 通知 + 登录 + 导出 + 性能索引
 
+变更历史详见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 贡献
+
+欢迎参与贡献！请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 与
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。安全问题请按 [SECURITY.md](SECURITY.md) 上报。
+
 ## 许可证
 
-（待定 —— 自托管个人项目）
+本项目基于 [MIT License](LICENSE) 开源。
