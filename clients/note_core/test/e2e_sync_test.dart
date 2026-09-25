@@ -42,7 +42,7 @@ void main() {
         'SUI_DATA': dataDir,
       },
     );
-    await Future.delayed(const Duration(milliseconds: 1500));
+    await _waitUntilReady(serverUrl);
   });
 
   tearDownAll(() async {
@@ -213,4 +213,27 @@ void main() {
       await Directory(blobRoot).delete(recursive: true);
     } catch (_) {}
   });
+}
+
+/// 轮询 `/healthz` 直到服务端就绪。
+///
+/// 原先用固定 `sleep 1.5s`：机器一忙（并行编译、CI 冷启动）就赶不上，
+/// 表现为连接被拒的假失败。改成探活，快机器上几乎是立即返回。
+Future<void> _waitUntilReady(String baseUrl, {Duration timeout = const Duration(seconds: 20)}) async {
+  final client = Client();
+  final deadline = DateTime.now().add(timeout);
+  try {
+    while (DateTime.now().isBefore(deadline)) {
+      try {
+        final resp = await client.get(Uri.parse('$baseUrl/healthz'));
+        if (resp.statusCode == 200) return;
+      } catch (_) {
+        // 还没起来（连接被拒），继续等。
+      }
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    fail('服务端 ${timeout.inSeconds}s 内未就绪：$baseUrl');
+  } finally {
+    client.close();
+  }
 }
