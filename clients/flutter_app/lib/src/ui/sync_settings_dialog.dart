@@ -43,7 +43,9 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
 
   String _defaultBaseUrl() {
     final configured = _c.syncConfig.baseUrl;
-    return configured.isEmpty ? 'http://127.0.0.1:8080' : configured;
+    // 默认走 localhost：WSL2 只把 localhost 转发到宿主 Windows，127.0.0.1
+    // 会被浏览器直连到 Windows 自身，注册/连接会 ERR_CONNECTION_REFUSED。
+    return configured.isEmpty ? 'http://localhost:8080' : configured;
   }
 
   @override
@@ -156,7 +158,7 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
                 controller: _baseUrl,
                 decoration: const InputDecoration(
                   labelText: '服务端地址',
-                  hintText: 'http://127.0.0.1:8080',
+                  hintText: 'http://localhost:8080',
                   border: OutlineInputBorder(),
                 ),
               ),

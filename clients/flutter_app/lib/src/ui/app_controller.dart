@@ -435,7 +435,15 @@ class AppController extends ChangeNotifier {
         _ => 'HTTP ${e.statusCode}: ${e.body}',
       };
     }
-    return e.toString();
+    final msg = e.toString();
+    // Web 上网络层失败表现为「Failed to fetch」，原生上是 SocketException，
+    // 给出可操作提示而不是把底层异常直接抛给用户。
+    if (msg.contains('Failed to fetch') ||
+        msg.contains('SocketException') ||
+        msg.contains('Connection refused')) {
+      return '无法连接服务端，请检查「服务端地址」是否正确、服务是否已启动';
+    }
+    return msg;
   }
 
   // ---- 修订历史 ----

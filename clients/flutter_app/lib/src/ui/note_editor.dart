@@ -27,6 +27,10 @@ class _NoteEditorState extends State<NoteEditor> {
   bool _loaded = false;
   String? _loadedNoteId;
 
+  /// 正在进行的「写回模型」次数。非零期间禁止用模型内容重绑输入框，
+  /// 否则每次敲字触发的保存都会重置标题/正文，selection 被置回 -1，光标跳行首。
+  int _pendingSaves = 0;
+
   @override
   void dispose() {
     _title.dispose();
@@ -45,7 +49,9 @@ class _NoteEditorState extends State<NoteEditor> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _loadNote();
+    // 仅首次依赖解析时载入；后续切换笔记 / 外部变化统一交给 build 判断，
+    // 避免保存过程中被无条件重绑导致光标跳动。
+    if (!_loaded) _loadNote();
   }
 
   void _loadNote() {
@@ -78,20 +84,33 @@ class _NoteEditorState extends State<NoteEditor> {
   Future<void> _save() async {
     final id = _controller.selectedNoteId;
     if (id == null) return;
-    await _controller.saveNote(
-      id,
-      title: _title.text,
-      content: _content.text,
-      tags: _tags,
-    );
+    _pendingSaves++;
+    try {
+      await _controller.saveNote(
+        id,
+        title: _title.text,
+        content: _content.text,
+        tags: _tags,
+      );
+    } finally {
+      _pendingSaves--;
+      // 全部保存落盘后对齐版本，避免后续 build 把自身保存误判为外部变化。
+      if (_pendingSaves == 0) _lastVersion = _note?.version;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final id = context.watch<AppController>().selectedNoteId;
-    // 检测到笔记版本变化（如恢复操作），重新加载内容
+    // 仅在「首次载入 / 切换到另一篇笔记 / 内容被外部改写（恢复修订、同步拉取）」
+    // 时重绑输入框；自身保存也会让 version 自增，若无条件重绑，打字时每次保存
+    // 都会把 selection 置回 -1，表现为光标跳到行首、难以输入。
     final note = _note;
-    if (_loaded && note != null && note.version != _lastVersion) {
+    final switched = note != null && note.id != _loadedNoteId;
+    if (note != null &&
+        (switched ||
+            (_pendingSaves == 0 &&
+                (!_loaded || note.version != _lastVersion)))) {
       _loadNote();
     }
     if (id == null) {
