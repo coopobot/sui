@@ -30,6 +30,14 @@ type PushItem struct {
 	IsDeleted    bool             `json:"isDeleted"`
 	SourceDevice string           `json:"sourceDevice"`
 	Attachments  []AttachmentItem `json:"attachments,omitempty"`
+
+	// NotebookID 为该笔记所属笔记本；nil 表示不涉及归属变更，
+	// 空值(&"")表示移出至收件箱，非空值表示设为该笔记本（BR-19.7）。
+	NotebookID *string `json:"notebookId,omitempty"`
+
+	// TagIDs 为该笔记当前的标签 id 全集；nil 表示「本次不涉及标签」，
+	// 空切片表示「清空标签」。用指针区分缺席与显式空集，避免误清关联。
+	TagIDs *[]string `json:"tagIds,omitempty"`
 }
 
 // AttachmentItem 是随笔记一起交换的附件映射（不含字节）。
@@ -75,12 +83,13 @@ type PushResponse struct {
 
 // Push 处理客户端推送。冲突判定的唯一依据是：
 //
-//	客户端声明的 BaseVersion 与 服务端当前权威版本 是否一致（设计 §6.4/6.6）。
+//		客户端声明的 BaseVersion 与 服务端当前权威版本 是否一致（设计 §6.4/6.6）。
 //
-//   - 一致 → 直接应用（version 取服务端当前+1，落修订），Accepted=true。
-//     同时落该笔记的附件映射（以 id 为键 upsert，幂等）。
-//   - 不一致 → 不覆盖，返回冲突（ServerVersion=服务端当前），Accepted=false。
-//     客户端据此走字段级合并/diff3/双版本保留。
+//	  - 一致 → 直接应用（version 取服务端当前+1，落修订），Accepted=true。
+//	    同时落该笔记的附件映射（以 id 为键 upsert，幂等）；
+//	    并在显式携带 TagIDs（非 nil）时整体替换该笔记的标签关联。
+//	  - 不一致 → 不覆盖，返回冲突（ServerVersion=服务端当前），Accepted=false。
+//	    客户端据此走字段级合并/diff3/双版本保留。
 //
 // 附件映射只在笔记被接受时落库：被拒绝的是「本地草稿」，其引用的附件
 // 尚未成为权威内容的一部分；客户端合并后重发时会一并带来。
@@ -98,8 +107,15 @@ func (p *Protocol) Push(it PushItem) (*PushResponse, error) {
 	// 无冲突：BaseVersion 与服务端当前一致（含当前不存在但客户端以 0 为 base 的新笔记）。
 	if it.BaseVersion == serverVer {
 		nextVer := serverVer + 1
+		notebookID := ""
+		if current != nil {
+			notebookID = current.NotebookID
+		}
+		if it.NotebookID != nil {
+			notebookID = *it.NotebookID
+		}
 		if _, err := p.store.UpsertNote(
-			it.ID, it.Title, it.Content, it.IsDeleted, it.SourceDevice, nextVer,
+			it.ID, it.Title, it.Content, notebookID, it.IsDeleted, it.SourceDevice, nextVer,
 		); err != nil {
 			return nil, err
 		}
@@ -112,6 +128,11 @@ func (p *Protocol) Push(it PushItem) (*PushResponse, error) {
 				rows = append(rows, a.toRow(it.ID))
 			}
 			if err := p.store.SyncAttachments(it.ID, rows); err != nil {
+				return nil, err
+			}
+		}
+		if it.TagIDs != nil {
+			if err := p.store.SyncNoteTags(it.ID, *it.TagIDs); err != nil {
 				return nil, err
 			}
 		}
@@ -129,12 +150,13 @@ func (p *Protocol) Push(it PushItem) (*PushResponse, error) {
 type PullNote struct {
 	Note        store.NoteRow
 	Attachments []store.AttachmentRow
+	TagIDs      []string
 }
 
 // Pull 返回自 since 之后的服务端权威变更（增量拉取），并带上各笔记的附件映射。
 //
 // 附件映射随笔记交换：映射本身极小，且脱离笔记没有意义；这样客户端只需一个
-// `since` 游标即可同时收敛正文与附件引用。
+// `since` 游标即可同时收敛正文、附件引用与标签关联。
 func (p *Protocol) Pull(since time.Time) ([]PullNote, error) {
 	notes, err := p.store.UpdatedSince(since)
 	if err != nil {
@@ -151,9 +173,13 @@ func (p *Protocol) Pull(since time.Time) ([]PullNote, error) {
 	if err != nil {
 		return nil, err
 	}
+	byTag, err := p.store.ListNoteTagsForNotes(ids)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]PullNote, 0, len(notes))
 	for _, n := range notes {
-		out = append(out, PullNote{Note: n, Attachments: byNote[n.ID]})
+		out = append(out, PullNote{Note: n, Attachments: byNote[n.ID], TagIDs: byTag[n.ID]})
 	}
 	return out, nil
 }
@@ -167,6 +193,85 @@ func parseOptionalTime(s string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// NotebookItem 是客户端推送的一条笔记本分组变更。
+//
+// 与笔记一样携带 baseVersion/version/isDeleted/sourceDevice，复用同一套
+// 「base 与服务端权威版本一致才应用」的冲突判定与墓碑语义。
+type NotebookItem struct {
+	ID           string `json:"id"`
+	ParentID     string `json:"parentId"`
+	Name         string `json:"name"`
+	SortOrder    int    `json:"sortOrder"`
+	BaseVersion  int    `json:"baseVersion"`
+	Version      int    `json:"version"`
+	IsDeleted    bool   `json:"isDeleted"`
+	SourceDevice string `json:"sourceDevice"`
+}
+
+// TagItem 是客户端推送的一条标签变更。
+type TagItem struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	BaseVersion  int    `json:"baseVersion"`
+	Version      int    `json:"version"`
+	IsDeleted    bool   `json:"isDeleted"`
+	SourceDevice string `json:"sourceDevice"`
+}
+
+// PushNotebook 处理笔记本分组推送，冲突判定与 Push 完全一致。
+func (p *Protocol) PushNotebook(it NotebookItem) (*PushResponse, error) {
+	current, err := p.store.GetNotebook(it.ID)
+	if err != nil {
+		return nil, err
+	}
+	serverVer := 0
+	if current != nil {
+		serverVer = current.Version
+	}
+	if it.BaseVersion == serverVer {
+		nextVer := serverVer + 1
+		if err := p.store.UpsertNotebook(
+			it.ID, it.ParentID, it.Name, it.SortOrder, it.IsDeleted, it.SourceDevice, nextVer,
+		); err != nil {
+			return nil, err
+		}
+		return &PushResponse{Accepted: true, AppliedVersion: nextVer}, nil
+	}
+	return &PushResponse{Accepted: false, ServerVersion: serverVer}, nil
+}
+
+// PushTag 处理标签推送，冲突判定与 Push 完全一致。
+func (p *Protocol) PushTag(it TagItem) (*PushResponse, error) {
+	current, err := p.store.GetTag(it.ID)
+	if err != nil {
+		return nil, err
+	}
+	serverVer := 0
+	if current != nil {
+		serverVer = current.Version
+	}
+	if it.BaseVersion == serverVer {
+		nextVer := serverVer + 1
+		if err := p.store.UpsertTag(
+			it.ID, it.Name, it.IsDeleted, it.SourceDevice, nextVer,
+		); err != nil {
+			return nil, err
+		}
+		return &PushResponse{Accepted: true, AppliedVersion: nextVer}, nil
+	}
+	return &PushResponse{Accepted: false, ServerVersion: serverVer}, nil
+}
+
+// PullNotebooks 返回自 since 之后的笔记本分组变更（含墓碑）。
+func (p *Protocol) PullNotebooks(since time.Time) ([]store.NotebookRow, error) {
+	return p.store.UpdatedNotebooksSince(since)
+}
+
+// PullTags 返回自 since 之后的标签变更（含墓碑）。
+func (p *Protocol) PullTags(since time.Time) ([]store.TagRow, error) {
+	return p.store.UpdatedTagsSince(since)
 }
 
 // GCOrphans 触发一次孤儿 Blob 清理。

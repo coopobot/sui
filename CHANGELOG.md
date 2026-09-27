@@ -7,6 +7,25 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
+M1 里程碑：笔记本分组与标签的云端同步。
+
+### 新增
+
+- **服务端数据模型** — 新增 `notebooks` / `tags` / `note_tags` 三表（含 4 个索引），
+  `notes` 表新增 `notebook_id` 列承载分组归属。
+- **同步协议扩展** — push 请求体新增 `notebooks` / `tags` 数组，笔记条目新增
+  `notebookId`（指针语义）与 `tagIds`；pull 响应回带同名数组与字段；push 响应新增
+  `notebookResults` / `tagResults`，复用 `base_version` 冲突与墓碑机制。
+- **客户端** — `SyncClient` 支持笔记本 / 标签入队与推进（`enqueueNotebook` /
+  `enqueueTag`，冲突后刷新 base 重发），`NoteRepository` 新增远端落库与关联重建
+  （`upsertRemoteNotebook` / `upsertRemoteTag` / `syncNoteTags` / `updateNoteNotebook`）。
+
+### 测试
+
+- 服务端 9/9、note_core 58/58（新增笔记本 / 标签净荷与冲突 6 项 + 新设备首拉 e2e 1 项）。
+
 ## [0.1.0] - 2026-09-25
 
 首个可用版本：完成 M0–M5 五个里程碑，服务端、客户端与剪藏扩展端到端可用。

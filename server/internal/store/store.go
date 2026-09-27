@@ -48,6 +48,7 @@ func (s *Store) migrate() error {
 			id TEXT PRIMARY KEY,
 			title TEXT NOT NULL DEFAULT '',
 			content_markdown TEXT NOT NULL DEFAULT '',
+			notebook_id TEXT NOT NULL DEFAULT '', -- 所属笔记本（空表示未分组 / 收件箱）
 			version INTEGER NOT NULL DEFAULT 0,   -- 服务端权威版本线
 			is_deleted INTEGER NOT NULL DEFAULT 0, -- 墓碑
 			source_device TEXT NOT NULL DEFAULT '', -- 最近一次修改的来源设备
@@ -83,11 +84,40 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS notebooks (
+			id TEXT PRIMARY KEY,
+			parent_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			is_deleted INTEGER NOT NULL DEFAULT 0,
+			version INTEGER NOT NULL DEFAULT 0,
+			source_device TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS tags (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			is_deleted INTEGER NOT NULL DEFAULT 0,
+			version INTEGER NOT NULL DEFAULT 0,
+			source_device TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS note_tags (
+			note_id TEXT NOT NULL,
+			tag_id TEXT NOT NULL,
+			PRIMARY KEY (note_id, tag_id)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_revisions_note ON revisions(note_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_revisions_note_ver ON revisions(note_id, version DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_notes_isdel ON notes(is_deleted, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_attachments_note ON attachments(note_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_notebooks_updated ON notebooks(updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_tags_updated ON tags(updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_note_tags_note ON note_tags(note_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id)`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
@@ -161,6 +191,7 @@ type NoteRow struct {
 	ID              string
 	Title           string
 	ContentMarkdown string
+	NotebookID      string
 	Version         int
 	IsDeleted       bool
 	SourceDevice    string
@@ -170,7 +201,7 @@ type NoteRow struct {
 // UpdatedSince 返回 updated_at > since 的所有笔记（增量拉取）。
 func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, title, content_markdown, version, is_deleted, source_device, updated_at
+		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, source_device, updated_at
 		 FROM notes WHERE updated_at > ? ORDER BY updated_at`,
 		since.UTC().Format(time.RFC3339),
 	)
@@ -183,7 +214,7 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 		var r NoteRow
 		var del int
 		var ts string
-		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.Version, &del, &r.SourceDevice, &ts); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &r.SourceDevice, &ts); err != nil {
 			return nil, err
 		}
 		r.IsDeleted = del != 0
@@ -199,9 +230,9 @@ func (s *Store) GetNote(id string) (*NoteRow, error) {
 	var del int
 	var ts string
 	err := s.db.QueryRow(
-		`SELECT id, title, content_markdown, version, is_deleted, source_device, updated_at
+		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, source_device, updated_at
 		 FROM notes WHERE id = ?`, id,
-	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.Version, &del, &r.SourceDevice, &ts)
+	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &r.SourceDevice, &ts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -214,7 +245,7 @@ func (s *Store) GetNote(id string) (*NoteRow, error) {
 }
 
 // UpsertNote 落库笔记（增量），同时记录一条修订。返回新版本号。
-func (s *Store) UpsertNote(noteID, title, content string, isDeleted bool, sourceDevice string, version int) (int, error) {
+func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted bool, sourceDevice string, version int) (int, error) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -223,14 +254,15 @@ func (s *Store) UpsertNote(noteID, title, content string, isDeleted bool, source
 	defer tx.Rollback()
 
 	if err := upsert(tx,
-		`INSERT INTO notes (id, title, content_markdown, version, is_deleted, source_device, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO notes (id, title, content_markdown, notebook_id, version, is_deleted, source_device, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   title=excluded.title, content_markdown=excluded.content_markdown,
+		   notebook_id=excluded.notebook_id,
 		   version=excluded.version, is_deleted=excluded.is_deleted,
 		   source_device=excluded.source_device,
 		   updated_at=excluded.updated_at`,
-		noteID, title, content, version, b2i(isDeleted), sourceDevice, ts,
+		noteID, title, content, notebookID, version, b2i(isDeleted), sourceDevice, ts,
 	); err != nil {
 		return 0, err
 	}
@@ -247,6 +279,213 @@ func (s *Store) UpsertNote(noteID, title, content string, isDeleted bool, source
 		return 0, err
 	}
 	return version, nil
+}
+
+// ---- 笔记本分组 / 标签同步 ----
+
+// NotebookRow 表示服务端笔记本分组的权威状态。
+//
+// 与笔记共用同一套版本线语义：version 为服务端权威版本，is_deleted 为墓碑，
+// source_device 记录最近一次修改的来源设备，用于跨端增量收敛。
+type NotebookRow struct {
+	ID           string
+	ParentID     string
+	Name         string
+	SortOrder    int
+	IsDeleted    bool
+	Version      int
+	SourceDevice string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// TagRow 表示服务端标签的权威状态。
+type TagRow struct {
+	ID           string
+	Name         string
+	IsDeleted    bool
+	Version      int
+	SourceDevice string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// UpdatedNotebooksSince 返回 updated_at > since 的笔记本分组（增量拉取，含墓碑）。
+func (s *Store) UpdatedNotebooksSince(since time.Time) ([]NotebookRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, parent_id, name, sort_order, is_deleted, version, source_device, created_at, updated_at
+		 FROM notebooks WHERE updated_at > ? ORDER BY updated_at`,
+		since.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []NotebookRow
+	for rows.Next() {
+		var r NotebookRow
+		var del int
+		var created, updated string
+		if err := rows.Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &r.SourceDevice, &created, &updated); err != nil {
+			return nil, err
+		}
+		r.IsDeleted = del != 0
+		r.CreatedAt = parseTime(created)
+		r.UpdatedAt = parseTime(updated)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetNotebook 返回指定笔记本分组的服务端状态（不存在返回 nil, nil）。
+func (s *Store) GetNotebook(id string) (*NotebookRow, error) {
+	var r NotebookRow
+	var del int
+	var created, updated string
+	err := s.db.QueryRow(
+		`SELECT id, parent_id, name, sort_order, is_deleted, version, source_device, created_at, updated_at
+		 FROM notebooks WHERE id = ?`, id,
+	).Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &r.SourceDevice, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.IsDeleted = del != 0
+	r.CreatedAt = parseTime(created)
+	r.UpdatedAt = parseTime(updated)
+	return &r, nil
+}
+
+// UpsertNotebook 落库笔记本分组（增量）。created_at 只在首次插入时写入，
+// 冲突更新时不覆盖，保持分组创建时间稳定。
+func (s *Store) UpsertNotebook(id, parentID, name string, sortOrder int, isDeleted bool, sourceDevice string, version int) error {
+	ts := time.Now().UTC().Format(time.RFC3339)
+	return upsert(s.db,
+		`INSERT INTO notebooks (id, parent_id, name, sort_order, is_deleted, version, source_device, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   parent_id=excluded.parent_id, name=excluded.name, sort_order=excluded.sort_order,
+		   is_deleted=excluded.is_deleted, version=excluded.version,
+		   source_device=excluded.source_device, updated_at=excluded.updated_at`,
+		id, parentID, name, sortOrder, b2i(isDeleted), version, sourceDevice, ts, ts,
+	)
+}
+
+// UpdatedTagsSince 返回 updated_at > since 的标签（增量拉取，含墓碑）。
+func (s *Store) UpdatedTagsSince(since time.Time) ([]TagRow, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, is_deleted, version, source_device, created_at, updated_at
+		 FROM tags WHERE updated_at > ? ORDER BY updated_at`,
+		since.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TagRow
+	for rows.Next() {
+		var r TagRow
+		var del int
+		var created, updated string
+		if err := rows.Scan(&r.ID, &r.Name, &del, &r.Version, &r.SourceDevice, &created, &updated); err != nil {
+			return nil, err
+		}
+		r.IsDeleted = del != 0
+		r.CreatedAt = parseTime(created)
+		r.UpdatedAt = parseTime(updated)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetTag 返回指定标签的服务端状态（不存在返回 nil, nil）。
+func (s *Store) GetTag(id string) (*TagRow, error) {
+	var r TagRow
+	var del int
+	var created, updated string
+	err := s.db.QueryRow(
+		`SELECT id, name, is_deleted, version, source_device, created_at, updated_at
+		 FROM tags WHERE id = ?`, id,
+	).Scan(&r.ID, &r.Name, &del, &r.Version, &r.SourceDevice, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.IsDeleted = del != 0
+	r.CreatedAt = parseTime(created)
+	r.UpdatedAt = parseTime(updated)
+	return &r, nil
+}
+
+// UpsertTag 落库标签（增量）。created_at 只在首次插入时写入。
+func (s *Store) UpsertTag(id, name string, isDeleted bool, sourceDevice string, version int) error {
+	ts := time.Now().UTC().Format(time.RFC3339)
+	return upsert(s.db,
+		`INSERT INTO tags (id, name, is_deleted, version, source_device, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   name=excluded.name, is_deleted=excluded.is_deleted, version=excluded.version,
+		   source_device=excluded.source_device, updated_at=excluded.updated_at`,
+		id, name, b2i(isDeleted), version, sourceDevice, ts, ts,
+	)
+}
+
+// SyncNoteTags 以笔记为粒度整体替换其标签关联（先清后插，幂等）。
+//
+// 关联集合随所属笔记的版本线一起流动，因此本身不需要独立时间戳：
+// 客户端只有在笔记被接受时才提交 tagIds，服务端整体替换即可收敛。
+func (s *Store) SyncNoteTags(noteID string, tagIDs []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM note_tags WHERE note_id = ?`, noteID); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, tagID := range tagIDs {
+		if tagID == "" || seen[tagID] {
+			continue
+		}
+		seen[tagID] = true
+		if err := upsert(tx, `INSERT INTO note_tags (note_id, tag_id) VALUES (?, ?)`, noteID, tagID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ListNoteTagsForNotes 批量取多篇笔记的标签 id，按 note_id 分组（供随笔记下发）。
+func (s *Store) ListNoteTagsForNotes(noteIDs []string) (map[string][]string, error) {
+	out := map[string][]string{}
+	if len(noteIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(noteIDs))
+	for i, id := range noteIDs {
+		args[i] = id
+	}
+	rows, err := s.db.Query(
+		`SELECT note_id, tag_id FROM note_tags WHERE note_id IN (`+placeholders(len(noteIDs))+`) ORDER BY note_id, tag_id`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var noteID, tagID string
+		if err := rows.Scan(&noteID, &tagID); err != nil {
+			return nil, err
+		}
+		out[noteID] = append(out[noteID], tagID)
+	}
+	return out, rows.Err()
 }
 
 // ---- 修订历史 ----
@@ -496,8 +735,14 @@ func placeholders(n int) string {
 	return out
 }
 
-func upsert(tx *sql.Tx, q string, args ...any) error {
-	_, err := tx.Exec(q, args...)
+// execer 抽象 *sql.DB 与 *sql.Tx 的共同写入能力，
+// 使 upsert 既能用于事务内多条语句，也能用于单条直写。
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func upsert(e execer, q string, args ...any) error {
+	_, err := e.Exec(q, args...)
 	return err
 }
 

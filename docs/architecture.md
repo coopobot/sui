@@ -59,18 +59,31 @@
 | `ws` | WebSocket Hub：push/剪藏成功后广播 `{"type":"changed"}` |
 | `cors` | 跨域中间件（开发模式全允许） |
 
-### 2.2 数据模型（SQLite）
+### 2.2 数据模型（SQLite，服务端）
+
+服务端库只承载**同步汇聚**所需的最小元数据，实际建表语句见
+[`server/internal/store/store.go`](../server/internal/store/store.go) 的 `migrate()`。
 
 | 表 | 用途 |
 |----|------|
-| `users` | 用户（username / password_hash / token） |
-| `notes` | 笔记元数据（title / content_markdown / version / is_deleted / source_device / updated_at） |
-| `revisions` | 修订历史（note_id / version / title / content / source_device / created_at） |
-| `blobs` | 附件字节登记（sha256 / size / refcount）。**refcount 唯一来源是 `attachments` 映射**：指向该 hash 的有效映射条数 |
+| `users` | 用户（id / username / password_hash / token / created_at） |
+| `notes` | 笔记元数据（id / title / content_markdown / notebook_id / version / is_deleted / source_device / updated_at） |
+| `revisions` | 修订历史（id / note_id / version / title / content_markdown / source_device / is_conflict / created_at） |
+| `blobs` | 附件字节登记（sha256 / size / refcount / created_at）。**refcount 唯一来源是 `attachments` 映射**：指向该 hash 的有效映射条数 |
 | `attachments` | 附件-笔记映射（id / note_id / filename / mime_kind / byte_size / sha256 / storage_ref / thumbnail_ref / embedded_pos / is_deleted / created_at / updated_at） |
-| `outbox` | （服务端侧预留）推送队列 |
+| `notebooks` | 笔记本分组（id / parent_id / name / sort_order / is_deleted / version / source_device / created_at / updated_at） |
+| `tags` | 标签（id / name / is_deleted / version / source_device / created_at / updated_at） |
+| `note_tags` | 笔记-标签多对多关联（note_id / tag_id） |
 
-关键索引：`idx_notes_updated`、`idx_revisions_note_ver`、`idx_notes_isdel`、`idx_attachments_note`。
+关键索引：`idx_notes_updated`、`idx_revisions_note`、`idx_revisions_note_ver`、`idx_notes_isdel`、
+`idx_attachments_note`、`idx_notebooks_updated`、`idx_tags_updated`、`idx_note_tags_note`、`idx_note_tags_tag`。
+
+> **同步净荷（M1 起）**：push 请求体在 `items`（笔记）之外新增 `notebooks` / `tags` 两个数组，
+> 笔记条目新增 `notebookId`（指针语义：缺省=不变、`""`=移入收件箱、有值=归属该笔记本）与
+> `tagIds`（该笔记标签的全量集合）；pull 响应新增 `notebooks` / `tags` 两个数组，笔记条目回带
+> `notebookId` / `tagIds`。push 响应新增 `notebookResults` / `tagResults`，与 `results` 同构
+> （`accepted` / `serverVersion` / `appliedVersion`），复用同一套 `base_version` 冲突与墓碑机制。
+> 旧表清单中的 `outbox` 为设计预留描述，代码中并未建表，已从本表移除。
 
 ### 2.3 测试清单（`internal/api/handlers_test.go`）
 
@@ -84,6 +97,7 @@
 | `TestRevisionListAndGet` | 修订列表 + 详情 |
 | `TestAttachmentMappingSync` | 附件映射往返 + refcount 幂等/改指/墓碑归零 + 孤儿 GC |
 | `TestClipEndpoint` | 剪藏净化 + URL 幂等 + 同步集成 |
+| `TestSyncNotebookTagPayload` | 笔记本 / 标签净荷往返 + `notebookId` / `tagIds` + 冲突回传 `serverVersion` |
 
 ## 3. 客户端
 
@@ -100,6 +114,24 @@
 | `CachedBlobStore` | 附件缓存层：LRU 上限 + 按需下载 + `uploaded_at` 待上传记账（`blob_refs`） |
 | `mimeKindFor()` | 由扩展名推断附件大类（卡片图标用） |
 | `DeviceId` | 设备标识（冲突合并 / 来源标记用） |
+
+**本机数据表（drift，`schemaVersion = 5`）**：定义见
+[`clients/note_core/lib/src/db/app_database.dart`](../clients/note_core/lib/src/db/app_database.dart)。
+
+| 表 | 用途 | 随同步上行 |
+|----|------|------------|
+| `notebooks` | 笔记本分组（树形：id / parent_id / name / sort_order / is_deleted / version / 时间戳） | ✅ |
+| `tags` | 标签（扁平、跨笔记组合） | ✅ |
+| `notes` | 笔记正本（notebook_id / title / content_markdown / pinned / archived / is_deleted / revision_count / version / source_device / 时间戳） | ✅ |
+| `note_tags` | 笔记-标签多对多关联（note_id / tag_id） | ✅（随笔记 `tagIds`） |
+| `revisions` | 修订历史（快照 + diff 增量） | ✅ |
+| `attachments` | 附件元数据（字节存 BlobStore，此处只存引用 + sha256） | ✅（映射随笔记） |
+| `blob_refs` | 本机附件缓存记账（LRU 元数据 + `uploaded_at` 待上传标记） | ❌ 本机缓存状态 |
+| `settings` | 应用级键值配置（服务端地址 / Token / deviceId） | ❌ 设备级偏好 |
+
+> M1 起服务端补齐 `notebooks` / `tags` / `note_tags` 三表：`notebooks` / `tags` 随 sync/push、
+> sync/pull 净荷上下行（与笔记一样携带 `version` / `is_deleted` / 来源设备与墓碑机制）；
+> `note_tags` 关联不单独传输，而是随所属笔记的 `tagIds` 全量携带、在笔记被接受时重建关联。
 
 ### 3.2 flutter_app（Flutter 客户端）
 
@@ -350,16 +382,19 @@ sui/
 
 ### 8.1 已落地并验证
 
-- **服务端**：Go 构建通过、8/8 测试通过；`ping` / `register` / `login` / `push` / `pull` /
+- **服务端**：Go 构建通过、9/9 测试通过；`ping` / `register` / `login` / `push` / `pull` /
   `blobs`(HEAD/PUT/GET) / `revisions` / `clips` 全部实测正常，鉴权 401、重复注册 409、
   坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
-- **note_core**：51/51 测试通过（落盘持久化 2 + 配置存取 9 + 附件映射 3 + 引用计数 4 +
-  附件上传 3 + e2e 同步 2 等）。
+- **note_core**：58/58 测试通过（落盘持久化 2 + 配置存取 9 + 附件映射 3 + 引用计数 4 +
+  附件上传 3 + 笔记本/标签同步 6 + e2e 同步 3 等）。
 - **flutter_app**：5/5 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
   第二台设备拉取到）。
 - **同步链路**：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
   同步触发点有三：编辑防抖 0.7s 推送、WS 通知拉取、**30s 周期兜底**（让「断网改动在恢复
   网络后自动补上」成立，而不必等用户再编辑一次）。
+- **笔记本 / 标签同步**：服务端新增 `notebooks` / `tags` / `note_tags` 三表，push/pull 净荷
+  扩展为 `items` + `notebooks` + `tags`；笔记条目携带 `notebookId`（指针语义）与 `tagIds`
+  全量集合；复用 `base_version` 冲突与墓碑机制，新设备首拉即可重建完整分组树与标签。
 - **附件映射**：随笔记 push/pull 全量交换（含墓碑），服务端 blob `refcount` 由映射驱动；
   字节仍按需下载，映射同步不触发字节传输。
 - **附件上传**：新增附件先落本地 → 写映射 → 尽力上传，失败留待 `backfillBlobs()` 在同步
@@ -385,6 +420,7 @@ sui/
 | 6 | `lib/src/home_page.dart` 为 M0 死代码 | ✅ 已修复 | 冗余，易误导 |
 | 7 | README / 开发者文档的运行命令与实际不符 | ✅ 已修复 | 按文档操作会失败 |
 | 8 | 文档「核心特性」全 ✅ 但部分未在客户端生效 | ✅ 已修复 | 认知偏差 |
+| 9 | 笔记本分组 / 标签 / 笔记-标签关联无云端存储与同步 | ✅ 已修复 | 换设备后分组树与标签不跟随；M1 补齐服务端三表 + 协议净荷 |
 
 ### 8.3 未实现的设计项
 

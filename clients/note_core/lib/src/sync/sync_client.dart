@@ -17,6 +17,8 @@ import '../blob/blob_store.dart';
 import '../blob/cached_blob_store.dart';
 import '../models/attachment.dart';
 import '../models/note.dart';
+import '../models/notebook.dart';
+import '../models/tag.dart';
 import '../repository/note_repository.dart';
 
 /// 同步客户端：协调本地仓储与远端服务。
@@ -43,6 +45,14 @@ class SyncClient {
 
   final List<OutboxItem> _outbox = [];
   DateTime _lastPull = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+
+  /// 笔记本 / 标签的 baseVersion 映射（服务端权威版本）。
+  final Map<String, int> _notebookBaseVersion = {};
+  final Map<String, int> _tagBaseVersion = {};
+
+  /// 本地有变更待推送的笔记本 / 标签 ID。
+  final Set<String> _dirtyNotebookIds = {};
+  final Set<String> _dirtyTagIds = {};
 
   /// 当前本地草稿的"基础版本"映射：noteId → 服务端版本号（编辑起点）。
   final Map<String, int> _baseVersion = {};
@@ -71,6 +81,18 @@ class SyncClient {
     }
   }
 
+  /// 标记一条笔记本变更待推送。
+  void enqueueNotebook(Notebook notebook) {
+    _dirtyNotebookIds.add(notebook.id);
+    _notebookBaseVersion.putIfAbsent(notebook.id, () => 0);
+  }
+
+  /// 标记一条标签变更待推送。
+  void enqueueTag(Tag tag) {
+    _dirtyTagIds.add(tag.id);
+    _tagBaseVersion.putIfAbsent(tag.id, () => 0);
+  }
+
   /// 把本地出站队列推给服务端，并处理冲突。
   ///
   /// 每条笔记会带上它当前的**全部**附件映射（含墓碑，否则删除无法传播）——
@@ -78,13 +100,19 @@ class SyncClient {
   ///
   /// 返回每条的结果；冲突条目保留在 Outbox（将在本地合并后重新提交）。
   Future<List<PushResultItem>> push() async {
-    if (_outbox.isEmpty) return const [];
+    if (_outbox.isEmpty &&
+        _dirtyNotebookIds.isEmpty &&
+        _dirtyTagIds.isEmpty) {
+      return const [];
+    }
     final items = <Map<String, dynamic>>[];
     for (final e in _outbox) {
       final attachments = await repository.listAttachments(
         noteId: e.noteId,
         includeDeleted: true,
       );
+      final note = await repository.getNote(e.noteId);
+      final tags = await repository.tagsOfNote(e.noteId);
       items.add({
         'id': e.noteId,
         'title': e.title,
@@ -93,17 +121,88 @@ class SyncClient {
         'version': e.version,
         'isDeleted': e.isDeleted,
         'sourceDevice': deviceId,
+        if (note?.notebookId != null)
+          'notebookId': note!.notebookId,
+        if (tags.isNotEmpty)
+          'tagIds': tags.map((t) => t.id).toList(),
         if (attachments.isNotEmpty)
           'attachments': attachments.map((a) => a.toJson()).toList(),
       });
     }
-    final body = jsonEncode({'clientId': deviceId, 'items': items});
+    // 构建笔记本 / 标签上行
+    final notebooksPayload = <Map<String, dynamic>>[];
+    for (final id in _dirtyNotebookIds) {
+      final nb = await repository.getNotebook(id);
+      if (nb == null) continue;
+      notebooksPayload.add({
+        'id': id,
+        'parentId': nb.parentId,
+        'name': nb.name,
+        'sortOrder': nb.sortOrder,
+        'baseVersion': _notebookBaseVersion[id] ?? 0,
+        'version': nb.version,
+        'isDeleted': nb.isDeleted,
+        'sourceDevice': deviceId,
+      });
+    }
+    final tagsPayload = <Map<String, dynamic>>[];
+    for (final id in _dirtyTagIds) {
+      final tag = await repository.getTag(id);
+      if (tag == null) continue;
+      tagsPayload.add({
+        'id': id,
+        'name': tag.name,
+        'baseVersion': _tagBaseVersion[id] ?? 0,
+        'version': tag.version,
+        'isDeleted': tag.isDeleted,
+        'sourceDevice': deviceId,
+      });
+    }
+    final body = jsonEncode({
+      'clientId': deviceId,
+      'items': items,
+      if (notebooksPayload.isNotEmpty) 'notebooks': notebooksPayload,
+      if (tagsPayload.isNotEmpty) 'tags': tagsPayload,
+    });
     final resp = await _authPost('/api/v1/sync/push', body);
     final data = jsonDecode(resp) as Map<String, dynamic>;
     final results = (data['results'] as List)
         .cast<Map<String, dynamic>>()
         .map((e) => PushResultItem.fromJson(e))
         .toList();
+
+    // 处理笔记本推送结果
+    final nbResults = (data['notebookResults'] as List?)
+        ?.cast<Map<String, dynamic>>()
+        .map((e) => PushResultItem.fromJson(e))
+        .toList();
+    if (nbResults != null) {
+      for (final r in nbResults) {
+        if (r.accepted) {
+          _notebookBaseVersion[r.id] = r.appliedVersion;
+          _dirtyNotebookIds.remove(r.id);
+        } else {
+          // 冲突：刷新 baseVersion，保留在 dirty 集中下次重发
+          _notebookBaseVersion[r.id] = r.serverVersion;
+        }
+      }
+    }
+
+    // 处理标签推送结果
+    final tagResults = (data['tagResults'] as List?)
+        ?.cast<Map<String, dynamic>>()
+        .map((e) => PushResultItem.fromJson(e))
+        .toList();
+    if (tagResults != null) {
+      for (final r in tagResults) {
+        if (r.accepted) {
+          _tagBaseVersion[r.id] = r.appliedVersion;
+          _dirtyTagIds.remove(r.id);
+        } else {
+          _tagBaseVersion[r.id] = r.serverVersion;
+        }
+      }
+    }
 
     // 对每条结果处理：成功则出队 + 更新 base；冲突则本地合并。
     for (final r in results) {
@@ -137,6 +236,50 @@ class SyncClient {
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     final notes = (data['notes'] as List).cast<Map<String, dynamic>>();
     int count = 0;
+
+    // 处理远端笔记本
+    final nbList = (data['notebooks'] as List?)?.cast<Map<String, dynamic>>();
+    if (nbList != null) {
+      for (final nb in nbList) {
+        final nbId = nb['id'] as String;
+        if (_dirtyNotebookIds.contains(nbId)) continue; // 跳过本地脏项
+        final nbVer = nb['version'] as int;
+        final nbUpdated = DateTime.parse(nb['updatedAt'] as String);
+        await repository.upsertRemoteNotebook(
+          id: nbId,
+          parentId: nb['parentId'] as String?,
+          name: nb['name'] as String? ?? '',
+          sortOrder: (nb['sortOrder'] as int?) ?? 0,
+          isDeleted: nb['isDeleted'] as bool? ?? false,
+          version: nbVer,
+          updatedAt: nbUpdated,
+        );
+        _notebookBaseVersion[nbId] = nbVer;
+        count++;
+      }
+    }
+
+    // 处理远端标签
+    final tagList = (data['tags'] as List?)?.cast<Map<String, dynamic>>();
+    if (tagList != null) {
+      for (final tg in tagList) {
+        final tagId = tg['id'] as String;
+        if (_dirtyTagIds.contains(tagId)) continue; // 跳过本地脏项
+        final tagVer = tg['version'] as int;
+        final tagUpdated = DateTime.parse(tg['updatedAt'] as String);
+        await repository.upsertRemoteTag(
+          id: tagId,
+          name: tg['name'] as String? ?? '',
+          isDeleted: tg['isDeleted'] as bool? ?? false,
+          version: tagVer,
+          updatedAt: tagUpdated,
+        );
+        _tagBaseVersion[tagId] = tagVer;
+        count++;
+      }
+    }
+
+    // 处理远端笔记
     for (final n in notes) {
       final id = n['id'] as String;
       final ver = n['version'] as int;
@@ -150,11 +293,13 @@ class SyncClient {
         if (isDeleted) continue;
         await repository.createNote(
           id: id,
+          notebookId: n['notebookId'] as String?,
           title: n['title'] as String? ?? '',
           contentMarkdown: n['content'] as String? ?? '',
           sourceDevice: (n['sourceDevice'] as String?) ?? '',
         );
         _baseVersion[id] = ver;
+        await _applyRemoteTags(id, n);
         await _applyRemoteAttachments(id, n);
         count++;
         continue;
@@ -164,6 +309,12 @@ class SyncClient {
       // 简单实现：远端为权威线，本地草稿保持为"基于新 base 的草稿"——
       // 因为 Outbox 中已存在本地变更，下次 push 会以新 base 声明。
       _baseVersion[id] = ver;
+      // 应用笔记的 notebookId
+      final remoteNotebookId = n['notebookId'] as String?;
+      if (remoteNotebookId != null) {
+        await repository.updateNoteNotebook(id, remoteNotebookId);
+      }
+      await _applyRemoteTags(id, n);
       await _applyRemoteAttachments(id, n);
       if (isDeleted && !local.isDeleted) {
         await repository.markNoteDeleted(id);
@@ -188,6 +339,16 @@ class SyncClient {
         Attachment.fromJson(a, noteId: noteId),
       );
     }
+  }
+
+  /// 落库服务端随笔记下行的标签关联（幂等）。
+  Future<void> _applyRemoteTags(
+    String noteId,
+    Map<String, dynamic> note,
+  ) async {
+    final tagIds = (note['tagIds'] as List?)?.cast<String>();
+    if (tagIds == null) return;
+    await repository.syncNoteTags(noteId, tagIds);
   }
 
   /// 一次性：push + pull。返回 (推送结果数, 拉取条数)。

@@ -33,6 +33,7 @@ class NoteRepository {
           parentId: Value(parentId),
           name: name,
           sortOrder: Value(sortOrder),
+          version: const Value(1),
           createdAt: t,
           updatedAt: t,
         ));
@@ -75,9 +76,12 @@ class NoteRepository {
   }
 
   Future<void> removeNotebook(String id) async {
+    final notebook = await getNotebook(id);
+    if (notebook == null) return;
     await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
         .write(NotebooksCompanion(
       isDeleted: const Value(true),
+      version: Value(notebook.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
   }
@@ -90,6 +94,7 @@ class NoteRepository {
     await db.into(db.tags).insert(TagsCompanion.insert(
           id: tagId,
           name: name,
+          version: const Value(1),
           createdAt: t,
           updatedAt: t,
         ));
@@ -102,10 +107,12 @@ class NoteRepository {
     return row?.toModel();
   }
 
-  Future<List<Tag>> listTags() async {
-    final rows = await (db.select(db.tags)
-          ..where((t) => t.isDeleted.equals(false)))
-        .get();
+  Future<List<Tag>> listTags({bool includeDeleted = false}) async {
+    final q = db.select(db.tags);
+    if (!includeDeleted) {
+      q.where((t) => t.isDeleted.equals(false));
+    }
+    final rows = await q.get();
     return rows.map((r) => r.toModel()).toList();
   }
 
@@ -121,8 +128,14 @@ class NoteRepository {
   }
 
   Future<void> removeTag(String id) async {
+    final tag = await getTag(id);
+    if (tag == null) return;
     await (db.update(db.tags)..where((t) => t.id.equals(id)))
-        .write(TagsCompanion(isDeleted: const Value(true)));
+        .write(TagsCompanion(
+      isDeleted: const Value(true),
+      version: Value(tag.version + 1),
+      updatedAt: Value(DateTime.now()),
+    ));
   }
 
   /// ---- 笔记 ----
@@ -512,6 +525,92 @@ class NoteRepository {
     final row = await (db.select(db.attachments)..where((t) => t.id.equals(id)))
         .getSingleOrNull();
     return row?.toModel();
+  }
+
+
+  /// ---- 同步下行：远端笔记本 / 标签 / 关联落库 ----
+
+  /// Upsert 远端笔记本（pull 下行）。以 id 为键，version 以服务端为准。
+  Future<void> upsertRemoteNotebook({
+    required String id,
+    String? parentId,
+    required String name,
+    int sortOrder = 0,
+    bool isDeleted = false,
+    int version = 0,
+    DateTime? updatedAt,
+  }) async {
+    final t = updatedAt ?? DateTime.now();
+    final existing = await getNotebook(id);
+    if (existing == null) {
+      await db.into(db.notebooks).insert(NotebooksCompanion.insert(
+        id: id,
+        parentId: Value(parentId),
+        name: name,
+        sortOrder: Value(sortOrder),
+        isDeleted: Value(isDeleted),
+        version: Value(version),
+        createdAt: t,
+        updatedAt: t,
+      ));
+    } else {
+      await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
+          .write(NotebooksCompanion(
+        parentId: Value(parentId),
+        name: Value(name),
+        sortOrder: Value(sortOrder),
+        isDeleted: Value(isDeleted),
+        version: Value(version),
+        updatedAt: Value(t),
+      ));
+    }
+  }
+
+  /// Upsert 远端标签（pull 下行）。
+  Future<void> upsertRemoteTag({
+    required String id,
+    required String name,
+    bool isDeleted = false,
+    int version = 0,
+    DateTime? updatedAt,
+  }) async {
+    final t = updatedAt ?? DateTime.now();
+    final existing = await getTag(id);
+    if (existing == null) {
+      await db.into(db.tags).insert(TagsCompanion.insert(
+        id: id,
+        name: name,
+        isDeleted: Value(isDeleted),
+        version: Value(version),
+        createdAt: t,
+        updatedAt: t,
+      ));
+    } else {
+      await (db.update(db.tags)..where((t) => t.id.equals(id)))
+          .write(TagsCompanion(
+        name: Value(name),
+        isDeleted: Value(isDeleted),
+        version: Value(version),
+        updatedAt: Value(t),
+      ));
+    }
+  }
+
+  /// 以笔记为粒度整体替换标签关联（同步下行，按 tag ID 直接关联）。
+  Future<void> syncNoteTags(String noteId, List<String> tagIds) async {
+    await (db.delete(db.noteTags)..where((t) => t.noteId.equals(noteId))).go();
+    for (final tagId in tagIds) {
+      if (tagId.isEmpty) continue;
+      await db.into(db.noteTags).insert(
+            NoteTagsCompanion.insert(noteId: noteId, tagId: tagId),
+          );
+    }
+  }
+
+  /// 更新笔记的所属笔记本（同步下行）。
+  Future<void> updateNoteNotebook(String noteId, String? notebookId) async {
+    await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
+        .write(NotesCompanion(notebookId: Value(notebookId)));
   }
 
   Future<void> _replaceTags(String noteId, List<String> tagNames) async {

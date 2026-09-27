@@ -232,6 +232,234 @@ void main() {
       syncer.close();
     });
 
+    group('笔记本 / 标签同步', () {
+      test('push 携带笔记本与标签上行（无笔记变更也能推送）', () async {
+        final nb = await repo.createNotebook(name: '工作');
+        final tag = await repo.createTag(name: '重要');
+        var pushCalls = 0;
+        Map<String, dynamic>? body;
+        final syncer = newClient((req) async {
+          if (req.url.path == '/api/v1/sync/push') {
+            pushCalls++;
+            body = jsonDecode(req.body) as Map<String, dynamic>;
+            return jsonResponse(200, {
+              'ok': true,
+              'results': [],
+              'notebookResults': [
+                {'id': nb.id, 'accepted': true, 'appliedVersion': 1}
+              ],
+              'tagResults': [
+                {'id': tag.id, 'accepted': true, 'appliedVersion': 1}
+              ],
+            });
+          }
+          return jsonResponse(200, {'ok': true, 'notes': []});
+        });
+
+        syncer.enqueueNotebook(nb);
+        syncer.enqueueTag(tag);
+        await syncer.push();
+
+        expect(pushCalls, 1);
+        final nbs = (body!['notebooks'] as List).cast<Map<String, dynamic>>();
+        expect(nbs.length, 1);
+        expect(nbs.first['id'], nb.id);
+        expect(nbs.first['name'], '工作');
+        expect(nbs.first['baseVersion'], 0);
+        expect(nbs.first['version'], 1);
+        final tags = (body!['tags'] as List).cast<Map<String, dynamic>>();
+        expect(tags.length, 1);
+        expect(tags.first['id'], tag.id);
+        expect(tags.first['name'], '重要');
+
+        // 接受后 dirty 清空：再 push 无待推内容，不再发请求。
+        await syncer.push();
+        expect(pushCalls, 1);
+        syncer.close();
+      });
+
+      test('pull 下行笔记本与标签并落库', () async {
+        final syncer = newClient((req) async => jsonResponse(200, {
+              'ok': true,
+              'notebooks': [
+                {
+                  'id': 'nb-r',
+                  'parentId': null,
+                  'name': '工作',
+                  'sortOrder': 1,
+                  'version': 2,
+                  'isDeleted': false,
+                  'updatedAt': '2026-09-23T12:00:00Z',
+                }
+              ],
+              'tags': [
+                {
+                  'id': 'tg-r',
+                  'name': '重要',
+                  'version': 3,
+                  'isDeleted': false,
+                  'updatedAt': '2026-09-23T12:00:00Z',
+                }
+              ],
+              'notes': [],
+            }));
+
+        final count = await syncer.pull();
+        expect(count, 2);
+        final nb = await repo.getNotebook('nb-r');
+        expect(nb, isNotNull);
+        expect(nb!.name, '工作');
+        expect(nb.version, 2);
+        final tag = await repo.getTag('tg-r');
+        expect(tag, isNotNull);
+        expect(tag!.name, '重要');
+        expect(tag.version, 3);
+        syncer.close();
+      });
+
+      test('pull 下行笔记的 notebookId 与 tagIds', () async {
+        final syncer = newClient((req) async => jsonResponse(200, {
+              'ok': true,
+              'notebooks': [
+                {
+                  'id': 'nb-1',
+                  'name': '工作',
+                  'sortOrder': 0,
+                  'version': 1,
+                  'isDeleted': false,
+                  'updatedAt': '2026-09-23T12:00:00Z',
+                }
+              ],
+              'tags': [
+                {
+                  'id': 'tg-1',
+                  'name': '重要',
+                  'version': 1,
+                  'isDeleted': false,
+                  'updatedAt': '2026-09-23T12:00:00Z',
+                }
+              ],
+              'notes': [
+                {
+                  'id': 'n1',
+                  'title': '带分组',
+                  'content': '# 内容',
+                  'notebookId': 'nb-1',
+                  'tagIds': ['tg-1'],
+                  'version': 1,
+                  'isDeleted': false,
+                  'updatedAt': '2026-09-23T12:00:00Z',
+                }
+              ],
+            }));
+
+        await syncer.pull();
+        final note = await repo.getNote('n1');
+        expect(note, isNotNull);
+        expect(note!.notebookId, 'nb-1');
+        final tags = await repo.tagsOfNote('n1');
+        expect(tags.map((t) => t.id), contains('tg-1'));
+        syncer.close();
+      });
+
+      test('pull 跳过本地脏笔记本（本地优先，不被远端覆盖）', () async {
+        final local = await repo.createNotebook(name: '本地名');
+        final syncer = newClient((req) async {
+          if (req.url.path == '/api/v1/sync/push') {
+            return jsonResponse(200, {
+              'ok': true,
+              'results': [],
+              'notebookResults': [
+                {'id': local.id, 'accepted': false, 'serverVersion': 5}
+              ],
+              'tagResults': [],
+            });
+          }
+          return jsonResponse(200, {
+            'ok': true,
+            'notebooks': [
+              {
+                'id': local.id,
+                'name': '远端名',
+                'sortOrder': 0,
+                'version': 5,
+                'isDeleted': false,
+                'updatedAt': '2026-09-23T12:00:00Z',
+              }
+            ],
+            'tags': [],
+            'notes': [],
+          });
+        });
+
+        syncer.enqueueNotebook(local);
+        await syncer.push(); // 冲突 → 保留 dirty
+        await syncer.pull(); // 脏项应被跳过
+
+        final still = await repo.getNotebook(local.id);
+        expect(still!.name, '本地名');
+        expect(still.version, 1);
+        syncer.close();
+      });
+
+      test('push 笔记本冲突 → base 刷新为服务端版本并保留待推', () async {
+        final nb = await repo.createNotebook(name: '工作');
+        final sentBases = <int>[];
+        final syncer = newClient((req) async {
+          final b = jsonDecode(req.body) as Map<String, dynamic>;
+          final nbs = (b['notebooks'] as List?)?.cast<Map<String, dynamic>>();
+          if (nbs != null && nbs.isNotEmpty) {
+            sentBases.add(nbs.first['baseVersion'] as int);
+          }
+          return jsonResponse(200, {
+            'ok': true,
+            'results': [],
+            'notebookResults': [
+              {'id': nb.id, 'accepted': false, 'serverVersion': 3}
+            ],
+            'tagResults': [],
+          });
+        });
+
+        syncer.enqueueNotebook(nb);
+        await syncer.push();
+        await syncer.push(); // dirty 未清 → 再发，base 已刷新为 3
+
+        expect(sentBases, [0, 3]);
+        syncer.close();
+      });
+
+      test('push 笔记携带 notebookId 与 tagIds', () async {
+        final nb = await repo.createNotebook(name: '工作');
+        final note = await repo.createNote(
+          title: 'A',
+          contentMarkdown: '# A',
+          notebookId: nb.id,
+          tags: ['重要'],
+        );
+        Map<String, dynamic>? sentItem;
+        final syncer = newClient((req) async {
+          final b = jsonDecode(req.body) as Map<String, dynamic>;
+          sentItem =
+              ((b['items'] as List).first as Map).cast<String, dynamic>();
+          return jsonResponse(200, {
+            'ok': true,
+            'results': [
+              {'id': note.id, 'accepted': true, 'appliedVersion': 1}
+            ]
+          });
+        });
+
+        await syncer.enqueue(note);
+        await syncer.push();
+
+        expect(sentItem!['notebookId'], nb.id);
+        final tagIds = (sentItem!['tagIds'] as List).cast<String>();
+        expect(tagIds, hasLength(1));
+        syncer.close();
+      });
+    });
+
     group('附件字节上传', () {
       late Directory tmpDir;
       late CachedBlobStore store;

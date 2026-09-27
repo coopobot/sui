@@ -499,3 +499,140 @@ func TestClipEndpoint(t *testing.T) {
 		t.Fatal("clipped note not found in pull results")
 	}
 }
+
+func TestSyncNotebookTagPayload(t *testing.T) {
+	srv := newTestServer(t)
+	token := register(t, srv)
+
+	// 推送：一条笔记本分组、一条标签，以及一篇携带 tagIds 的笔记。
+	pushBody, _ := json.Marshal(map[string]any{
+		"clientId": "dev-a",
+		"notebooks": []map[string]any{
+			{"id": "nb-1", "parentId": "", "name": "工作", "sortOrder": 1, "baseVersion": 0, "version": 1, "sourceDevice": "dev-a"},
+		},
+		"tags": []map[string]any{
+			{"id": "tag-1", "name": "重要", "baseVersion": 0, "version": 1, "sourceDevice": "dev-a"},
+		},
+		"items": []map[string]any{
+			{
+				"id": "note-1", "title": "Hello", "content": "# Hi",
+				"baseVersion": 0, "version": 1, "sourceDevice": "dev-a",
+					"notebookId": "nb-1",
+				"tagIds": []string{"tag-1"},
+			},
+		},
+	})
+	rec := authReq(srv, token, http.MethodPost, "/api/v1/sync/push", pushBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("push failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var pushResp struct {
+		NotebookResults []struct {
+			ID       string `json:"id"`
+			Accepted bool   `json:"accepted"`
+		} `json:"notebookResults"`
+		TagResults []struct {
+			ID       string `json:"id"`
+			Accepted bool   `json:"accepted"`
+		} `json:"tagResults"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&pushResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(pushResp.NotebookResults) != 1 || !pushResp.NotebookResults[0].Accepted {
+		t.Fatalf("notebook push not accepted: %+v", pushResp.NotebookResults)
+	}
+	if len(pushResp.TagResults) != 1 || !pushResp.TagResults[0].Accepted {
+		t.Fatalf("tag push not accepted: %+v", pushResp.TagResults)
+	}
+
+	type pullBody struct {
+		Notes []struct {
+			ID      string   `json:"id"`
+			Version int      `json:"version"`
+			NotebookID string   `json:"notebookId"`
+			TagIDs  []string `json:"tagIds"`
+		} `json:"notes"`
+		Notebooks []struct {
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			Version   int    `json:"version"`
+			IsDeleted bool   `json:"isDeleted"`
+		} `json:"notebooks"`
+		Tags []struct {
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			Version   int    `json:"version"`
+			IsDeleted bool   `json:"isDeleted"`
+		} `json:"tags"`
+	}
+	pull := func() pullBody {
+		rec := authReq(srv, token, http.MethodGet, "/api/v1/sync/pull?since=1970-01-01T00:00:00Z", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("pull failed: %d", rec.Code)
+		}
+		var pb pullBody
+		if err := json.NewDecoder(rec.Body).Decode(&pb); err != nil {
+			t.Fatal(err)
+		}
+		return pb
+	}
+
+	got := pull()
+	if len(got.Notebooks) != 1 || got.Notebooks[0].Name != "工作" || got.Notebooks[0].Version != 1 {
+		t.Fatalf("unexpected notebooks: %+v", got.Notebooks)
+	}
+	if len(got.Tags) != 1 || got.Tags[0].Name != "重要" || got.Tags[0].Version != 1 {
+		t.Fatalf("unexpected tags: %+v", got.Tags)
+	}
+	if len(got.Notes) != 1 || len(got.Notes[0].TagIDs) != 1 || got.Notes[0].TagIDs[0] != "tag-1" {
+		t.Fatalf("unexpected note tagIds: %+v", got.Notes)
+	}
+	if got.Notes[0].NotebookID != "nb-1" {
+		t.Fatalf("expected notebookId=nb-1, got %q", got.Notes[0].NotebookID)
+	}
+
+	// 笔记本以过期 base 推送 → 冲突，服务端不覆盖。
+	conflictBody, _ := json.Marshal(map[string]any{
+		"clientId": "dev-b",
+		"notebooks": []map[string]any{
+			{"id": "nb-1", "name": "改名", "baseVersion": 0, "version": 1, "sourceDevice": "dev-b"},
+		},
+	})
+	rec = authReq(srv, token, http.MethodPost, "/api/v1/sync/push", conflictBody)
+	var conflictResp struct {
+		NotebookResults []struct {
+			Accepted      bool `json:"accepted"`
+			ServerVersion int  `json:"serverVersion"`
+		} `json:"notebookResults"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&conflictResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(conflictResp.NotebookResults) != 1 || conflictResp.NotebookResults[0].Accepted ||
+		conflictResp.NotebookResults[0].ServerVersion != 1 {
+		t.Fatalf("expected notebook conflict on serverVersion=1, got %+v", conflictResp.NotebookResults)
+	}
+
+	// 显式空 tagIds 清空关联；同时给标签打墓碑。
+	clearBody, _ := json.Marshal(map[string]any{
+		"clientId": "dev-a",
+		"items": []map[string]any{
+			{"id": "note-1", "title": "Hello", "content": "# Hi", "baseVersion": 1, "version": 2, "sourceDevice": "dev-a", "tagIds": []string{}},
+		},
+		"tags": []map[string]any{
+			{"id": "tag-1", "name": "重要", "baseVersion": 1, "version": 2, "isDeleted": true, "sourceDevice": "dev-a"},
+		},
+	})
+	rec = authReq(srv, token, http.MethodPost, "/api/v1/sync/push", clearBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear push failed: %d", rec.Code)
+	}
+	got = pull()
+	if len(got.Notes) != 1 || len(got.Notes[0].TagIDs) != 0 {
+		t.Fatalf("expected tagIds cleared, got %+v", got.Notes)
+	}
+	if len(got.Tags) != 1 || !got.Tags[0].IsDeleted {
+		t.Fatalf("expected tag tombstone, got %+v", got.Tags)
+	}
+}

@@ -59,8 +59,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // handlePush 处理客户端批量推送（逐条调用 sync.Push，汇总结果）。
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ClientID string          `json:"clientId"`
-		Items    []sync.PushItem `json:"items"`
+		ClientID  string              `json:"clientId"`
+		Items     []sync.PushItem     `json:"items"`
+		Notebooks []sync.NotebookItem `json:"notebooks"`
+		Tags      []sync.TagItem      `json:"tags"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad request"})
@@ -84,10 +86,37 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 			ServerVersion: resp.ServerVersion, AppliedVersion: resp.AppliedVersion,
 		})
 	}
+	notebookResults := make([]itemResult, 0, len(req.Notebooks))
+	for _, it := range req.Notebooks {
+		resp, err := s.sync.PushNotebook(it)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		notebookResults = append(notebookResults, itemResult{
+			ID: it.ID, Accepted: resp.Accepted,
+			ServerVersion: resp.ServerVersion, AppliedVersion: resp.AppliedVersion,
+		})
+	}
+	tagResults := make([]itemResult, 0, len(req.Tags))
+	for _, it := range req.Tags {
+		resp, err := s.sync.PushTag(it)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		tagResults = append(tagResults, itemResult{
+			ID: it.ID, Accepted: resp.Accepted,
+			ServerVersion: resp.ServerVersion, AppliedVersion: resp.AppliedVersion,
+		})
+	}
 	// 发送变更通知（WebSocket）
 	s.hub.NotifyChange()
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "results": results,
+		"notebookResults": notebookResults, "tagResults": tagResults,
+	})
 }
 
 // handlePull 返回自 since 之后的增量。
@@ -125,6 +154,8 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		SourceDevice string   `json:"sourceDevice"`
 		UpdatedAt    string   `json:"updatedAt"`
 		Attachments  []attOut `json:"attachments,omitempty"`
+		NotebookID   string   `json:"notebookId,omitempty"`
+	TagIDs       []string `json:"tagIds,omitempty"`
 	}
 	list := make([]out, 0, len(rows))
 	for _, pn := range rows {
@@ -133,7 +164,9 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 			ID: rw.ID, Title: rw.Title, Content: rw.ContentMarkdown,
 			Version: rw.Version, IsDeleted: rw.IsDeleted,
 			SourceDevice: rw.SourceDevice,
+			NotebookID:   rw.NotebookID,
 			UpdatedAt:    rw.UpdatedAt.UTC().Format(time.RFC3339),
+			TagIDs:       pn.TagIDs,
 		}
 		for _, a := range pn.Attachments {
 			item.Attachments = append(item.Attachments, attOut{
@@ -146,7 +179,54 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		}
 		list = append(list, item)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "notes": list})
+	type nbOut struct {
+		ID           string `json:"id"`
+		ParentID     string `json:"parentId"`
+		Name         string `json:"name"`
+		SortOrder    int    `json:"sortOrder"`
+		Version      int    `json:"version"`
+		IsDeleted    bool   `json:"isDeleted"`
+		SourceDevice string `json:"sourceDevice"`
+		UpdatedAt    string `json:"updatedAt"`
+	}
+	type tagOut struct {
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Version      int    `json:"version"`
+		IsDeleted    bool   `json:"isDeleted"`
+		SourceDevice string `json:"sourceDevice"`
+		UpdatedAt    string `json:"updatedAt"`
+	}
+	nbRows, err := s.sync.PullNotebooks(since)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	notebooks := make([]nbOut, 0, len(nbRows))
+	for _, nb := range nbRows {
+		notebooks = append(notebooks, nbOut{
+			ID: nb.ID, ParentID: nb.ParentID, Name: nb.Name, SortOrder: nb.SortOrder,
+			Version: nb.Version, IsDeleted: nb.IsDeleted, SourceDevice: nb.SourceDevice,
+			UpdatedAt: nb.UpdatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	tagRows, err := s.sync.PullTags(since)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	tags := make([]tagOut, 0, len(tagRows))
+	for _, tg := range tagRows {
+		tags = append(tags, tagOut{
+			ID: tg.ID, Name: tg.Name, Version: tg.Version,
+			IsDeleted: tg.IsDeleted, SourceDevice: tg.SourceDevice,
+			UpdatedAt: tg.UpdatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "notes": list,
+		"notebooks": notebooks, "tags": tags,
+	})
 }
 
 // handleBlobHead 检查 hash 是否存在（内容寻址去重）。
