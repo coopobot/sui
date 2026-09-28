@@ -41,7 +41,11 @@ func (s *Store) migrate() error {
 			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
-			token TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			token TEXT PRIMARY KEY,
+			username TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS notes (
@@ -118,6 +122,7 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_tags_updated ON tags(updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_note_tags_note ON note_tags(note_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(username)`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
@@ -133,10 +138,12 @@ func (s *Store) Close() error { return s.db.Close() }
 // ---- 用户 / 设备鉴权 ----
 
 // VerifyToken 校验 token 并返回 username；无效返回 (false, "").
+//
+// 会话以 sessions 表为唯一真源：一个用户可持有多行会话（多设备 / 多 profile）。
 func (s *Store) VerifyToken(token string) (bool, string) {
 	var username string
 	err := s.db.QueryRow(
-		`SELECT username FROM users WHERE token = ?`, token,
+		`SELECT username FROM sessions WHERE token = ?`, token,
 	).Scan(&username)
 	if err != nil {
 		return false, ""
@@ -144,18 +151,36 @@ func (s *Store) VerifyToken(token string) (bool, string) {
 	return true, username
 }
 
-// CreateUser 创建用户，返回新 token。
+// CreateUser 创建用户并签发首个会话 token。
 func (s *Store) CreateUser(username, passwordHash string) (token string, err error) {
 	tok, _ := NewToken()
-	_, err = s.db.Exec(
-		`INSERT INTO users (id, username, password_hash, token, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		tok[:16], username, passwordHash, tok, time.Now().UTC().Format(time.RFC3339),
-	)
-	return tok, err
+	ts := time.Now().UTC().Format(time.RFC3339)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(
+		`INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)`,
+		tok[:16], username, passwordHash, ts,
+	); err != nil {
+		return "", err
+	}
+	if _, err = tx.Exec(
+		`INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)`,
+		tok, username, ts,
+	); err != nil {
+		return "", err
+	}
+	if err = tx.Commit(); err != nil {
+		return "", err
+	}
+	return tok, nil
 }
 
-// LoginUser 验证用户名密码，成功则生成并返回新 token。
+// LoginUser 验证用户名密码，成功则新增一个独立会话并返回新 token。
+//
+// 登录只追加会话行，不影响该用户其他已登录会话（多设备 / 多 profile 可同时在线）。
 func (s *Store) LoginUser(username, passwordHash string) (string, error) {
 	var storedHash string
 	err := s.db.QueryRow(
@@ -168,11 +193,19 @@ func (s *Store) LoginUser(username, passwordHash string) (string, error) {
 		return "", errors.New("wrong password")
 	}
 	tok, _ := NewToken()
-	_, err = s.db.Exec(`UPDATE users SET token = ? WHERE username = ?`, tok, username)
-	if err != nil {
+	if _, err = s.db.Exec(
+		`INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)`,
+		tok, username, time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
 		return "", err
 	}
 	return tok, nil
+}
+
+// RevokeToken 吊销指定会话 token（登出）。
+func (s *Store) RevokeToken(token string) error {
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
+	return err
 }
 
 // NewToken 生成一个伪随机 token（hex 编码 32 字节）。

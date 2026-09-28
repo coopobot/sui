@@ -52,6 +52,7 @@ func (s *Server) Router() http.Handler {
 	mux.Handle("/api/v1/blobs/", authWrap)
 	mux.Handle("/api/v1/notes/", authWrap)
 	mux.Handle("/api/v1/clips", authWrap)
+	mux.Handle("/api/v1/logout", authWrap)
 
 	// CORS 中间件包裹最外层
 	return cors.Middleware(nil, mux) // 空 origin 列表 = 开发模式全允许
@@ -68,5 +69,6 @@ func NewRouter(s *Server) *http.ServeMux {
 	sub.HandleFunc("GET /api/v1/notes/{id}/revisions", s.handleListRevisions)
 	sub.HandleFunc("GET /api/v1/notes/{id}/revisions/{version}", s.handleGetRevision)
 	sub.HandleFunc("POST /api/v1/clips", s.handleClip)
+	sub.HandleFunc("POST /api/v1/logout", s.handleLogout)
 	return sub
 }

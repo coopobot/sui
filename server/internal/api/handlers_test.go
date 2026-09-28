@@ -517,8 +517,8 @@ func TestSyncNotebookTagPayload(t *testing.T) {
 			{
 				"id": "note-1", "title": "Hello", "content": "# Hi",
 				"baseVersion": 0, "version": 1, "sourceDevice": "dev-a",
-					"notebookId": "nb-1",
-				"tagIds": []string{"tag-1"},
+				"notebookId": "nb-1",
+				"tagIds":     []string{"tag-1"},
 			},
 		},
 	})
@@ -548,10 +548,10 @@ func TestSyncNotebookTagPayload(t *testing.T) {
 
 	type pullBody struct {
 		Notes []struct {
-			ID      string   `json:"id"`
-			Version int      `json:"version"`
+			ID         string   `json:"id"`
+			Version    int      `json:"version"`
 			NotebookID string   `json:"notebookId"`
-			TagIDs  []string `json:"tagIds"`
+			TagIDs     []string `json:"tagIds"`
 		} `json:"notes"`
 		Notebooks []struct {
 			ID        string `json:"id"`
@@ -634,5 +634,69 @@ func TestSyncNotebookTagPayload(t *testing.T) {
 	}
 	if len(got.Tags) != 1 || !got.Tags[0].IsDeleted {
 		t.Fatalf("expected tag tombstone, got %+v", got.Tags)
+	}
+}
+
+// login 用指定凭据登录并返回 token。
+func login(t *testing.T, srv *Server, username, password string) string {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp.Token
+}
+
+// 回归：一个用户可持有多个会话，新登录不使旧会话失效（多 profile 同时在线）。
+func TestMultiSessionConcurrent(t *testing.T) {
+	srv := newTestServer(t)
+	tokenA := register(t, srv)          // 注册签发会话 A
+	tokenB := login(t, srv, "u1", "pw") // 第二次登录 → 会话 B
+	if tokenA == tokenB {
+		t.Fatal("expected distinct session tokens per login")
+	}
+
+	ping := func(tok string) int {
+		return authReq(srv, tok, http.MethodGet, "/api/v1/sync/pull?since=1970-01-01T00:00:00Z", nil).Code
+	}
+	if code := ping(tokenA); code != http.StatusOK {
+		t.Fatalf("session A offline after second login: %d", code)
+	}
+	if code := ping(tokenB); code != http.StatusOK {
+		t.Fatalf("session B offline: %d", code)
+	}
+
+	tokenC := login(t, srv, "u1", "pw")
+	if code := ping(tokenA); code != http.StatusOK {
+		t.Fatalf("session A offline after third login: %d", code)
+	}
+	if code := ping(tokenC); code != http.StatusOK {
+		t.Fatalf("session C offline: %d", code)
+	}
+}
+
+// 回归：登出仅吊销当前会话，其他会话不受影响。
+func TestLogoutRevokesCurrentSession(t *testing.T) {
+	srv := newTestServer(t)
+	tokenA := register(t, srv)
+	tokenB := login(t, srv, "u1", "pw")
+
+	if rec := authReq(srv, tokenA, http.MethodPost, "/api/v1/logout", nil); rec.Code != http.StatusOK {
+		t.Fatalf("logout failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := authReq(srv, tokenA, http.MethodGet, "/api/v1/sync/pull?since=1970-01-01T00:00:00Z", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for revoked session A, got %d", rec.Code)
+	}
+	if rec := authReq(srv, tokenB, http.MethodGet, "/api/v1/sync/pull?since=1970-01-01T00:00:00Z", nil); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for session B, got %d", rec.Code)
 	}
 }
