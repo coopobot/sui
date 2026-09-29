@@ -69,7 +69,8 @@ void main() {
 
     test('更新内容追加修订', () async {
       final note = await repo.createNote(contentMarkdown: 'v1');
-      final v2 = await repo.updateNoteContent(note.id, contentMarkdown: 'v2 修改');
+      final v2 =
+          await repo.updateNoteContent(note.id, contentMarkdown: 'v2 修改');
       expect(v2.version, note.version + 1);
       expect(v2.revisionCount, 2);
       final revs = await repo.listRevisions(note.id);
@@ -80,7 +81,8 @@ void main() {
 
     test('listNotes 按笔记本过滤与排序', () async {
       final nb = await repo.createNotebook(name: '收件箱');
-      await repo.createNote(title: 'A', notebookId: nb.id, contentMarkdown: 'aa');
+      await repo.createNote(
+          title: 'A', notebookId: nb.id, contentMarkdown: 'aa');
       await repo.createNote(title: 'B', contentMarkdown: 'bb');
       final inNotebook = await repo.listNotes(notebookId: nb.id);
       final all = await repo.listNotes();
@@ -105,6 +107,8 @@ void main() {
       final got = await repo.getNote(note.id);
       expect(got!.archived, isTrue);
       expect(got.pinned, isTrue);
+      // 归档须 bump version，使同步层能感知这次变更（BUG4）。
+      expect(got.version, note.version + 1);
     });
   });
 

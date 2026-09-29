@@ -554,10 +554,11 @@ func TestSyncNotebookTagPayload(t *testing.T) {
 			TagIDs     []string `json:"tagIds"`
 		} `json:"notes"`
 		Notebooks []struct {
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			Version   int    `json:"version"`
-			IsDeleted bool   `json:"isDeleted"`
+			ID        string  `json:"id"`
+			ParentID  *string `json:"parentId"`
+			Name      string  `json:"name"`
+			Version   int     `json:"version"`
+			IsDeleted bool    `json:"isDeleted"`
 		} `json:"notebooks"`
 		Tags []struct {
 			ID        string `json:"id"`
@@ -581,6 +582,10 @@ func TestSyncNotebookTagPayload(t *testing.T) {
 	got := pull()
 	if len(got.Notebooks) != 1 || got.Notebooks[0].Name != "工作" || got.Notebooks[0].Version != 1 {
 		t.Fatalf("unexpected notebooks: %+v", got.Notebooks)
+	}
+	// BUG5：根级笔记本不得输出 parentId（应为省略）。
+	if got.Notebooks[0].ParentID != nil {
+		t.Fatalf("root notebook parentId must be omitted, got %q", *got.Notebooks[0].ParentID)
 	}
 	if len(got.Tags) != 1 || got.Tags[0].Name != "重要" || got.Tags[0].Version != 1 {
 		t.Fatalf("unexpected tags: %+v", got.Tags)

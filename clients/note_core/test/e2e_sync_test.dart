@@ -288,13 +288,76 @@ void main() {
     await dbA.close();
     await dbB.close();
   });
+
+  test('端到端：归档状态同步；本地待推送草稿不被远端旧状态覆盖', () async {
+    final client = Client();
+    final regResp = await client.post(
+      Uri.parse('$serverUrl/api/v1/register'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'username': 'dave', 'password': 'x'}),
+    );
+    expect(regResp.statusCode, 200);
+    final token = (jsonDecode(regResp.body) as Map)['token'] as String;
+
+    final dbA = AppDatabase.memory();
+    final repoA = NoteRepository(dbA, deviceId: 'dev-a');
+    final syncA = SyncClient(
+      repository: repoA,
+      baseUrl: serverUrl,
+      deviceId: 'dev-a',
+      token: token,
+    );
+    final note = await repoA.createNote(
+      title: '待归档',
+      contentMarkdown: '正文',
+    );
+    await syncA.enqueue(note);
+    expect((await syncA.push()).first.accepted, isTrue);
+
+    // 设备 A 归档（本地 bump version 并入队），此刻尚未推送。
+    await repoA.archiveNote(note.id, true);
+    final archivedLocal = await repoA.getNote(note.id);
+    await syncA.enqueue(archivedLocal!);
+
+    // 先 pull：服务端仍是 archived=false，但本地有未提交草稿，不得被覆盖（BUG4）。
+    await syncA.pull();
+    final afterPull = await repoA.getNote(note.id);
+    expect(afterPull!.archived, isTrue);
+
+    // 推送后服务端归档位生效。
+    expect((await syncA.push()).first.accepted, isTrue);
+
+    // 设备 B 首拉 → 归档视图可见。
+    final dbB = AppDatabase.memory();
+    final repoB = NoteRepository(dbB, deviceId: 'dev-b');
+    final syncB = SyncClient(
+      repository: repoB,
+      baseUrl: serverUrl,
+      deviceId: 'dev-b',
+      token: token,
+    );
+    await syncB.pull();
+    final noteB = await repoB.getNote(note.id);
+    expect(noteB!.archived, isTrue);
+    expect(
+      (await repoB.listArchivedNotes()).map((s) => s.note.id),
+      contains(note.id),
+    );
+
+    syncA.close();
+    syncB.close();
+    client.close();
+    await dbA.close();
+    await dbB.close();
+  });
 }
 
 /// 轮询 `/healthz` 直到服务端就绪。
 ///
 /// 原先用固定 `sleep 1.5s`：机器一忙（并行编译、CI 冷启动）就赶不上，
 /// 表现为连接被拒的假失败。改成探活，快机器上几乎是立即返回。
-Future<void> _waitUntilReady(String baseUrl, {Duration timeout = const Duration(seconds: 20)}) async {
+Future<void> _waitUntilReady(String baseUrl,
+    {Duration timeout = const Duration(seconds: 20)}) async {
   final client = Client();
   final deadline = DateTime.now().add(timeout);
   try {

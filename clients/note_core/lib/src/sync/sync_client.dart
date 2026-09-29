@@ -101,9 +101,7 @@ class SyncClient {
   ///
   /// 返回每条的结果；冲突条目保留在 Outbox（将在本地合并后重新提交）。
   Future<List<PushResultItem>> push() async {
-    if (_outbox.isEmpty &&
-        _dirtyNotebookIds.isEmpty &&
-        _dirtyTagIds.isEmpty) {
+    if (_outbox.isEmpty && _dirtyNotebookIds.isEmpty && _dirtyTagIds.isEmpty) {
       return const [];
     }
     final items = <Map<String, dynamic>>[];
@@ -123,10 +121,8 @@ class SyncClient {
         'isDeleted': e.isDeleted,
         'archived': e.archived,
         'sourceDevice': deviceId,
-        if (note?.notebookId != null)
-          'notebookId': note!.notebookId,
-        if (tags.isNotEmpty)
-          'tagIds': tags.map((t) => t.id).toList(),
+        if (note?.notebookId != null) 'notebookId': note!.notebookId,
+        if (tags.isNotEmpty) 'tagIds': tags.map((t) => t.id).toList(),
         if (attachments.isNotEmpty)
           'attachments': attachments.map((a) => a.toJson()).toList(),
       });
@@ -252,9 +248,12 @@ class SyncClient {
         }
         if (_dirtyNotebookIds.contains(nbId)) continue; // 跳过本地脏项
         final nbVer = nb['version'] as int;
+        // BUG5：下行根级笔记本 parentId 可能是空串，须归一为 null。
+        final rawParentId = nb['parentId'] as String?;
         await repository.upsertRemoteNotebook(
           id: nbId,
-          parentId: nb['parentId'] as String?,
+          parentId:
+              (rawParentId == null || rawParentId.isEmpty) ? null : rawParentId,
           name: nb['name'] as String? ?? '',
           sortOrder: (nb['sortOrder'] as int?) ?? 0,
           isDeleted: nb['isDeleted'] as bool? ?? false,
@@ -322,9 +321,12 @@ class SyncClient {
       // 简单实现：远端为权威线，本地草稿保持为"基于新 base 的草稿"——
       // 因为 Outbox 中已存在本地变更，下次 push 会以新 base 声明。
       _baseVersion[id] = ver;
-      // 应用归档状态（FR-25）
+      // 应用归档状态（FR-25）。
+      // 若本地存在待推送草稿（Outbox），以本地为准：否则尚未上行的归档/取消归档
+      // 会被远端旧状态覆盖，导致「归档后归档栏看不到」（BUG4）。
       final remoteArchived = (n['archived'] as bool?) ?? false;
-      if (remoteArchived != local.archived) {
+      final hasPendingDraft = _outbox.any((e) => e.noteId == id);
+      if (!hasPendingDraft && remoteArchived != local.archived) {
         await repository.applyRemoteArchived(
           id,
           remoteArchived,
@@ -468,7 +470,8 @@ class SyncClient {
 
   Future<String> _authGet(String path) async {
     final uri = Uri.parse('$baseUrl$path');
-    final resp = await _http.get(uri, headers: {'Authorization': 'Bearer $token'});
+    final resp =
+        await _http.get(uri, headers: {'Authorization': 'Bearer $token'});
     if (resp.statusCode != 200) {
       throw HttpException(resp.statusCode, resp.body);
     }
@@ -479,7 +482,8 @@ class SyncClient {
   /// 简化：pull 自 epoch 0 + 过滤 id；但当前 API 没有单条接口。
   /// 这里用"拉全部 + 找 id"的方式，对测试/小数据足够。
   Future<_ServerNote?> _fetchNoteFromServer(String id) async {
-    final uri = Uri.parse('$baseUrl/api/v1/sync/pull?since=1970-01-01T00:00:00Z');
+    final uri =
+        Uri.parse('$baseUrl/api/v1/sync/pull?since=1970-01-01T00:00:00Z');
     final resp = await _http.get(uri, headers: _authHeader());
     if (resp.statusCode != 200) return null;
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
@@ -501,7 +505,8 @@ class SyncClient {
   /// - 正文：将服务端版本 + 本地草稿版本以 diff3 方式合并的简化版。
   ///   简化实现：若两端差异较小则拼接；否则创建一条冲突修订，提示用户。
   /// 合并后写入本地版本 +1，下次 push 以新 base 重发。
-  Future<void> _mergeLocalWithServer(OutboxItem local, _ServerNote server) async {
+  Future<void> _mergeLocalWithServer(
+      OutboxItem local, _ServerNote server) async {
     final localTitle = local.title;
     final serverTitle = server.title;
     final mergedTitle =
@@ -573,7 +578,8 @@ class SyncClient {
   }
 
   /// 从服务端拉取指定版本的修订详情。
-  Future<RemoteRevision?> fetchRemoteRevision(String noteId, int version) async {
+  Future<RemoteRevision?> fetchRemoteRevision(
+      String noteId, int version) async {
     try {
       final resp = await _authGet('/api/v1/notes/$noteId/revisions/$version');
       final data = jsonDecode(resp) as Map<String, dynamic>;

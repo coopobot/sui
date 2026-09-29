@@ -12,6 +12,12 @@ import '../util/ids.dart';
 /// 笔记仓储：对本地库（drift/SQLite）的领域操作。
 ///
 /// M1 聚焦离线完整的本地增删改查；同步（M2）将基于此处的能力扩展。
+//
+// BUG5：根级笔记本 parentId 必须统一为 null——空串会被 UI 判为非根节点，
+// 导致「创建后闪没 / 多端不同步」。
+String? _normalizeParentId(String? value) =>
+    (value == null || value.isEmpty) ? null : value;
+
 class NoteRepository {
   final AppDatabase db;
   final String deviceId;
@@ -31,7 +37,7 @@ class NoteRepository {
     final nid = id ?? newId();
     await db.into(db.notebooks).insert(NotebooksCompanion.insert(
           id: nid,
-          parentId: Value(parentId),
+          parentId: Value(_normalizeParentId(parentId)),
           name: name,
           sortOrder: Value(sortOrder),
           version: const Value(1),
@@ -42,8 +48,7 @@ class NoteRepository {
   }
 
   Future<Notebook?> getNotebook(String id) async {
-    final row = await (db.select(db.notebooks)
-          ..where((t) => t.id.equals(id)))
+    final row = await (db.select(db.notebooks)..where((t) => t.id.equals(id)))
         .getSingleOrNull();
     return row?.toModel();
   }
@@ -58,7 +63,8 @@ class NoteRepository {
     return rows.map((r) => r.toModel()).toList();
   }
 
-  Future<List<Notebook>> listNotebooksTree({bool includeDeleted = false}) async {
+  Future<List<Notebook>> listNotebooksTree(
+      {bool includeDeleted = false}) async {
     final all = await listNotebooks(includeDeleted: includeDeleted);
     // 返回排序后的平铺列表；树形组装由 UI 层按 parentId 递归完成
     return all;
@@ -112,7 +118,7 @@ class NoteRepository {
     if (notebook == null) throw StateError('notebook not found: $id');
     await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
         .write(NotebooksCompanion(
-      parentId: Value(parentId),
+      parentId: Value(_normalizeParentId(parentId)),
       version: Value(notebook.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
@@ -121,7 +127,8 @@ class NoteRepository {
 
   /// ---- 标签 ----
 
-  Future<Tag> createTag({String? id, required String name, DateTime? now}) async {
+  Future<Tag> createTag(
+      {String? id, required String name, DateTime? now}) async {
     final t = now ?? DateTime.now();
     final tagId = id ?? newId();
     await db.into(db.tags).insert(TagsCompanion.insert(
@@ -155,7 +162,8 @@ class NoteRepository {
       final existing = await (db.select(db.tags)
             ..where((t) => t.name.equals(name) & t.isDeleted.equals(false)))
           .getSingleOrNull();
-      out.add(existing != null ? existing.toModel() : await createTag(name: name));
+      out.add(
+          existing != null ? existing.toModel() : await createTag(name: name));
     }
     return out;
   }
@@ -279,7 +287,10 @@ class NoteRepository {
     final nextVersion = note.version + 1;
 
     await db.transaction(() async {
-      await _replaceTags(id, tags ?? await tagsOfNote(id).then((v) => v.map((e) => e.name).toList()));
+      await _replaceTags(
+          id,
+          tags ??
+              await tagsOfNote(id).then((v) => v.map((e) => e.name).toList()));
       await (db.update(db.notes)..where((n) => n.id.equals(id)))
           .write(NotesCompanion(
         title: Value(nextTitle),
@@ -308,8 +319,7 @@ class NoteRepository {
     bool includeArchived = false,
   }) async {
     final notes$ = db.notes;
-    final q = db.select(notes$)
-      ..where((n) => n.isDeleted.equals(false));
+    final q = db.select(notes$)..where((n) => n.isDeleted.equals(false));
     if (notebookId != null) {
       q.where((n) => n.notebookId.isValue(notebookId));
     }
@@ -328,7 +338,8 @@ class NoteRepository {
 
     final summaries = <NoteSummary>[];
     for (final n in notes) {
-      summaries.add(NoteSummary(note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
+      summaries.add(NoteSummary(
+          note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
     return summaries;
   }
@@ -400,15 +411,24 @@ class NoteRepository {
     final notes = rows.map((r) => r.toModel()).toList();
     final summaries = <NoteSummary>[];
     for (final n in notes) {
-      summaries.add(NoteSummary(note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
+      summaries.add(NoteSummary(
+          note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
     return summaries;
   }
 
+  /// 用户发起的归档/取消归档（FR-25）：写入归档位并 bump version，
+  /// 让 sync 能感知到这次变更（BR-19.7）。
+  ///
+  /// 与 [applyRemoteArchived] 区别：后者用于同步下行，不改 version。
+  /// 不写 revision：归档不属于内容修订，避免污染版本链。
   Future<void> archiveNote(String id, bool archived) async {
+    final note = await getNote(id);
+    if (note == null) throw StateError('note not found: $id');
     await (db.update(db.notes)..where((n) => n.id.equals(id)))
         .write(NotesCompanion(
       archived: Value(archived),
+      version: Value(note.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
   }
@@ -500,8 +520,7 @@ class NoteRepository {
   /// 列出回收站笔记（FR-26）：已软删除（墓碑）。
   Future<List<NoteSummary>> listDeletedNotes({String? search}) async {
     final notes$ = db.notes;
-    final q = db.select(notes$)
-      ..where((n) => n.isDeleted.equals(true));
+    final q = db.select(notes$)..where((n) => n.isDeleted.equals(true));
     if (search != null && search.isNotEmpty) {
       final like = '%${search.toLowerCase()}%';
       q.where((n) =>
@@ -659,7 +678,8 @@ class NoteRepository {
         ));
       }
 
-      final wasActive = prev != null && !prev.isDeleted && prev.sha256.isNotEmpty;
+      final wasActive =
+          prev != null && !prev.isDeleted && prev.sha256.isNotEmpty;
       final nowActive = !att.isDeleted && att.sha256.isNotEmpty;
       if (!wasActive && nowActive) {
         await _adjustBlobRef(att.sha256, 1, byteSize: att.byteSize);
@@ -759,7 +779,6 @@ class NoteRepository {
     return row?.toModel();
   }
 
-
   /// ---- 同步下行：远端笔记本 / 标签 / 关联落库 ----
 
   /// Upsert 远端笔记本（pull 下行）。以 id 为键，version 以服务端为准。
@@ -774,21 +793,22 @@ class NoteRepository {
   }) async {
     final t = updatedAt ?? DateTime.now();
     final existing = await getNotebook(id);
+    final pid = _normalizeParentId(parentId);
     if (existing == null) {
       await db.into(db.notebooks).insert(NotebooksCompanion.insert(
-        id: id,
-        parentId: Value(parentId),
-        name: name,
-        sortOrder: Value(sortOrder),
-        isDeleted: Value(isDeleted),
-        version: Value(version),
-        createdAt: t,
-        updatedAt: t,
-      ));
+            id: id,
+            parentId: Value(pid),
+            name: name,
+            sortOrder: Value(sortOrder),
+            isDeleted: Value(isDeleted),
+            version: Value(version),
+            createdAt: t,
+            updatedAt: t,
+          ));
     } else {
       await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
           .write(NotebooksCompanion(
-        parentId: Value(parentId),
+        parentId: Value(pid),
         name: Value(name),
         sortOrder: Value(sortOrder),
         isDeleted: Value(isDeleted),
@@ -810,13 +830,13 @@ class NoteRepository {
     final existing = await getTag(id);
     if (existing == null) {
       await db.into(db.tags).insert(TagsCompanion.insert(
-        id: id,
-        name: name,
-        isDeleted: Value(isDeleted),
-        version: Value(version),
-        createdAt: t,
-        updatedAt: t,
-      ));
+            id: id,
+            name: name,
+            isDeleted: Value(isDeleted),
+            version: Value(version),
+            createdAt: t,
+            updatedAt: t,
+          ));
     } else {
       await (db.update(db.tags)..where((t) => t.id.equals(id)))
           .write(TagsCompanion(
@@ -863,7 +883,7 @@ class NoteRepository {
 extension _NotebookRowEx on NotebookRow {
   Notebook toModel() => Notebook(
         id: id,
-        parentId: parentId,
+        parentId: _normalizeParentId(parentId),
         name: name,
         sortOrder: sortOrder,
         isDeleted: isDeleted,

@@ -317,6 +317,34 @@ void main() {
         syncer.close();
       });
 
+      test('BUG5 pull 下行根级笔记本的空串 parentId 归一为 null', () async {
+        final syncer = newClient((req) async => jsonResponse(200, {
+              'ok': true,
+              'notebooks': [
+                {
+                  'id': 'nb-empty',
+                  'parentId': '',
+                  'name': '工作',
+                  'sortOrder': 0,
+                  'version': 1,
+                  'isDeleted': false,
+                  'updatedAt': '2026-09-23T12:00:00Z',
+                }
+              ],
+              'tags': [],
+              'notes': [],
+            }));
+
+        await syncer.pull();
+        final nb = await repo.getNotebook('nb-empty');
+        expect(nb, isNotNull);
+        expect(nb!.parentId, isNull);
+        final roots =
+            (await repo.listNotebooks()).where((n) => n.parentId == null);
+        expect(roots.map((n) => n.id), contains('nb-empty'));
+        syncer.close();
+      });
+
       test('pull 下行笔记的 notebookId 与 tagIds', () async {
         final syncer = newClient((req) async => jsonResponse(200, {
               'ok': true,

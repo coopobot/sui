@@ -276,8 +276,8 @@ class AppController extends ChangeNotifier {
         summaries.sort((a, b) => b.noteCount.compareTo(a.noteCount));
         break;
       case TagSortMode.nameAsc:
-        summaries.sort((a, b) =>
-            a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        summaries.sort(
+            (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
         break;
     }
     _tagSummaries = summaries;
@@ -312,8 +312,8 @@ class AppController extends ChangeNotifier {
         _tagSummaries.sort((a, b) => b.noteCount.compareTo(a.noteCount));
         break;
       case TagSortMode.nameAsc:
-        _tagSummaries.sort((a, b) =>
-            a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        _tagSummaries.sort(
+            (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
         break;
     }
     notifyListeners();
@@ -367,8 +367,7 @@ class AppController extends ChangeNotifier {
   /// 仓储默认按 `updatedAt desc` 取数，但切到创建时间 / 标题后需要在内存里重排，
   /// 避免在仓储加分支条件——排序是 UI 偏好，不应侵入查询语义。
   void _applySort() {
-    _notes = [..._notes]
-      ..sort((a, b) {
+    _notes = [..._notes]..sort((a, b) {
         // BR-05.2 / FR-05：置顶最前，与排序模式无关。
         if (a.note.pinned != b.note.pinned) {
           return a.note.pinned ? -1 : 1;
@@ -445,8 +444,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> createNotebook(String name, {String? parentId}) async {
-    final nb =
-        await _repository.createNotebook(name: name, parentId: parentId);
+    final nb = await _repository.createNotebook(name: name, parentId: parentId);
     await refreshNotebooks();
     _enqueueNotebook(nb);
   }
@@ -475,6 +473,19 @@ class AppController extends ChangeNotifier {
     String? content,
     List<String>? tags,
   }) async {
+    // BUG3：空笔记禁止保存——仅当笔记此前从未有内容（新建/空笔记）且本次
+    // 标题与正文仍为空时，才拒绝写入与推送，避免产生无意义的空笔记、空修订
+    // 与无谓的同步上行；反之，旧笔记原本有内容、被清空后仍应继续保存。
+    final current = await _repository.getNote(id);
+    if (current == null) return;
+    final nextTitle = title ?? current.title;
+    final nextContent = content ?? current.contentMarkdown;
+    final hadContent = current.title.trim().isNotEmpty ||
+        current.contentMarkdown.trim().isNotEmpty;
+    if (!hadContent && nextTitle.trim().isEmpty && nextContent.trim().isEmpty) {
+      return;
+    }
+
     final note = await _repository.updateNoteContent(
       id,
       title: title,
@@ -552,14 +563,15 @@ class AppController extends ChangeNotifier {
     // 1) 子笔记本上提到被删节点的父级。
     final children = _notebooks.where((n) => n.parentId == id).toList();
     for (final child in children) {
-      final reparented = await _repository.reparentNotebook(child.id, newParentId);
+      final reparented =
+          await _repository.reparentNotebook(child.id, newParentId);
       _enqueueNotebook(reparented);
     }
 
     // 2) 该笔记本下的笔记进入回收站（FR-26）：软删除后可在「回收站」还原，
     //    不随笔记本本体一并清除，避免误删内容。
-    final occupants = await _repository.listNotes(
-        notebookId: id, includeArchived: true);
+    final occupants =
+        await _repository.listNotes(notebookId: id, includeArchived: true);
     for (final s in occupants) {
       if (s.note.isDeleted) continue;
       await _repository.markNoteDeleted(s.note.id);
@@ -582,7 +594,9 @@ class AppController extends ChangeNotifier {
 
   /// 在同级内上移笔记本（与上一个兄弟交换 sortOrder）。
   Future<void> moveNotebookUp(String id) async {
-    final siblings = _notebooks.where((n) => n.parentId == _parentOf(id)).toList()
+    final siblings = _notebooks
+        .where((n) => n.parentId == _parentOf(id))
+        .toList()
       ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
     final idx = siblings.indexWhere((n) => n.id == id);
     if (idx <= 0) return;
@@ -597,7 +611,9 @@ class AppController extends ChangeNotifier {
 
   /// 在同级内下移笔记本（与下一个兄弟交换 sortOrder）。
   Future<void> moveNotebookDown(String id) async {
-    final siblings = _notebooks.where((n) => n.parentId == _parentOf(id)).toList()
+    final siblings = _notebooks
+        .where((n) => n.parentId == _parentOf(id))
+        .toList()
       ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
     final idx = siblings.indexWhere((n) => n.id == id);
     if (idx < 0 || idx >= siblings.length - 1) return;
@@ -702,8 +718,7 @@ class AppController extends ChangeNotifier {
   }
 
   /// 探测服务端连通性，成功返回服务端版本号，失败抛异常（UI 捕获展示）。
-  Future<String> testConnection(String baseUrl) =>
-      _authClient().ping(baseUrl);
+  Future<String> testConnection(String baseUrl) => _authClient().ping(baseUrl);
 
   /// 注册新账号并连接。成功返回 null，失败返回可展示的错误文案。
   Future<String?> registerAndConnect({
@@ -772,8 +787,7 @@ class AppController extends ChangeNotifier {
     _syncDebounce = Timer(const Duration(milliseconds: 700), syncNow);
   }
 
-  String _blobRoot() =>
-      _dataDir == null ? '' : p.join(_dataDir, 'blobs');
+  String _blobRoot() => _dataDir == null ? '' : p.join(_dataDir, 'blobs');
 
   AuthClient _authClient() => _auth ??= AuthClient();
 

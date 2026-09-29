@@ -195,9 +195,11 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		}
 		list = append(list, item)
 	}
+	// BUG5：根级笔记本 parentId 为空时省略字段，避免输出空串 ""，
+	// 否则客户端会把它误判为非根节点（「创建后闪没」/「多端不同步」）。
 	type nbOut struct {
 		ID           string `json:"id"`
-		ParentID     string `json:"parentId"`
+		ParentID     string `json:"parentId,omitempty"`
 		Name         string `json:"name"`
 		SortOrder    int    `json:"sortOrder"`
 		Version      int    `json:"version"`

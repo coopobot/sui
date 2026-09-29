@@ -25,16 +25,16 @@ class NotebookTree extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // FR-28：新建笔记本按钮位于左栏最上方（树区域顶部）。
+          // BUG6：左栏顶部提供「新建笔记」入口。
           Padding(
             padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
             child: Align(
               alignment: Alignment.centerLeft,
               child: TextButton.icon(
                 style: TextButton.styleFrom(foregroundColor: _sidebarFg),
-                onPressed: () => _promptCreateNotebook(context),
-                icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-                label: const Text('新建笔记本'),
+                onPressed: () => controller.createNote(),
+                icon: const Icon(Icons.note_add_outlined, size: 18),
+                label: const Text('新建笔记'),
               ),
             ),
           ),
@@ -62,12 +62,26 @@ class NotebookTree extends StatelessWidget {
           ),
           const Divider(height: 1, color: Colors.white24),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
-            child: Text('笔记本',
-                style: Theme.of(context)
-                    .textTheme
-                    .labelLarge
-                    ?.copyWith(color: _sidebarFgDim)),
+            padding: const EdgeInsets.fromLTRB(16, 6, 8, 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text('笔记本',
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelLarge
+                          ?.copyWith(color: _sidebarFgDim)),
+                ),
+                // BUG7：新建笔记本入口移到「笔记本」栏行尾的「+」图标。
+                IconButton(
+                  tooltip: '新建笔记本',
+                  visualDensity: VisualDensity.compact,
+                  color: _sidebarFgDim,
+                  icon: const Icon(Icons.add, size: 18),
+                  onPressed: () => _promptCreateNotebook(context),
+                ),
+              ],
+            ),
           ),
           Expanded(child: _Tree(controller: controller, roots: roots)),
           const Divider(height: 1, color: Colors.white24),

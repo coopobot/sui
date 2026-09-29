@@ -93,4 +93,57 @@ void main() {
 
     await db.close();
   });
+
+  test('BUG3 空笔记禁止保存：标题与正文皆空时不写入', () async {
+    final db = AppDatabase.memory();
+    final repo = NoteRepository(db, deviceId: 'widget-test');
+    final controller = AppController(repository: repo, database: db);
+    await controller.bootstrap();
+    await controller.createNote();
+    final id = controller.selectedNoteId!;
+    final before = await repo.getNote(id);
+
+    await controller.saveNote(id, title: '', content: '', tags: const []);
+    final after = await repo.getNote(id);
+
+    expect(after!.version, before!.version);
+    expect(after.revisionCount, before.revisionCount);
+    await db.close();
+  });
+
+  test('BUG3 空笔记禁止保存：有内容时正常保存', () async {
+    final db = AppDatabase.memory();
+    final repo = NoteRepository(db, deviceId: 'widget-test');
+    final controller = AppController(repository: repo, database: db);
+    await controller.bootstrap();
+    await controller.createNote();
+    final id = controller.selectedNoteId!;
+    final before = await repo.getNote(id);
+
+    await controller.saveNote(id, title: '标题', content: '', tags: const []);
+    final after = await repo.getNote(id);
+
+    expect(after!.version, before!.version + 1);
+    expect(after.title, '标题');
+    await db.close();
+  });
+
+  test('BUG3 旧笔记清空后仍应保存', () async {
+    final db = AppDatabase.memory();
+    final repo = NoteRepository(db, deviceId: 'widget-test');
+    final controller = AppController(repository: repo, database: db);
+    await controller.bootstrap();
+    await controller.createNote();
+    final id = controller.selectedNoteId!;
+
+    await controller.saveNote(id, title: '', content: '原有内容', tags: const []);
+    final withContent = await repo.getNote(id);
+    expect(withContent!.contentMarkdown, '原有内容');
+
+    await controller.saveNote(id, title: '', content: '', tags: const []);
+    final cleared = await repo.getNote(id);
+    expect(cleared!.contentMarkdown, '');
+    expect(cleared.version, withContent.version + 1);
+    await db.close();
+  });
 }
