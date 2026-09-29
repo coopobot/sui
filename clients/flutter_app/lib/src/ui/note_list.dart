@@ -49,7 +49,21 @@ class NoteList extends StatelessWidget {
         const SizedBox(height: 8),
         Expanded(
           child: notes.isEmpty
-              ? const _EmptyHint()
+              ? _EmptyHint(
+                  icon: controller.trashView
+                      ? Icons.delete_outline
+                      : controller.archivedView
+                          ? Icons.archive_outlined
+                          : Icons.inbox_outlined,
+                  title: controller.trashView
+                      ? '回收站为空'
+                      : controller.archivedView
+                          ? '暂无归档笔记'
+                          : '暂无笔记',
+                  subtitle: controller.trashView || controller.archivedView
+                      ? null
+                      : '点击下方按钮新建一篇',
+                )
               : ListView.builder(
                   itemCount: notes.length,
                   itemBuilder: (context, i) =>
@@ -61,6 +75,8 @@ class NoteList extends StatelessWidget {
   }
 
   String _headerTitle() {
+    if (controller.trashView) return '回收站';
+    if (controller.archivedView) return '归档';
     if (controller.inboxMode) return '收件箱 · 剪藏';
     if (controller.selectedNotebookId != null) {
       final nb = controller.notebooks
@@ -118,22 +134,31 @@ class _SortButton extends StatelessWidget {
 }
 
 class _EmptyHint extends StatelessWidget {
-  const _EmptyHint();
+  const _EmptyHint({
+    this.icon = Icons.inbox_outlined,
+    this.title = '暂无笔记',
+    this.subtitle = '点击下方按钮新建一篇',
+  });
+
+  final IconData icon;
+  final String title;
+  final String? subtitle;
 
   @override
   Widget build(BuildContext context) {
+    final hintColor = Theme.of(context).colorScheme.outline;
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.inbox_outlined, size: 48, color: Colors.grey),
+          Icon(icon, size: 48, color: Colors.grey),
           const SizedBox(height: 8),
-          Text('暂无笔记',
-              style: TextStyle(color: Theme.of(context).colorScheme.outline)),
-          const SizedBox(height: 4),
-          Text('点击下方按钮新建一篇',
-              style: TextStyle(
-                  color: Theme.of(context).colorScheme.outline, fontSize: 12)),
+          Text(title, style: TextStyle(color: hintColor)),
+          if (subtitle != null) ...[
+            const SizedBox(height: 4),
+            Text(subtitle!,
+                style: TextStyle(color: hintColor, fontSize: 12)),
+          ],
         ],
       ),
     );
@@ -208,7 +233,13 @@ class _NoteTile extends StatelessWidget {
         ],
       ),
       isThreeLine: true,
-      trailing: _NoteTileMenu(controller: controller, note: note),
+      trailing: controller.trashView
+          ? IconButton(
+              icon: const Icon(Icons.restore, size: 20),
+              tooltip: '还原',
+              onPressed: () => controller.restoreNote(note.id),
+            )
+          : _NoteTileMenu(controller: controller, note: note),
       onTap: () => controller.selectNote(note.id),
     );
   }
@@ -308,7 +339,7 @@ class _NoteTileMenu extends StatelessWidget {
       builder: (context) => AlertDialog(
         title: const Text('删除笔记'),
         content: Text('「${note.title.isEmpty ? '无标题' : note.title}」'
-            '将被移到回收站（软删除），可在同步墓簿中恢复。'),
+            '将被移到回收站，可在「回收站」中还原。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),

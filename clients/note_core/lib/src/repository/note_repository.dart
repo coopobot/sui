@@ -199,6 +199,7 @@ class NoteRepository {
     String contentMarkdown = '',
     List<String> tags = const [],
     bool pinned = false,
+    bool archived = false,
     DateTime? now,
     String? sourceDevice,
   }) async {
@@ -212,6 +213,7 @@ class NoteRepository {
             title: Value(title),
             contentMarkdown: Value(contentMarkdown),
             pinned: Value(pinned),
+            archived: Value(archived),
             version: const Value(1),
             createdAt: t,
             updatedAt: t,
@@ -411,6 +413,19 @@ class NoteRepository {
     ));
   }
 
+  /// 同步下行：应用远端归档状态（不改 version，版本由同步层统一维护）。
+  Future<void> applyRemoteArchived(
+    String id,
+    bool archived, {
+    DateTime? updatedAt,
+  }) async {
+    await (db.update(db.notes)..where((n) => n.id.equals(id)))
+        .write(NotesCompanion(
+      archived: Value(archived),
+      updatedAt: Value(updatedAt ?? DateTime.now()),
+    ));
+  }
+
   Future<void> pinNote(String id, bool pinned) async {
     await (db.update(db.notes)..where((n) => n.id.equals(id)))
         .write(NotesCompanion(
@@ -459,6 +474,81 @@ class NoteRepository {
         if (a.sha256.isNotEmpty) await _adjustBlobRef(a.sha256, -1);
       }
     });
+  }
+
+  /// 列出归档笔记（FR-25 归档视图）：未删除且已归档。
+  Future<List<NoteSummary>> listArchivedNotes({String? search}) async {
+    final notes$ = db.notes;
+    final q = db.select(notes$)
+      ..where((n) => n.isDeleted.equals(false))
+      ..where((n) => n.archived.equals(true));
+    if (search != null && search.isNotEmpty) {
+      final like = '%${search.toLowerCase()}%';
+      q.where((n) =>
+          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+    }
+    q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
+    final summaries = <NoteSummary>[];
+    for (final r in await q.get()) {
+      final n = r.toModel();
+      summaries.add(NoteSummary(
+          note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
+    }
+    return summaries;
+  }
+
+  /// 列出回收站笔记（FR-26）：已软删除（墓碑）。
+  Future<List<NoteSummary>> listDeletedNotes({String? search}) async {
+    final notes$ = db.notes;
+    final q = db.select(notes$)
+      ..where((n) => n.isDeleted.equals(true));
+    if (search != null && search.isNotEmpty) {
+      final like = '%${search.toLowerCase()}%';
+      q.where((n) =>
+          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+    }
+    q.orderBy([(n) => OrderingTerm.desc(n.deletedAt)]);
+    final summaries = <NoteSummary>[];
+    for (final r in await q.get()) {
+      final n = r.toModel();
+      summaries.add(NoteSummary(
+          note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
+    }
+    return summaries;
+  }
+
+  /// 从回收站还原笔记（FR-26）：清除墓碑；若原笔记本已不存在则归入「全部笔记」。
+  ///
+  /// 还原会同时把该笔记的附件映射去墓碑，并补回引用计数。
+  Future<Note?> restoreNote(String id) async {
+    final note = await getNote(id);
+    if (note == null) return null;
+    String? notebookId = note.notebookId;
+    if (notebookId != null) {
+      final nb = await getNotebook(notebookId);
+      if (nb == null || nb.isDeleted) notebookId = null;
+    }
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        isDeleted: const Value(false),
+        deletedAt: const Value<DateTime?>(null),
+        notebookId: Value(notebookId),
+        version: Value(note.version + 1),
+        updatedAt: Value(DateTime.now()),
+      ));
+      final atts = await (db.select(db.attachments)
+            ..where((r) => r.noteId.isValue(id) & r.isDeleted.equals(true)))
+          .get();
+      for (final a in atts) {
+        await (db.update(db.attachments)..where((r) => r.id.equals(a.id)))
+            .write(const AttachmentsCompanion(isDeleted: Value(false)));
+        if (a.sha256.isNotEmpty) {
+          await _adjustBlobRef(a.sha256, 1, byteSize: a.byteSize);
+        }
+      }
+    });
+    return getNote(id);
   }
 
   Future<List<Revision>> listRevisions(String noteId) async {

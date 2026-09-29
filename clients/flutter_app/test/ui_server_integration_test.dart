@@ -184,6 +184,10 @@ void main() {
       await db.close();
       await dbB.close();
     });
+    // `disconnect` 已取消 30s 周期兜底同步定时器；这里推进假时钟，让 dart:io
+    // WebSocket 关闭握手产生的内部超时定时器（5s）触发并释放，避免用例结束时
+    // 仍有挂起定时器被 flutter_test 的 `_verifyInvariants` 判定为失败。
+    await tester.pump(const Duration(seconds: 6));
   }, timeout: const Timeout(Duration(minutes: 3)));
 }
 

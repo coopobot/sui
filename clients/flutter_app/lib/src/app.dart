@@ -21,7 +21,11 @@ class SuiApp extends StatelessWidget {
       child: MaterialApp(
         title: '随手记 Sui',
         theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF2E8B57)),
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: const Color(0xFF2E8B57),
+          ).copyWith(surface: Colors.white),
+          // FR-28：中栏（笔记列表）与右栏（编辑区）统一白底。
+          scaffoldBackgroundColor: Colors.white,
           useMaterial3: true,
         ),
         home: const NoteShell(),

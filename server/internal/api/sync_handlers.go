@@ -166,18 +166,19 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		Content      string   `json:"content"`
 		Version      int      `json:"version"`
 		IsDeleted    bool     `json:"isDeleted"`
+		Archived     bool     `json:"archived"`
 		SourceDevice string   `json:"sourceDevice"`
 		UpdatedAt    string   `json:"updatedAt"`
 		Attachments  []attOut `json:"attachments,omitempty"`
 		NotebookID   string   `json:"notebookId,omitempty"`
-	TagIDs       []string `json:"tagIds,omitempty"`
+		TagIDs       []string `json:"tagIds,omitempty"`
 	}
 	list := make([]out, 0, len(rows))
 	for _, pn := range rows {
 		rw := pn.Note
 		item := out{
 			ID: rw.ID, Title: rw.Title, Content: rw.ContentMarkdown,
-			Version: rw.Version, IsDeleted: rw.IsDeleted,
+			Version: rw.Version, IsDeleted: rw.IsDeleted, Archived: rw.Archived,
 			SourceDevice: rw.SourceDevice,
 			NotebookID:   rw.NotebookID,
 			UpdatedAt:    rw.UpdatedAt.UTC().Format(time.RFC3339),

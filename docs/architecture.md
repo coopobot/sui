@@ -23,8 +23,8 @@
 ### 设计原则
 
 - **离线优先**：客户端所有数据本地持久化，服务端只负责汇聚与版本仲裁。
-- **Markdown 唯一正本**：笔记内容一律为 Markdown 字符串，编辑器是「源码 + 预览」双轨，
-  杜绝富文本中间态转换风险。
+- **Markdown 唯一正本**：笔记内容一律为 Markdown 字符串，编辑器提供「格式 / 源码 / 预览」三态
+  （格式态为正本之上的可视化视图），杜绝富文本中间态转换风险。
 - **内容寻址附件**：附件以 sha256 为键存储，天然去重、可校验完整性。
 - **服务端权威版本线**：`version` 由服务端递增下发，客户端只携带 `base_version` 做冲突
   判定，不可自行篡改。
@@ -67,7 +67,7 @@
 | 表 | 用途 |
 |----|------|
 | `users` | 用户（id / username / password_hash / token / created_at） |
-| `notes` | 笔记元数据（id / title / content_markdown / notebook_id / version / is_deleted / source_device / updated_at） |
+| `notes` | 笔记元数据（id / title / content_markdown / notebook_id / version / is_deleted / archived / source_device / updated_at） |
 | `revisions` | 修订历史（id / note_id / version / title / content_markdown / source_device / is_conflict / created_at） |
 | `blobs` | 附件字节登记（sha256 / size / refcount / created_at）。**refcount 唯一来源是 `attachments` 映射**：指向该 hash 的有效映射条数 |
 | `attachments` | 附件-笔记映射（id / note_id / filename / mime_kind / byte_size / sha256 / storage_ref / thumbnail_ref / embedded_pos / is_deleted / created_at / updated_at） |
@@ -78,11 +78,12 @@
 关键索引：`idx_notes_updated`、`idx_revisions_note`、`idx_revisions_note_ver`、`idx_notes_isdel`、
 `idx_attachments_note`、`idx_notebooks_updated`、`idx_tags_updated`、`idx_note_tags_note`、`idx_note_tags_tag`。
 
-> **同步净荷（M1 起）**：push 请求体在 `items`（笔记）之外新增 `notebooks` / `tags` 两个数组，
+> **同步净荷（M1 起，M2 增补）**：push 请求体在 `items`（笔记）之外新增 `notebooks` / `tags` 两个数组，
 > 笔记条目新增 `notebookId`（指针语义：缺省=不变、`""`=移入收件箱、有值=归属该笔记本）与
 > `tagIds`（该笔记标签的全量集合）；pull 响应新增 `notebooks` / `tags` 两个数组，笔记条目回带
 > `notebookId` / `tagIds`。push 响应新增 `notebookResults` / `tagResults`，与 `results` 同构
 > （`accepted` / `serverVersion` / `appliedVersion`），复用同一套 `base_version` 冲突与墓碑机制。
+> M2 起笔记条目增带 `archived`（归档状态，随 push/pull 往返、跨端一致）。
 > 旧表清单中的 `outbox` 为设计预留描述，代码中并未建表，已从本表移除。
 
 ### 2.3 测试清单（`internal/api/handlers_test.go`）
@@ -98,6 +99,8 @@
 | `TestAttachmentMappingSync` | 附件映射往返 + refcount 幂等/改指/墓碑归零 + 孤儿 GC |
 | `TestClipEndpoint` | 剪藏净化 + URL 幂等 + 同步集成 |
 | `TestSyncNotebookTagPayload` | 笔记本 / 标签净荷往返 + `notebookId` / `tagIds` + 冲突回传 `serverVersion` |
+| `TestSyncArchivedFlag` | 归档状态 `archived` 净荷往返 |
+| `TestSyncNotebookCreateRename` | 笔记本新建 / 重命名变更上行与 pull 收敛 |
 
 ## 3. 客户端
 
@@ -140,9 +143,10 @@
 | 文件 | 职责 |
 |------|------|
 | `note_shell.dart` | 响应式三栏骨架（宽屏三栏 / 窄屏抽屉 + 导航堆栈） |
-| `notebook_tree.dart` | 笔记本树 + 收件箱 + 全部笔记 + 标签入口 |
+| `notebook_tree.dart` | 笔记本树 + 收件箱 + 全部笔记 + 标签入口 + 归档 / 回收站入口（底部区域） |
 | `note_list.dart` | 笔记列表（置顶 / 剪藏标签 / 搜索过滤） |
-| `note_editor.dart` | 编辑器（标题 / Markdown 双轨 / 标签 / 附件卡片 / 历史 / 导出 / 删除） |
+| `note_editor.dart` | 编辑器（标题 / 格式工具栏 / 标签 / 附件卡片 / 历史 / 导出 / 删除） |
+| `markdown_editing_controller.dart` | 「格式 / 源码 / 预览」三态编辑控制器（Markdown 为正本；格式态渲染行内样式与图片单元、支持选中调尺寸） |
 | `markdown_editor.dart` | 源码编辑 + 预览切换（`sizedImageBuilder` 渲染 `sui://` 附件图） |
 | `revision_panel.dart` | 版本历史侧栏 + 一键恢复 |
 | `app_controller.dart` | 全局状态与业务编排（附件增删 / 上传 / 缓存状态）；同步调度：编辑防抖 0.7s 推送、WS 通知拉取、30s 周期兜底 |
@@ -155,10 +159,11 @@
 
 ### 3.3 测试
 
-- note_core：51 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+- note_core：90 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
   缓存 LRU / 配置存取 / 落盘持久化，另含 2 个 e2e（注册→双端 push/pull→冲突合并→重发；
   附件映射同步 + 字节按需下载）。
-- flutter_app：widget 测试 + `sync_wiring_test.dart`（起真服务端跑注册连接→同步→第二设备拉取）。
+- flutter_app：10 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
+  第二设备拉取）与 `editor_format_image_test.dart`（格式模式图片渲染与尺寸手柄）。
 - 运行前确保 `libsqlite3` 可用（见[快速开始 §2.3](getting-started.md#23-sqlite3-native-库drift-依赖仅原生平台)）。
 
 ## 4. 同步协议与冲突解决
@@ -382,19 +387,25 @@ sui/
 
 ### 8.1 已落地并验证
 
-- **服务端**：Go 构建通过、9/9 测试通过；`ping` / `register` / `login` / `push` / `pull` /
+- **服务端**：Go 构建通过、13/13 测试通过；`ping` / `register` / `login` / `push` / `pull` /
   `blobs`(HEAD/PUT/GET) / `revisions` / `clips` 全部实测正常，鉴权 401、重复注册 409、
   坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
-- **note_core**：58/58 测试通过（落盘持久化 2 + 配置存取 9 + 附件映射 3 + 引用计数 4 +
-  附件上传 3 + 笔记本/标签同步 6 + e2e 同步 3 等）。
-- **flutter_app**：5/5 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
-  第二台设备拉取到）。
+- **note_core**：90/90 测试通过（落盘持久化 2 + 配置存取 9 + 附件映射 3 + 引用计数 4 +
+  附件上传 3 + 笔记本/标签同步 6 + 格式化编辑与图片尺寸 + e2e 同步 3 等）。
+- **flutter_app**：10/10 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
+  第二台设备拉取到；以及格式模式图片渲染与尺寸手柄用例）。
 - **同步链路**：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
   同步触发点有三：编辑防抖 0.7s 推送、WS 通知拉取、**30s 周期兜底**（让「断网改动在恢复
   网络后自动补上」成立，而不必等用户再编辑一次）。
 - **笔记本 / 标签同步**：服务端新增 `notebooks` / `tags` / `note_tags` 三表，push/pull 净荷
   扩展为 `items` + `notebooks` + `tags`；笔记条目携带 `notebookId`（指针语义）与 `tagIds`
   全量集合；复用 `base_version` 冲突与墓碑机制，新设备首拉即可重建完整分组树与标签。
+- **整理与归档（M2）**：笔记归属调整、排序、置顶 / 归档 / 删除；笔记本排序与软删除（删除
+  笔记本级联把其笔记置入回收站）；左侧栏底部「归档」「回收站」入口（回收站支持查看 + 还原到
+  原笔记本或「全部笔记」）；全部标签总览统计 + 多选筛选。
+- **格式化编辑（M2）**：编辑器「格式 / 源码 / 预览」三态，Markdown 唯一正本；格式工具栏与
+  图片插入 / 尺寸调整（手柄 / 预设）即时回写 `content`；服务端 `notes` 表新增 `archived` 列。
+- **界面配色（M2）**：左侧栏 `RGB(34,34,38)`、中间栏与编辑栏白底；「新建笔记本」按钮置于左栏顶部。
 - **附件映射**：随笔记 push/pull 全量交换（含墓碑），服务端 blob `refcount` 由映射驱动；
   字节仍按需下载，映射同步不触发字节传输。
 - **附件上传**：新增附件先落本地 → 写映射 → 尽力上传，失败留待 `backfillBlobs()` 在同步
@@ -428,4 +439,4 @@ sui/
 - 桌面端「全量镜像」开关。
 - Web 端 BlobStore 的 IndexedDB 实现（当前为内存）。
 - FTS5 全文搜索（当前为 `LIKE` 子串匹配；表结构已预留）。
-- 富文本 WYSIWYG 编辑器（`flutter_quill` 升级，当前为源码 + 预览双轨）。
+- 富文本 WYSIWYG 编辑器（`flutter_quill` 升级，当前为「格式 / 源码 / 预览」三态）。

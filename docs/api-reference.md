@@ -51,7 +51,8 @@ curl -X POST http://localhost:8080/api/v1/register \
 `notebooks[]` / `tags[]` 可选（M1 起），用于上行笔记本分组与标签；两者均携带 `baseVersion` /
 `version` / `isDeleted` / `sourceDevice`，与笔记共用同一套冲突与墓碑机制。笔记条目的
 `notebookId` 为**指针语义**：字段缺省表示不改变归属、`""` 表示移入收件箱、有值表示归属该
-笔记本；`tagIds` 为该笔记标签的**全量集合**（笔记被接受时整体重建关联）。
+笔记本；`tagIds` 为该笔记标签的**全量集合**（笔记被接受时整体重建关联）；`archived` 为归档
+状态（M2 起，布尔，缺省 `false`）。
 
 ```json
 {
@@ -62,6 +63,7 @@ curl -X POST http://localhost:8080/api/v1/register \
       "content": "# 标题\n正文\n![](sui://<sha256>)",
       "notebookId": "nb-1",
       "tagIds": ["tg-1"],
+      "archived": false,
       "baseVersion": 3,
       "version": 4,
       "sourceDevice": "device-windows",
@@ -143,6 +145,7 @@ curl -X POST http://localhost:8080/api/v1/register \
       "content": "# 标题\n正文\n![](sui://<sha256>)",
       "notebookId": "nb-1",
       "tagIds": ["tg-1"],
+      "archived": false,
       "version": 4,
       "isDeleted": false,
       "sourceDevice": "clip:web-extension",

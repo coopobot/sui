@@ -98,6 +98,18 @@ TagSortMode tagSortModeFromName(String? name) {
   }
 }
 
+/// 笔记列表视图模式（FR-25 归档视图 / FR-26 回收站）。
+enum NoteViewMode {
+  /// 常规视图：可按笔记本 / 标签 / 搜索筛选的未删除、未归档笔记。
+  all,
+
+  /// 归档视图：全部已归档笔记，支持「取消归档」。
+  archived,
+
+  /// 回收站：全部已删除（墓碑）笔记，支持「还原」。
+  trash,
+}
+
 /// 应用状态中枢：持有仓储与同步客户端，向 UI 暴露笔记本树/笔记列表/同步状态。
 ///
 /// 离线优先：所有编辑先落本地 SQLite，再入 Outbox 异步推送；同步失败不影响
@@ -198,7 +210,7 @@ class AppController extends ChangeNotifier {
   String? _selectedNotebookId;
   String? _selectedNoteId;
   String _query = '';
-  final bool _includeArchived = false;
+  NoteViewMode _viewMode = NoteViewMode.all;
   bool _showRevisionPanel = false;
   bool _inboxMode = false;
 
@@ -206,6 +218,22 @@ class AppController extends ChangeNotifier {
   String? get selectedNoteId => _selectedNoteId;
   bool get showRevisionPanel => _showRevisionPanel;
   bool get inboxMode => _inboxMode;
+
+  /// 当前视图模式（FR-25 / FR-26）。
+  NoteViewMode get viewMode => _viewMode;
+
+  /// 是否处于「归档」视图（FR-25）。
+  bool get archivedView => _viewMode == NoteViewMode.archived;
+
+  /// 是否处于「回收站」视图（FR-26）。
+  bool get trashView => _viewMode == NoteViewMode.trash;
+
+  /// 是否处于常规「全部笔记」视图（非归档 / 回收站，且无笔记本 / 收件箱 / 搜索）。
+  bool get isAllNotesView =>
+      _viewMode == NoteViewMode.all &&
+      !_inboxMode &&
+      _selectedNotebookId == null &&
+      _query.isEmpty;
 
   bool get hasSelection =>
       _selectedNotebookId != null || _query.isNotEmpty || _inboxMode;
@@ -292,6 +320,23 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> refreshNotes() async {
+    // 归档视图 / 回收站：独立数据源，不参与笔记本 / 标签筛选（FR-25 / FR-26）。
+    switch (_viewMode) {
+      case NoteViewMode.archived:
+        _notes = await _repository.listArchivedNotes(
+          search: _query.isEmpty ? null : _query,
+        );
+        notifyListeners();
+        return;
+      case NoteViewMode.trash:
+        _notes = await _repository.listDeletedNotes(
+          search: _query.isEmpty ? null : _query,
+        );
+        notifyListeners();
+        return;
+      case NoteViewMode.all:
+        break;
+    }
     // 收件箱模式下不应用标签筛选（收件箱只看剪藏，标签筛选与之冲突）。
     final useTagFilter = !_inboxMode && _selectedTagNames.isNotEmpty;
     if (useTagFilter) {
@@ -299,13 +344,13 @@ class AppController extends ChangeNotifier {
         _selectedTagNames,
         notebookId: _selectedNotebookId,
         search: _query.isEmpty ? null : _query,
-        includeArchived: _includeArchived,
+        includeArchived: false,
       );
     } else {
       _notes = await _repository.listNotes(
         notebookId: _inboxMode ? null : _selectedNotebookId,
         search: _query.isEmpty ? null : _query,
-        includeArchived: _includeArchived,
+        includeArchived: false,
       );
     }
     // 收件箱模式：只显示来自剪藏的笔记
@@ -353,6 +398,7 @@ class AppController extends ChangeNotifier {
   void selectNotebook(String? id) {
     _selectedNotebookId = id;
     _inboxMode = false;
+    _viewMode = NoteViewMode.all;
     _selectedNoteId = null;
     refreshNotes();
   }
@@ -360,8 +406,29 @@ class AppController extends ChangeNotifier {
   void selectInbox() {
     _inboxMode = true;
     _selectedNotebookId = null;
+    _viewMode = NoteViewMode.all;
     _selectedNoteId = null;
     // 收件箱只看剪藏，与标签筛选语义冲突，清空选中标签。
+    _selectedTagNames.clear();
+    refreshNotes();
+  }
+
+  /// 切到归档视图（FR-25）：列出全部已归档笔记。
+  void selectArchivedView() {
+    _viewMode = NoteViewMode.archived;
+    _inboxMode = false;
+    _selectedNotebookId = null;
+    _selectedNoteId = null;
+    _selectedTagNames.clear();
+    refreshNotes();
+  }
+
+  /// 切到回收站（FR-26）：列出全部已删除（墓碑）笔记。
+  void selectTrashView() {
+    _viewMode = NoteViewMode.trash;
+    _inboxMode = false;
+    _selectedNotebookId = null;
+    _selectedNoteId = null;
     _selectedTagNames.clear();
     refreshNotes();
   }
@@ -378,8 +445,17 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> createNotebook(String name, {String? parentId}) async {
-    await _repository.createNotebook(name: name, parentId: parentId);
+    final nb =
+        await _repository.createNotebook(name: name, parentId: parentId);
     await refreshNotebooks();
+    _enqueueNotebook(nb);
+  }
+
+  /// 重命名笔记本并入同步队列（FR-29）。
+  Future<void> renameNotebook(String id, String name) async {
+    final nb = await _repository.renameNotebook(id, name);
+    await refreshNotebooks();
+    _enqueueNotebook(nb);
   }
 
   Future<void> createNote({String? notebookId, String title = ''}) async {
@@ -420,6 +496,16 @@ class AppController extends ChangeNotifier {
     if (note != null) await _enqueueAndSchedule(note);
   }
 
+  /// 从回收站还原笔记（FR-26）：清除墓碑、必要时归入「全部笔记」，并重新入队同步。
+  Future<void> restoreNote(String id) async {
+    final note = await _repository.restoreNote(id);
+    if (_selectedNoteId == id) _selectedNoteId = null;
+    await refreshNotes();
+    await refreshTagSummaries();
+    notifyListeners();
+    if (note != null) await _enqueueAndSchedule(note);
+  }
+
   /// 切换置顶（FR-05 / BR-05.2）。置顶恒优先于排序字段。
   Future<void> togglePinNote(String id) async {
     final note = _notes.where((s) => s.note.id == id).firstOrNull?.note;
@@ -453,11 +539,11 @@ class AppController extends ChangeNotifier {
 
   /// 删除笔记本：软删除 + 级联处置（BR-20.3 / BR-20.4）。
   ///
-  /// - 笔记不随之删除：把该笔记本下未删除笔记的 notebookId 置 null（移出到
-  ///   「全部笔记」），避免误删内容。
+  /// - 笔记不随之删除：把该笔记本下未删除笔记移入回收站（软删除，FR-26），
+  ///   可在「回收站」还原，避免误删内容。
   /// - 子笔记本上提到被删节点的父级：保留层级但避免悬挂引用。
   /// - 软删除的笔记本作为墓碑参与同步（BR-19.5），子笔记本与笔记因 reparent /
-  ///   moveNoteToNotebook 各自 bump version，也独立入队同步。
+  ///   软删除各自 bump version，也独立入队同步。
   Future<void> deleteNotebook(String id) async {
     final target = _notebooks.where((n) => n.id == id).firstOrNull;
     if (target == null) return;
@@ -470,13 +556,15 @@ class AppController extends ChangeNotifier {
       _enqueueNotebook(reparented);
     }
 
-    // 2) 该笔记本下的笔记移出到「全部笔记」。
+    // 2) 该笔记本下的笔记进入回收站（FR-26）：软删除后可在「回收站」还原，
+    //    不随笔记本本体一并清除，避免误删内容。
     final occupants = await _repository.listNotes(
         notebookId: id, includeArchived: true);
     for (final s in occupants) {
       if (s.note.isDeleted) continue;
-      final moved = await _repository.moveNoteToNotebook(s.note.id, null);
-      await _enqueueAndSchedule(moved);
+      await _repository.markNoteDeleted(s.note.id);
+      final tombstoned = await _repository.getNote(s.note.id);
+      if (tombstoned != null) await _enqueueAndSchedule(tombstoned);
     }
 
     // 3) 软删除笔记本本体。
@@ -696,8 +784,14 @@ class AppController extends ChangeNotifier {
     _syncTicker = null;
     await _wsSub?.cancel();
     _wsSub = null;
-    await _ws?.sink.close();
+    // 关闭握手可能因半开连接永不完成：限时等待，避免断连卡死。
+    final ws = _ws;
     _ws = null;
+    if (ws != null) {
+      try {
+        await ws.sink.close().timeout(const Duration(milliseconds: 500));
+      } catch (_) {}
+    }
     _syncClient?.close();
     _syncClient = null;
     // 附件缓存不随连接销毁：本地字节与记账都要留着（离线可用）。

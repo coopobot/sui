@@ -4,6 +4,11 @@ import 'package:note_core/note_core.dart';
 import 'app_controller.dart';
 import 'tag_overview.dart';
 
+/// FR-28：左栏深色配色（RGB(34,34,38)）与高对比前景色。
+const Color _sidebarBg = Color(0xFF222226);
+const Color _sidebarFg = Color(0xFFEDEDF0);
+const Color _sidebarFgDim = Color(0xFF9A9AA2);
+
 /// 侧栏笔记本树（宽屏直接嵌入，窄屏经抽屉复用）。
 class NotebookTree extends StatelessWidget {
   const NotebookTree({super.key, required this.controller});
@@ -15,79 +20,114 @@ class NotebookTree extends StatelessWidget {
     final notebooks = controller.notebooks;
     final roots = notebooks.where((n) => n.parentId == null).toList();
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-          child: Text('笔记本',
-              style: Theme.of(context).textTheme.labelLarge),
-        ),
-        ListTile(
-          dense: true,
-          leading: const Icon(Icons.layers_outlined),
-          title: const Text('全部笔记'),
-          selected: controller.selectedNotebookId == null &&
-              controller.hasSelection == false,
-          onTap: () {
-            controller.selectNotebook(null);
-            // 清除搜索以便"全部笔记"可见
-            controller.search('');
-          },
-        ),
-        ListTile(
-          dense: true,
-          leading: const Icon(Icons.inbox_outlined),
-          title: const Text('收件箱'),
-          subtitle: Text('${_clipCount(controller)} 篇剪藏',
-              style: const TextStyle(fontSize: 11)),
-          selected: controller.inboxMode,
-          onTap: () {
-            controller.selectInbox();
-            controller.search('');
-          },
-        ),
-        const Divider(height: 1),
-        Expanded(child: _Tree(controller: controller, roots: roots)),
-        const Divider(height: 1),
-        // 标签入口区：「全部标签」打开总览（FR-22），下方汇总已选筛选标签。
-        if (controller.hasTagFilter)
+    return Material(
+      color: _sidebarBg,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // FR-28：新建笔记本按钮位于左栏最上方（树区域顶部）。
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: Wrap(
-              spacing: 4,
-              runSpacing: 4,
-              children: [
-                for (final name in controller.selectedTagNames)
-                  InputChip(
-                    label: Text('#$name'),
-                    onDeleted: () => controller.toggleTag(name),
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                TextButton(
-                  onPressed: controller.clearTags,
-                  child: const Text('清空'),
-                ),
-              ],
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                style: TextButton.styleFrom(foregroundColor: _sidebarFg),
+                onPressed: () => _promptCreateNotebook(context),
+                icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+                label: const Text('新建笔记本'),
+              ),
             ),
           ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: TextButton.icon(
-            onPressed: () => _openTagOverview(context),
-            icon: const Icon(Icons.label_outline, size: 18),
-            label: const Text('全部标签'),
+          const Divider(height: 1, color: Colors.white24),
+          _SidebarTile(
+            leading: const Icon(Icons.layers_outlined),
+            title: const Text('全部笔记'),
+            selected: controller.isAllNotesView,
+            onTap: () {
+              controller.selectNotebook(null);
+              // 清除搜索以便"全部笔记"可见
+              controller.search('');
+            },
           ),
-        ),
-        Padding(
-          padding: const EdgeInsets.all(8),
-          child: TextButton.icon(
-            onPressed: () => _promptCreateNotebook(context),
-            icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-            label: const Text('新建笔记本'),
+          _SidebarTile(
+            leading: const Icon(Icons.inbox_outlined),
+            title: const Text('收件箱'),
+            subtitle: Text('${_clipCount(controller)} 篇剪藏',
+                style: const TextStyle(fontSize: 11, color: _sidebarFgDim)),
+            selected: controller.inboxMode,
+            onTap: () {
+              controller.selectInbox();
+              controller.search('');
+            },
           ),
-        ),
-      ],
+          const Divider(height: 1, color: Colors.white24),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+            child: Text('笔记本',
+                style: Theme.of(context)
+                    .textTheme
+                    .labelLarge
+                    ?.copyWith(color: _sidebarFgDim)),
+          ),
+          Expanded(child: _Tree(controller: controller, roots: roots)),
+          const Divider(height: 1, color: Colors.white24),
+          // 标签入口区：「全部标签」打开总览（FR-22），下方汇总已选筛选标签。
+          if (controller.hasTagFilter)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: Wrap(
+                spacing: 4,
+                runSpacing: 4,
+                children: [
+                  for (final name in controller.selectedTagNames)
+                    InputChip(
+                      label: Text('#$name'),
+                      labelStyle:
+                          const TextStyle(color: _sidebarFg, fontSize: 12),
+                      backgroundColor: Colors.white10,
+                      side: const BorderSide(color: Colors.white24),
+                      onDeleted: () => controller.toggleTag(name),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  TextButton(
+                    style: TextButton.styleFrom(foregroundColor: _sidebarFgDim),
+                    onPressed: controller.clearTags,
+                    child: const Text('清空'),
+                  ),
+                ],
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: TextButton.icon(
+              style: TextButton.styleFrom(foregroundColor: _sidebarFg),
+              onPressed: () => _openTagOverview(context),
+              icon: const Icon(Icons.label_outline, size: 18),
+              label: const Text('全部标签'),
+            ),
+          ),
+          const Divider(height: 1, color: Colors.white24),
+          // FR-25 / FR-26：左栏底部固定「归档」「回收站」入口。
+          _SidebarTile(
+            leading: const Icon(Icons.archive_outlined),
+            title: const Text('归档'),
+            selected: controller.archivedView,
+            onTap: () {
+              controller.selectArchivedView();
+              controller.search('');
+            },
+          ),
+          _SidebarTile(
+            leading: const Icon(Icons.delete_outline),
+            title: const Text('回收站'),
+            selected: controller.trashView,
+            onTap: () {
+              controller.selectTrashView();
+              controller.search('');
+            },
+          ),
+        ],
+      ),
     );
   }
 
@@ -114,6 +154,39 @@ class NotebookTree extends StatelessWidget {
   }
 }
 
+/// FR-28：左栏深色底上的列表项，统一高对比前景色与选中态。
+class _SidebarTile extends StatelessWidget {
+  const _SidebarTile({
+    required this.leading,
+    required this.title,
+    required this.selected,
+    required this.onTap,
+    this.subtitle,
+  });
+
+  final Widget leading;
+  final Widget title;
+  final Widget? subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      dense: true,
+      leading: leading,
+      title: title,
+      subtitle: subtitle,
+      selected: selected,
+      textColor: _sidebarFg,
+      iconColor: _sidebarFgDim,
+      selectedColor: Colors.white,
+      selectedTileColor: Colors.white12,
+      onTap: onTap,
+    );
+  }
+}
+
 class _Tree extends StatelessWidget {
   const _Tree({required this.controller, required this.roots});
   final AppController controller;
@@ -124,7 +197,7 @@ class _Tree extends StatelessWidget {
     if (roots.isEmpty) {
       return const Center(
         child: Text('暂无笔记本',
-            style: TextStyle(color: Colors.grey, fontSize: 13)),
+            style: TextStyle(color: _sidebarFgDim, fontSize: 13)),
       );
     }
     return ListView(
@@ -158,7 +231,12 @@ class _NotebookNode extends StatelessWidget {
           title: Text(nb.name),
           subtitle: noteCount > 0 ? Text('$noteCount篇') : null,
           selected: controller.selectedNotebookId == nb.id,
+          textColor: _sidebarFg,
+          iconColor: _sidebarFgDim,
+          selectedColor: Colors.white,
+          selectedTileColor: Colors.white12,
           trailing: PopupMenuButton<String>(
+            iconColor: _sidebarFgDim,
             onSelected: (v) async {
               switch (v) {
                 case 'rename':
@@ -205,8 +283,7 @@ class _NotebookNode extends StatelessWidget {
   Future<void> _rename(BuildContext context) async {
     final name = await _askName(context, '重命名笔记本', initial: nb.name);
     if (name == null || name.trim().isEmpty) return;
-    await controller.repository.renameNotebook(nb.id, name.trim());
-    await controller.refreshNotebooks();
+    await controller.renameNotebook(nb.id, name.trim());
   }
 
   Future<void> _addChild(BuildContext context) async {
@@ -222,7 +299,7 @@ class _NotebookNode extends StatelessWidget {
         .length;
     final message = noteCount > 0
         ? '笔记本「${nb.name}」下有 $noteCount 篇笔记，'
-            '删除后其中笔记将移出到「全部笔记」，不会一并删除。'
+            '删除后其中笔记将进入「回收站」，可在回收站中还原，不会一并删除。'
             '子笔记本会上提到当前父级。'
         : '确定删除笔记本「${nb.name}」？子笔记本会上提到当前父级。';
     final ok = await showDialog<bool>(
@@ -256,7 +333,10 @@ class NoteTreeDrawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Drawer(child: NotebookTree(controller: controller));
+    return Drawer(
+      backgroundColor: _sidebarBg,
+      child: NotebookTree(controller: controller),
+    );
   }
 }
 

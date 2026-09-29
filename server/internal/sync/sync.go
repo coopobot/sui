@@ -28,6 +28,7 @@ type PushItem struct {
 	BaseVersion  int              `json:"baseVersion"`
 	Version      int              `json:"version"`
 	IsDeleted    bool             `json:"isDeleted"`
+	Archived     bool             `json:"archived"`
 	SourceDevice string           `json:"sourceDevice"`
 	Attachments  []AttachmentItem `json:"attachments,omitempty"`
 
@@ -115,7 +116,7 @@ func (p *Protocol) Push(it PushItem) (*PushResponse, error) {
 			notebookID = *it.NotebookID
 		}
 		if _, err := p.store.UpsertNote(
-			it.ID, it.Title, it.Content, notebookID, it.IsDeleted, it.SourceDevice, nextVer,
+			it.ID, it.Title, it.Content, notebookID, it.IsDeleted, it.Archived, it.SourceDevice, nextVer,
 		); err != nil {
 			return nil, err
 		}

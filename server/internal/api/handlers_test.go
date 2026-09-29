@@ -700,3 +700,134 @@ func TestLogoutRevokesCurrentSession(t *testing.T) {
 		t.Fatalf("expected 200 for session B, got %d", rec.Code)
 	}
 }
+
+func TestSyncArchivedFlag(t *testing.T) {
+	srv := newTestServer(t)
+	token := register(t, srv)
+
+	push := func(base int, archived bool) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"clientId": "dev-a", "items": []map[string]any{
+				{"id": "note-arc", "title": "归档测试", "content": "c",
+					"baseVersion": base, "version": base + 1, "sourceDevice": "dev-a",
+					"archived": archived},
+			},
+		})
+		rec := authReq(srv, token, http.MethodPost, "/api/v1/sync/push", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("push failed: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	pullArchived := func() (bool, bool) {
+		rec := authReq(srv, token, http.MethodGet, "/api/v1/sync/pull?since=1970-01-01T00:00:00Z", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("pull failed: %d", rec.Code)
+		}
+		var resp struct {
+			Notes []struct {
+				ID        string `json:"id"`
+				Archived  bool   `json:"archived"`
+				IsDeleted bool   `json:"isDeleted"`
+			} `json:"notes"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Notes) != 1 {
+			t.Fatalf("expected 1 note, got %+v", resp.Notes)
+		}
+		return resp.Notes[0].Archived, resp.Notes[0].IsDeleted
+	}
+
+	// 归档 → 服务端持久化并随 pull 下发
+	push(0, true)
+	if archived, deleted := pullArchived(); !archived || deleted {
+		t.Fatalf("expected archived=true, isDeleted=false; got %v/%v", archived, deleted)
+	}
+
+	// 取消归档（还原）→ 状态可逆
+	push(1, false)
+	if archived, _ := pullArchived(); archived {
+		t.Fatal("expected archived=false after unarchive")
+	}
+}
+
+func TestSyncNotebookCreateRename(t *testing.T) {
+	srv := newTestServer(t)
+	token := register(t, srv)
+
+	pushNb := func(base int, name string, isDeleted bool) int {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"clientId": "dev-a", "notebooks": []map[string]any{
+				{"id": "nb-x", "parentId": "", "name": name, "sortOrder": 0,
+					"baseVersion": base, "version": base + 1, "isDeleted": isDeleted,
+					"sourceDevice": "dev-a"},
+			},
+		})
+		rec := authReq(srv, token, http.MethodPost, "/api/v1/sync/push", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("notebook push failed: %d %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			NotebookResults []struct {
+				Accepted       bool `json:"accepted"`
+				AppliedVersion int  `json:"appliedVersion"`
+			} `json:"notebookResults"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.NotebookResults) != 1 || !resp.NotebookResults[0].Accepted {
+			t.Fatalf("notebook push not accepted: %+v", resp.NotebookResults)
+		}
+		return resp.NotebookResults[0].AppliedVersion
+	}
+
+	pullNb := func() (string, int, bool) {
+		rec := authReq(srv, token, http.MethodGet, "/api/v1/sync/pull?since=1970-01-01T00:00:00Z", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("pull failed: %d", rec.Code)
+		}
+		var resp struct {
+			Notebooks []struct {
+				Name      string `json:"name"`
+				Version   int    `json:"version"`
+				IsDeleted bool   `json:"isDeleted"`
+			} `json:"notebooks"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Notebooks) != 1 {
+			t.Fatalf("expected 1 notebook, got %+v", resp.Notebooks)
+		}
+		return resp.Notebooks[0].Name, resp.Notebooks[0].Version, resp.Notebooks[0].IsDeleted
+	}
+
+	// 新建笔记本 → 上行并落库（FR-29 服务端侧）
+	if v := pushNb(0, "工作", false); v != 1 {
+		t.Fatalf("expected appliedVersion=1 on create, got %d", v)
+	}
+	if name, ver, del := pullNb(); name != "工作" || ver != 1 || del {
+		t.Fatalf("unexpected notebook after create: %s/%d/%v", name, ver, del)
+	}
+
+	// 重命名 → 版本收敛
+	if v := pushNb(1, "工作总结", false); v != 2 {
+		t.Fatalf("expected appliedVersion=2 on rename, got %d", v)
+	}
+	if name, ver, _ := pullNb(); name != "工作总结" || ver != 2 {
+		t.Fatalf("unexpected notebook after rename: %s/%d", name, ver)
+	}
+
+	// 删除 → 墓碑下发（客户端据此收敛；笔记进回收站为客户端语义）
+	if v := pushNb(2, "工作总结", true); v != 3 {
+		t.Fatalf("expected appliedVersion=3 on delete, got %d", v)
+	}
+	if _, _, del := pullNb(); !del {
+		t.Fatal("expected notebook tombstone after delete")
+	}
+}

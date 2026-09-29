@@ -55,6 +55,7 @@ func (s *Store) migrate() error {
 			notebook_id TEXT NOT NULL DEFAULT '', -- 所属笔记本（空表示未分组 / 收件箱）
 			version INTEGER NOT NULL DEFAULT 0,   -- 服务端权威版本线
 			is_deleted INTEGER NOT NULL DEFAULT 0, -- 墓碑
+			archived INTEGER NOT NULL DEFAULT 0,  -- 归档状态（FR-25）
 			source_device TEXT NOT NULL DEFAULT '', -- 最近一次修改的来源设备
 			updated_at TEXT NOT NULL
 		)`,
@@ -128,6 +129,39 @@ func (s *Store) migrate() error {
 		if _, err := s.db.Exec(st); err != nil {
 			return err
 		}
+	}
+	// FR-25：notes 新增归档状态列。既有库用 PRAGMA 探测 + ALTER TABLE 幂等补列，
+	// 新建库的 CREATE TABLE 亦含该列，两条路径都安全。
+	if err := s.ensureColumn("notes", "archived", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureColumn 幂等补列：已存在则跳过，否则 ALTER TABLE 追加。
+// SQLite 无 ADD COLUMN IF NOT EXISTS，故先 PRAGMA table_info 探测，重复执行安全。
+func (s *Store) ensureColumn(table, column, decl string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl); err != nil {
+		return err
 	}
 	return nil
 }
@@ -227,6 +261,7 @@ type NoteRow struct {
 	NotebookID      string
 	Version         int
 	IsDeleted       bool
+	Archived        bool
 	SourceDevice    string
 	UpdatedAt       time.Time
 }
@@ -234,7 +269,7 @@ type NoteRow struct {
 // UpdatedSince 返回 updated_at > since 的所有笔记（增量拉取）。
 func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, source_device, updated_at
+		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, updated_at
 		 FROM notes WHERE updated_at > ? ORDER BY updated_at`,
 		since.UTC().Format(time.RFC3339),
 	)
@@ -245,12 +280,13 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 	var out []NoteRow
 	for rows.Next() {
 		var r NoteRow
-		var del int
+		var del, arch int
 		var ts string
-		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &r.SourceDevice, &ts); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &r.SourceDevice, &ts); err != nil {
 			return nil, err
 		}
 		r.IsDeleted = del != 0
+		r.Archived = arch != 0
 		r.UpdatedAt = parseTime(ts)
 		out = append(out, r)
 	}
@@ -260,12 +296,12 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 // GetNote 返回指定笔记的服务端状态。
 func (s *Store) GetNote(id string) (*NoteRow, error) {
 	var r NoteRow
-	var del int
+	var del, arch int
 	var ts string
 	err := s.db.QueryRow(
-		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, source_device, updated_at
+		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, updated_at
 		 FROM notes WHERE id = ?`, id,
-	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &r.SourceDevice, &ts)
+	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &r.SourceDevice, &ts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -273,12 +309,13 @@ func (s *Store) GetNote(id string) (*NoteRow, error) {
 		return nil, err
 	}
 	r.IsDeleted = del != 0
+	r.Archived = arch != 0
 	r.UpdatedAt = parseTime(ts)
 	return &r, nil
 }
 
 // UpsertNote 落库笔记（增量），同时记录一条修订。返回新版本号。
-func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted bool, sourceDevice string, version int) (int, error) {
+func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted, archived bool, sourceDevice string, version int) (int, error) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -287,15 +324,16 @@ func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted 
 	defer tx.Rollback()
 
 	if err := upsert(tx,
-		`INSERT INTO notes (id, title, content_markdown, notebook_id, version, is_deleted, source_device, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO notes (id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   title=excluded.title, content_markdown=excluded.content_markdown,
 		   notebook_id=excluded.notebook_id,
 		   version=excluded.version, is_deleted=excluded.is_deleted,
+		   archived=excluded.archived,
 		   source_device=excluded.source_device,
 		   updated_at=excluded.updated_at`,
-		noteID, title, content, notebookID, version, b2i(isDeleted), sourceDevice, ts,
+		noteID, title, content, notebookID, version, b2i(isDeleted), b2i(archived), sourceDevice, ts,
 	); err != nil {
 		return 0, err
 	}

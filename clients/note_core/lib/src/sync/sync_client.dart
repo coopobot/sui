@@ -73,6 +73,7 @@ class SyncClient {
       baseVersion: base,
       version: note.version,
       isDeleted: note.isDeleted,
+      archived: note.archived,
     );
     if (existing >= 0) {
       _outbox[existing] = item; // 合并成一条（只推最终内容）
@@ -120,6 +121,7 @@ class SyncClient {
         'baseVersion': e.baseVersion,
         'version': e.version,
         'isDeleted': e.isDeleted,
+        'archived': e.archived,
         'sourceDevice': deviceId,
         if (note?.notebookId != null)
           'notebookId': note!.notebookId,
@@ -236,15 +238,20 @@ class SyncClient {
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     final notes = (data['notes'] as List).cast<Map<String, dynamic>>();
     int count = 0;
+    // FR-29：游标须在所有下行实体（笔记/笔记本/标签）处理后统一推进。
+    DateTime? maxUpdated;
 
     // 处理远端笔记本
     final nbList = (data['notebooks'] as List?)?.cast<Map<String, dynamic>>();
     if (nbList != null) {
       for (final nb in nbList) {
         final nbId = nb['id'] as String;
+        final nbUpdated = DateTime.parse(nb['updatedAt'] as String);
+        if (maxUpdated == null || nbUpdated.isAfter(maxUpdated)) {
+          maxUpdated = nbUpdated;
+        }
         if (_dirtyNotebookIds.contains(nbId)) continue; // 跳过本地脏项
         final nbVer = nb['version'] as int;
-        final nbUpdated = DateTime.parse(nb['updatedAt'] as String);
         await repository.upsertRemoteNotebook(
           id: nbId,
           parentId: nb['parentId'] as String?,
@@ -264,9 +271,12 @@ class SyncClient {
     if (tagList != null) {
       for (final tg in tagList) {
         final tagId = tg['id'] as String;
+        final tagUpdated = DateTime.parse(tg['updatedAt'] as String);
+        if (maxUpdated == null || tagUpdated.isAfter(maxUpdated)) {
+          maxUpdated = tagUpdated;
+        }
         if (_dirtyTagIds.contains(tagId)) continue; // 跳过本地脏项
         final tagVer = tg['version'] as int;
-        final tagUpdated = DateTime.parse(tg['updatedAt'] as String);
         await repository.upsertRemoteTag(
           id: tagId,
           name: tg['name'] as String? ?? '',
@@ -285,7 +295,9 @@ class SyncClient {
       final ver = n['version'] as int;
       final isDeleted = n['isDeleted'] as bool;
       final updatedAt = DateTime.parse(n['updatedAt'] as String);
-      if (updatedAt.isAfter(_lastPull)) _lastPull = updatedAt;
+      if (maxUpdated == null || updatedAt.isAfter(maxUpdated)) {
+        maxUpdated = updatedAt;
+      }
 
       final local = await repository.getNote(id);
       if (local == null) {
@@ -296,6 +308,7 @@ class SyncClient {
           notebookId: n['notebookId'] as String?,
           title: n['title'] as String? ?? '',
           contentMarkdown: n['content'] as String? ?? '',
+          archived: (n['archived'] as bool?) ?? false,
           sourceDevice: (n['sourceDevice'] as String?) ?? '',
         );
         _baseVersion[id] = ver;
@@ -309,6 +322,15 @@ class SyncClient {
       // 简单实现：远端为权威线，本地草稿保持为"基于新 base 的草稿"——
       // 因为 Outbox 中已存在本地变更，下次 push 会以新 base 声明。
       _baseVersion[id] = ver;
+      // 应用归档状态（FR-25）
+      final remoteArchived = (n['archived'] as bool?) ?? false;
+      if (remoteArchived != local.archived) {
+        await repository.applyRemoteArchived(
+          id,
+          remoteArchived,
+          updatedAt: updatedAt,
+        );
+      }
       // 应用笔记的 notebookId
       final remoteNotebookId = n['notebookId'] as String?;
       if (remoteNotebookId != null) {
@@ -321,6 +343,7 @@ class SyncClient {
         count++;
       }
     }
+    if (maxUpdated != null) _lastPull = maxUpdated;
     return count;
   }
 
@@ -508,6 +531,7 @@ class SyncClient {
       baseVersion: server.version,
       version: note.version,
       isDeleted: note.isDeleted,
+      archived: note.archived,
     );
     if (existing >= 0) {
       _outbox[existing] = item;
@@ -577,6 +601,7 @@ class OutboxItem {
   final int baseVersion;
   final int version;
   final bool isDeleted;
+  final bool archived;
 
   OutboxItem({
     required this.noteId,
@@ -585,6 +610,7 @@ class OutboxItem {
     required this.baseVersion,
     required this.version,
     required this.isDeleted,
+    required this.archived,
   });
 }
 

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:note_core/note_core.dart';
 
 /// 格式模式下的正文控制器：正本仍是 Markdown 字符串，但 [buildTextSpan] 会把
 /// 块级 / 行内标记渲染为可读的富样式（标题放大、加粗加重、标记符号淡化）。
@@ -6,6 +7,16 @@ import 'package:flutter/material.dart';
 /// 这样做守住了**单一正本**（ADR-006 / BR-23.1）：`text` 自始至终是标准
 /// Markdown，光标 / 选区 / 撤销栈都以正本偏移为准；[styled] 只影响「怎么画」，
 /// 不影响「存什么」。切到源码模式时把 [styled] 置回 false 即恢复纯文本呈现。
+/// 格式模式下，把一段图片引用渲染为可交互「呈现单元」的构建器。
+///
+/// 由 UI 层注入：控制器本身不依赖附件缓存，只负责在 [buildTextSpan] 里把
+/// `![alt](sui://<sha256>){尺寸}` 这一段从纯文本样式片段替换为图片 widget
+/// （BR-27.1）。未注入时图片引用退化为普通样式文本，不影响正本与偏移。
+typedef FormatImageSpanBuilder = Widget Function(
+  BuildContext context,
+  ParsedImage image,
+);
+
 class MarkdownEditingController extends TextEditingController {
   MarkdownEditingController({super.text});
 
@@ -15,6 +26,9 @@ class MarkdownEditingController extends TextEditingController {
   /// 依据当前模式写入，随同 TextField 一起重建；无需（也不应在）build 期间触发
   /// notifyListeners，否则会引发「build 期间 setState」断言。
   bool styled = false;
+
+  /// 格式模式下的图片呈现单元构建器；由 UI 层注入（见 [FormatImageSpanBuilder]）。
+  FormatImageSpanBuilder? formatImageBuilder;
 
   @override
   TextSpan buildTextSpan({
@@ -33,8 +47,61 @@ class MarkdownEditingController extends TextEditingController {
     final composing = withComposing ? value.composing : TextRange.empty;
     return TextSpan(
       style: base,
-      children: _MarkdownStyler.build(context, text, base, composing),
+      children: _buildSpans(context, text, base, composing),
     );
+  }
+
+  /// 生成格式模式的样式片段：图片引用替换为 [WidgetSpan]，其余按逐字符样式合并。
+  ///
+  /// 偏移契约：整棵 span 树的 `toPlainText()` 必须与 [text] 等长，否则 TextField
+  /// 的光标定位 / 命中测试会错位。`WidgetSpan` 在文本模型中固定占用 1 个码元，
+  /// 故其引用余下的字符用「零宽透明」文本补足，保证等长（BR-27.1）。
+  List<InlineSpan> _buildSpans(
+    BuildContext context,
+    String text,
+    TextStyle base,
+    TextRange composing,
+  ) {
+    if (text.isEmpty) return const <InlineSpan>[];
+    final styles = _MarkdownStyler.characterStyles(
+      context,
+      text,
+      base,
+      composing,
+    );
+    final builder = formatImageBuilder;
+    if (builder == null) {
+      return _MarkdownStyler.coalesce(text, styles, 0, text.length);
+    }
+
+    final spans = <InlineSpan>[];
+    var cursor = 0;
+    while (true) {
+      final image = EditorFormat.findImage(text, cursor);
+      if (image == null) break;
+      final spanEnd = image.attributeEnd > 0 ? image.attributeEnd : image.end;
+      if (image.start > cursor) {
+        spans.addAll(
+          _MarkdownStyler.coalesce(text, styles, cursor, image.start),
+        );
+      }
+      spans.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: builder(context, image),
+      ));
+      // 引用首字符由 WidgetSpan 的 1 个码元占位，其余用零宽透明文本补齐。
+      if (spanEnd - image.start - 1 > 0) {
+        spans.add(TextSpan(
+          text: text.substring(image.start + 1, spanEnd),
+          style: base.copyWith(color: Colors.transparent, fontSize: 0),
+        ));
+      }
+      cursor = spanEnd;
+    }
+    if (cursor < text.length) {
+      spans.addAll(_MarkdownStyler.coalesce(text, styles, cursor, text.length));
+    }
+    return spans;
   }
 }
 
@@ -66,13 +133,13 @@ class _MarkdownStyler {
 
   static const List<double> _headingScale = [1.75, 1.5, 1.28, 1.14, 1.06, 1.0];
 
-  static List<InlineSpan> build(
+  static List<TextStyle> characterStyles(
     BuildContext context,
     String text,
     TextStyle base,
     TextRange composing,
   ) {
-    if (text.isEmpty) return const <InlineSpan>[];
+    if (text.isEmpty) return const <TextStyle>[];
     final scheme = Theme.of(context).colorScheme;
 
     final marker = base.copyWith(color: scheme.outline.withValues(alpha: 0.5));
@@ -122,7 +189,7 @@ class _MarkdownStyler {
       }
     }
 
-    return _coalesce(text, styles);
+    return styles;
   }
 
   // ---------------------------------------------------------------------------
@@ -273,14 +340,21 @@ class _MarkdownStyler {
     }
   }
 
-  static List<InlineSpan> _coalesce(String text, List<TextStyle> styles) {
+  /// 把 `[start, end)` 区间内样式相同的相邻字符合并为一个 [TextSpan]。
+  static List<InlineSpan> coalesce(
+    String text,
+    List<TextStyle> styles,
+    int start,
+    int end,
+  ) {
     final spans = <InlineSpan>[];
-    final n = text.length;
-    var i = 0;
-    while (i < n) {
+    final s = start.clamp(0, text.length);
+    final e = end.clamp(0, text.length);
+    var i = s;
+    while (i < e) {
       final style = styles[i];
       var j = i + 1;
-      while (j < n && styles[j] == style) {
+      while (j < e && styles[j] == style) {
         j++;
       }
       spans.add(TextSpan(text: text.substring(i, j), style: style));

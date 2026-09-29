@@ -42,6 +42,13 @@ class _NoteEditorState extends State<NoteEditor> {
   int _pendingSaves = 0;
 
   @override
+  void initState() {
+    super.initState();
+    // 格式模式：把 `![alt](sui://<sha256>){尺寸}` 渲染为图片呈现单元（FR-27）。
+    _content.formatImageBuilder = _buildFormatImage;
+  }
+
+  @override
   void dispose() {
     _title.dispose();
     _content.dispose();
@@ -240,6 +247,34 @@ class _NoteEditorState extends State<NoteEditor> {
     }
   }
 
+  /// 格式模式下把图片引用渲染为图片呈现单元：点按即选中（把光标落到引用内），
+  /// 尺寸条随光标出现；`sui://` 走附件缓存，字节未就绪时显示占位（BR-27.1/27.3）。
+  Widget _buildFormatImage(BuildContext context, ParsedImage image) {
+    final sel = _content.value.selection;
+    final spanEnd = image.attributeEnd > 0 ? image.attributeEnd : image.end;
+    final selected = sel.isValid &&
+        sel.isCollapsed &&
+        sel.start >= image.start &&
+        sel.start <= spanEnd;
+    return _FormatImageUnit(
+      image: image,
+      selected: selected,
+      onSelect: () => _selectImage(image),
+    );
+  }
+
+  /// 选中某个图片：把光标置于引用（含属性块）末尾，与 [_imageAtCursor] 的判定
+  /// 对齐，从而弹出尺寸条（BR-27.2）。
+  void _selectImage(ParsedImage image) {
+    final spanEnd = image.attributeEnd > 0 ? image.attributeEnd : image.end;
+    final pos = spanEnd.clamp(0, _content.text.length);
+    _content.value = TextEditingValue(
+      text: _content.text,
+      selection: TextSelection.collapsed(offset: pos),
+    );
+    if (_mode != EditorMode.preview) _contentFocus.requestFocus();
+  }
+
   /// 对指定图片应用尺寸，只重写其属性块，其余字符不动（BR-24.1）。
   ///
   /// 写回后把光标置于图片引用末尾（`image.end`），确保仍在图片范围内，
@@ -274,9 +309,6 @@ class _NoteEditorState extends State<NoteEditor> {
     if (id == null) {
       return const _EmptyEditor();
     }
-
-    // 检测光标是否落在图片引用内（用于条件显示图片尺寸条）。
-    final imageAtCursor = _imageAtCursor;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -390,15 +422,26 @@ class _NoteEditorState extends State<NoteEditor> {
         if (_mode != EditorMode.preview) ...[
           const Divider(height: 1),
           _buildFormatToolbar(),
-          // 图片尺寸条：光标落在图片引用内时弹出，用预设或滑块调整尺寸，
-          // 尺寸以 `{width=...}` 写回正本（ADR-007）。
-          if (imageAtCursor != null) ...[
-            const Divider(height: 1),
-            _ImageSizeBar(
-              image: imageAtCursor,
-              onApply: (size) => _applyImageSize(imageAtCursor, size),
-            ),
-          ],
+          // 图片尺寸条：点选 / 光标落在图片引用内时出现。用 ListenableBuilder
+          // 监听正文控制器 —— 光标移动不会触发本组件重建，靠它才能即时显隐
+          // （BR-27.2：点按图片即选中并显示手柄，不以光标落入引用跨度为前提）。
+          ListenableBuilder(
+            listenable: _content,
+            builder: (context, _) {
+              final image = _imageAtCursor;
+              if (image == null) return const SizedBox.shrink();
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Divider(height: 1),
+                  _ImageSizeBar(
+                    image: image,
+                    onApply: (size) => _applyImageSize(image, size),
+                  ),
+                ],
+              );
+            },
+          ),
         ],
         const Divider(height: 1),
         Expanded(
@@ -621,7 +664,7 @@ class _NoteEditorState extends State<NoteEditor> {
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('删除这篇笔记？'),
-            content: const Text('将移到回收站（逻辑删除），可从档案恢复。'),
+            content: const Text('将移到回收站，可在左侧「回收站」中查看或还原。'),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context, false),
@@ -749,6 +792,84 @@ class _ImageSizeBarState extends State<_ImageSizeBar> {
       ),
       child: Text(label),
     );
+  }
+}
+
+/// 格式模式内联的图片呈现单元：包一层点选 / 高亮，尺寸与预览共用同一套
+/// `sui://<sha256>` 附件加载；字节未就绪或失败时显示占位，不阻断编辑
+/// （BR-27.1 / BR-27.3）。
+class _FormatImageUnit extends StatelessWidget {
+  const _FormatImageUnit({
+    required this.image,
+    required this.selected,
+    required this.onSelect,
+  });
+
+  final ParsedImage image;
+  final bool selected;
+  final VoidCallback onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final uri = Uri.tryParse(image.url);
+    final label = image.alt.isNotEmpty ? image.alt : '附件';
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onSelect,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+        padding: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          border: Border.all(
+            color: selected ? scheme.primary : Colors.transparent,
+            width: 2,
+          ),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            // 内联子组件受段落宽度约束，百分比宽度即相对该可用宽度换算。
+            final available =
+                constraints.maxWidth.isFinite ? constraints.maxWidth : 720.0;
+            final dims = _resolveSize(available);
+            if (uri != null && uri.scheme == 'sui') {
+              return _SuiAttachmentImage(
+                sha256: uri.host,
+                label: label,
+                width: dims.$1,
+                height: dims.$2,
+              );
+            }
+            return Image.network(
+              image.url,
+              width: dims.$1,
+              height: dims.$2,
+              errorBuilder: (_, __, ___) =>
+                  _AttachmentPlaceholder(label: label),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// 把 `{width=...}` 换算为具体像素；未指定宽度时按原图自适应（受可用宽度限制）。
+  (double?, double?) _resolveSize(double available) {
+    final w = image.size.width;
+    final h = image.size.height;
+    double? width;
+    double? height;
+    if (w != null) {
+      width = w.unit == SizeUnit.percent
+          ? available * (w.value / 100)
+          : w.value.toDouble();
+      width = width.clamp(24.0, available);
+    }
+    if (h != null && h.unit == SizeUnit.pixel) {
+      height = h.value.toDouble();
+    }
+    return (width, height);
   }
 }
 
