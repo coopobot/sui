@@ -446,6 +446,56 @@ class NoteRepository {
     ));
   }
 
+  /// 同步下行：应用远端笔记的正文与标题，并以服务端版本为权威写回版本号。
+  ///
+  /// pull 的「本地已有」分支原先只落归档/笔记本/标签/附件，从不写正文，
+  /// 导致对端编辑后本端正文永不更新（带附件时尤为明显：附件映射已更新、
+  /// 正文却停留在旧版本）。这里按服务端版本写回，并**幂等**补一条同版本
+  /// 修订，保证本地历史链与版本号一致（AC-29）。
+  ///
+  /// 与 [updateNoteContent] 区别：后者面向本地编辑，版本自增并触发推送；
+  /// 本方法用于同步下行，版本取服务端值，不触发推送。
+  Future<void> applyRemoteNoteContent(
+    String id, {
+    required String title,
+    required String contentMarkdown,
+    required int version,
+    required DateTime updatedAt,
+    String? sourceDevice,
+  }) async {
+    final note = await getNote(id);
+    if (note == null) return;
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        title: Value(title),
+        contentMarkdown: Value(contentMarkdown),
+        version: Value(version),
+        updatedAt: Value(updatedAt),
+        sourceDevice: (sourceDevice != null && sourceDevice.isNotEmpty)
+            ? Value(sourceDevice)
+            : const Value.absent(),
+      ));
+      final exists = await (db.select(db.revisions)
+            ..where((r) => r.noteId.equals(id) & r.version.equals(version)))
+          .getSingleOrNull();
+      if (exists == null) {
+        await db.into(db.revisions).insert(RevisionsCompanion.insert(
+              id: newId(),
+              noteId: id,
+              version: version,
+              title: Value(title),
+              contentMarkdown: contentMarkdown,
+              sourceDevice: Value(sourceDevice ?? note.sourceDevice),
+              createdAt: updatedAt,
+            ));
+        await (db.update(db.notes)..where((n) => n.id.equals(id)))
+            .write(
+                NotesCompanion(revisionCount: Value(note.revisionCount + 1)));
+      }
+    });
+  }
+
   Future<void> pinNote(String id, bool pinned) async {
     await (db.update(db.notes)..where((n) => n.id.equals(id)))
         .write(NotesCompanion(

@@ -326,6 +326,19 @@ class SyncClient {
       // 会被远端旧状态覆盖，导致「归档后归档栏看不到」（BUG4）。
       final remoteArchived = (n['archived'] as bool?) ?? false;
       final hasPendingDraft = _outbox.any((e) => e.noteId == id);
+      // BUG 修复：本地已有笔记同样要落正文/标题/版本（原先只落归档/笔记本/
+      // 标签/附件，导致对端编辑正文后本端正文永不更新）。有未提交草稿时以
+      // 本地为准，避免覆盖尚未上行的编辑。
+      if (!hasPendingDraft && !isDeleted) {
+        await repository.applyRemoteNoteContent(
+          id,
+          title: n['title'] as String? ?? '',
+          contentMarkdown: n['content'] as String? ?? '',
+          version: ver,
+          updatedAt: updatedAt,
+          sourceDevice: n['sourceDevice'] as String?,
+        );
+      }
       if (!hasPendingDraft && remoteArchived != local.archived) {
         await repository.applyRemoteArchived(
           id,

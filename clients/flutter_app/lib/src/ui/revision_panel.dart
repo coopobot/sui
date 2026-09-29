@@ -41,17 +41,17 @@ class _RevisionPanelState extends State<RevisionPanel> {
     final controller = context.read<AppController>();
     try {
       final revs = await controller.listRevisions(widget.noteId);
+      if (!mounted) return;
       setState(() {
         _revisions = revs;
         _loading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() => _loading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('加载历史失败：$e')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('加载历史失败：$e')),
+      );
     }
   }
 
@@ -219,8 +219,8 @@ class _RevisionPanelState extends State<RevisionPanel> {
                 icon: const Icon(Icons.arrow_back, size: 18),
                 onPressed: () => setState(() => _selectedVersion = null),
                 tooltip: '返回列表',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
+                padding: const EdgeInsets.all(8),
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -247,24 +247,23 @@ class _RevisionPanelState extends State<RevisionPanel> {
             ],
           ),
         ),
-        // 内容预览
+        // 内容预览：MarkdownPreview 内部是 ListView（自带滚动），必须处于有界
+        // 高度；若再套 SingleChildScrollView 会得到无界高度而触发
+        // "Vertical viewport was given unbounded height"，进入版本详情后视图卡死。
         Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (rev.title.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Text(
-                      rev.title,
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (rev.title.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                  child: Text(
+                    rev.title,
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
-                MarkdownPreview(text: rev.contentMarkdown),
-              ],
-            ),
+                ),
+              Expanded(child: MarkdownPreview(text: rev.contentMarkdown)),
+            ],
           ),
         ),
       ],

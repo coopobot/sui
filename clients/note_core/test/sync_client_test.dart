@@ -145,6 +145,61 @@ void main() {
       syncer.close();
     });
 
+    // 回归 BUG：「本地已有」笔记下行时正文/标题/版本未落库。
+    // 现象：对端编辑了本机已有的笔记（尤其带附件），本机 pull 后附件映射会更新，
+    // 正文却停留在旧版本。修复后 pull 的「本地已有」分支同样应用服务端正文与版本。
+    test('BUG 修复：pull 更新已存在笔记的正文/标题/版本（无待推草稿）', () async {
+      final local = await repo.createNote(title: '旧标题', contentMarkdown: '旧正文');
+      final syncer = newClient((req) async => jsonResponse(200, {
+            'ok': true,
+            'notes': [
+              {
+                'id': local.id,
+                'title': '新标题',
+                'content': '对端编辑后的新正文',
+                'version': 2,
+                'isDeleted': false,
+                'updatedAt': '2026-09-24T12:00:00Z',
+              }
+            ]
+          }));
+
+      await syncer.pull();
+      final updated = await repo.getNote(local.id);
+      expect(updated!.title, '新标题');
+      expect(updated.contentMarkdown, '对端编辑后的新正文');
+      expect(updated.version, 2);
+      // 版本号与历史链一致：幂等补一条同版本修订，不重复。
+      final revs = await repo.listRevisions(local.id);
+      expect(revs.where((r) => r.version == 2), hasLength(1));
+      syncer.close();
+    });
+
+    // 回归 BUG：本地有未上行的草稿时，pull 不得用远端内容覆盖本地。
+    test('BUG 修复：存在待推草稿时 pull 不覆盖本地正文', () async {
+      final local =
+          await repo.createNote(title: '本地标题', contentMarkdown: '本地未上传草稿');
+      final syncer = newClient((req) async => jsonResponse(200, {
+            'ok': true,
+            'notes': [
+              {
+                'id': local.id,
+                'title': '远端标题',
+                'content': '远端正文',
+                'version': 2,
+                'isDeleted': false,
+                'updatedAt': '2026-09-24T12:00:00Z',
+              }
+            ]
+          }));
+
+      await syncer.enqueue(local);
+      await syncer.pull();
+      final kept = await repo.getNote(local.id);
+      expect(kept!.contentMarkdown, '本地未上传草稿');
+      syncer.close();
+    });
+
     test('未授权返回 401 抛异常', () async {
       final syncer = newClient((req) async => Response('unauthorized', 401));
       expect(syncer.pull(), throwsA(isA<HttpException>()));

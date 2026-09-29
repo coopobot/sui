@@ -876,6 +876,9 @@ class AppController extends ChangeNotifier {
     await _repository.restoreRevision(noteId, version);
     await refreshNotes();
     notifyListeners();
+    // 恢复同样是一次本地内容变更：入队并调度推送，否则其他端看不到恢复结果。
+    final note = await _repository.getNote(noteId);
+    if (note != null) await _enqueueAndSchedule(note);
   }
 
   // ---- 附件（方案 B：按需拉取 + LRU 缓存） ----
