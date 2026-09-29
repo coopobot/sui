@@ -38,6 +38,66 @@ enum AttachmentAvailability {
   remoteOnly,
 }
 
+/// 笔记列表排序方式（M2-T08）。
+///
+/// 选择记忆为本机偏好：写入 [SettingsStore] 的 `notes.sortMode` 键，重启后保留。
+/// 默认按更新时间倒序，置顶笔记始终排在最前（BR-05.2 / FR-05）。
+enum NoteSortMode {
+  /// 更新时间倒序（默认）。
+  updatedAt,
+
+  /// 创建时间倒序。
+  createdAt,
+
+  /// 标题升序（忽略大小写）。
+  title,
+}
+
+extension NoteSortModeName on NoteSortMode {
+  String get persistentName => switch (this) {
+        NoteSortMode.updatedAt => 'updatedAt',
+        NoteSortMode.createdAt => 'createdAt',
+        NoteSortMode.title => 'title',
+      };
+}
+
+/// 反向解析持久化字符串；非法或为空时回落到默认 [NoteSortMode.updatedAt]。
+NoteSortMode noteSortModeFromName(String? name) {
+  switch (name) {
+    case 'createdAt':
+      return NoteSortMode.createdAt;
+    case 'title':
+      return NoteSortMode.title;
+    default:
+      return NoteSortMode.updatedAt;
+  }
+}
+
+/// 标签总览的排序方式（FR-22）。
+enum TagSortMode {
+  /// 按关联笔记数量降序（默认）。
+  countDesc,
+
+  /// 按标签名称升序（忽略大小写）。
+  nameAsc,
+}
+
+extension TagSortModeName on TagSortMode {
+  String get persistentName => switch (this) {
+        TagSortMode.countDesc => 'countDesc',
+        TagSortMode.nameAsc => 'nameAsc',
+      };
+}
+
+TagSortMode tagSortModeFromName(String? name) {
+  switch (name) {
+    case 'nameAsc':
+      return TagSortMode.nameAsc;
+    default:
+      return TagSortMode.countDesc;
+  }
+}
+
 /// 应用状态中枢：持有仓储与同步客户端，向 UI 暴露笔记本树/笔记列表/同步状态。
 ///
 /// 离线优先：所有编辑先落本地 SQLite，再入 Outbox 异步推送；同步失败不影响
@@ -104,13 +164,36 @@ class AppController extends ChangeNotifier {
   /// 「用户恰好又编辑了一次」时才成立。空闲时 push 无内容、pull 无增量，开销极小。
   static const _syncInterval = Duration(seconds: 30);
 
+  /// 本机偏好键：笔记列表排序方式（M2-T08）。值见 [NoteSortMode.persistentName]。
+  static const _kNoteSortMode = 'notes.sortMode';
+
+  /// 本机偏好键：标签总览排序方式（M2-T10）。值见 [TagSortMode.persistentName]。
+  static const _kTagSortMode = 'tags.sortMode';
+
   List<Notebook> _notebooks = [];
   List<NoteSummary> _notes = [];
   List<Tag> _tags = [];
 
+  /// 当前排序方式。默认更新时间倒序（置顶优先）。
+  NoteSortMode _sortMode = NoteSortMode.updatedAt;
+
+  /// 标签总览：标签 + 关联笔记数（FR-22 / BR-22.1）。
+  List<TagSummary> _tagSummaries = [];
+
+  /// 标签排序方式（FR-22）：默认按数量降序。
+  TagSortMode _tagSortMode = TagSortMode.countDesc;
+
+  /// 当前选中用于筛选笔记的标签（BR-22.2：多标签取交集）。
+  final List<String> _selectedTagNames = [];
+
   List<Notebook> get notebooks => _notebooks;
   List<NoteSummary> get notes => _notes;
   List<Tag> get tags => _tags;
+  NoteSortMode get sortMode => _sortMode;
+  List<TagSummary> get tagSummaries => _tagSummaries;
+  TagSortMode get tagSortMode => _tagSortMode;
+  List<String> get selectedTagNames => List.unmodifiable(_selectedTagNames);
+  bool get hasTagFilter => _selectedTagNames.isNotEmpty;
 
   String? _selectedNotebookId;
   String? _selectedNoteId;
@@ -131,6 +214,8 @@ class AppController extends ChangeNotifier {
   Future<void> bootstrap() async {
     _config = await _settings.loadSyncConfig();
     _cacheLimitBytes = await _settings.cacheLimitBytes();
+    _sortMode = noteSortModeFromName(await _settings.get(_kNoteSortMode));
+    _tagSortMode = tagSortModeFromName(await _settings.get(_kTagSortMode));
     _blobStore = CachedBlobStore(
       local: LocalBlobStore(_blobRoot()),
       meta: SqliteBlobCacheMeta(_db),
@@ -138,6 +223,7 @@ class AppController extends ChangeNotifier {
     );
     await refreshNotebooks();
     await refreshTags();
+    await refreshTagSummaries();
     await refreshNotes();
     if (_config.isConfigured) {
       await connect(_config, persist: false);
@@ -154,17 +240,113 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 加载标签总览数据（标签 + 关联笔记数），并按当前 [tagSortMode] 排序。
+  Future<void> refreshTagSummaries() async {
+    final summaries = await _repository.listTagSummaries();
+    switch (_tagSortMode) {
+      case TagSortMode.countDesc:
+        summaries.sort((a, b) => b.noteCount.compareTo(a.noteCount));
+        break;
+      case TagSortMode.nameAsc:
+        summaries.sort((a, b) =>
+            a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        break;
+    }
+    _tagSummaries = summaries;
+    notifyListeners();
+  }
+
+  /// 切换标签筛选状态（BR-22.2：多选取交集，再点已选标签即取消）。
+  void toggleTag(String name) {
+    if (_selectedTagNames.contains(name)) {
+      _selectedTagNames.remove(name);
+    } else {
+      _selectedTagNames.add(name);
+    }
+    refreshNotes();
+  }
+
+  /// 清空全部标签筛选。
+  void clearTags() {
+    if (_selectedTagNames.isEmpty) return;
+    _selectedTagNames.clear();
+    refreshNotes();
+  }
+
+  /// 切换标签排序方式（记忆为本机偏好，M2-T10）。
+  Future<void> setTagSortMode(TagSortMode mode) async {
+    if (mode == _tagSortMode) return;
+    _tagSortMode = mode;
+    await _settings.set(_kTagSortMode, mode.persistentName);
+    // 立即重排已加载的列表，避免再查一次库。
+    switch (mode) {
+      case TagSortMode.countDesc:
+        _tagSummaries.sort((a, b) => b.noteCount.compareTo(a.noteCount));
+        break;
+      case TagSortMode.nameAsc:
+        _tagSummaries.sort((a, b) =>
+            a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        break;
+    }
+    notifyListeners();
+  }
+
   Future<void> refreshNotes() async {
-    _notes = await _repository.listNotes(
-      notebookId: _inboxMode ? null : _selectedNotebookId,
-      search: _query.isEmpty ? null : _query,
-      includeArchived: _includeArchived,
-    );
+    // 收件箱模式下不应用标签筛选（收件箱只看剪藏，标签筛选与之冲突）。
+    final useTagFilter = !_inboxMode && _selectedTagNames.isNotEmpty;
+    if (useTagFilter) {
+      _notes = await _repository.listNotesByTags(
+        _selectedTagNames,
+        notebookId: _selectedNotebookId,
+        search: _query.isEmpty ? null : _query,
+        includeArchived: _includeArchived,
+      );
+    } else {
+      _notes = await _repository.listNotes(
+        notebookId: _inboxMode ? null : _selectedNotebookId,
+        search: _query.isEmpty ? null : _query,
+        includeArchived: _includeArchived,
+      );
+    }
     // 收件箱模式：只显示来自剪藏的笔记
     if (_inboxMode) {
       _notes =
           _notes.where((n) => n.note.sourceDevice.startsWith('clip:')).toList();
     }
+    _applySort();
+    notifyListeners();
+  }
+
+  /// 按当前 [sortMode] 对 `_notes` 原地排序：置顶始终排前，其余按模式。
+  ///
+  /// 仓储默认按 `updatedAt desc` 取数，但切到创建时间 / 标题后需要在内存里重排，
+  /// 避免在仓储加分支条件——排序是 UI 偏好，不应侵入查询语义。
+  void _applySort() {
+    _notes = [..._notes]
+      ..sort((a, b) {
+        // BR-05.2 / FR-05：置顶最前，与排序模式无关。
+        if (a.note.pinned != b.note.pinned) {
+          return a.note.pinned ? -1 : 1;
+        }
+        switch (_sortMode) {
+          case NoteSortMode.updatedAt:
+            return b.note.updatedAt.compareTo(a.note.updatedAt);
+          case NoteSortMode.createdAt:
+            return b.note.createdAt.compareTo(a.note.createdAt);
+          case NoteSortMode.title:
+            return a.note.title
+                .toLowerCase()
+                .compareTo(b.note.title.toLowerCase());
+        }
+      });
+  }
+
+  /// 切换排序方式：写回 [SettingsStore] 持久化（本机偏好），并在内存里重排当前列表。
+  Future<void> setSortMode(NoteSortMode mode) async {
+    if (mode == _sortMode) return;
+    _sortMode = mode;
+    await _settings.set(_kNoteSortMode, mode.persistentName);
+    _applySort();
     notifyListeners();
   }
 
@@ -179,6 +361,8 @@ class AppController extends ChangeNotifier {
     _inboxMode = true;
     _selectedNotebookId = null;
     _selectedNoteId = null;
+    // 收件箱只看剪藏，与标签筛选语义冲突，清空选中标签。
+    _selectedTagNames.clear();
     refreshNotes();
   }
 
@@ -222,6 +406,7 @@ class AppController extends ChangeNotifier {
       tags: tags,
     );
     await refreshNotes();
+    await refreshTagSummaries();
     await _enqueueAndSchedule(note);
   }
 
@@ -229,9 +414,125 @@ class AppController extends ChangeNotifier {
     await _repository.markNoteDeleted(id);
     if (_selectedNoteId == id) _selectedNoteId = null;
     await refreshNotes();
+    await refreshTagSummaries();
     notifyListeners();
     final note = await _repository.getNote(id);
     if (note != null) await _enqueueAndSchedule(note);
+  }
+
+  /// 切换置顶（FR-05 / BR-05.2）。置顶恒优先于排序字段。
+  Future<void> togglePinNote(String id) async {
+    final note = _notes.where((s) => s.note.id == id).firstOrNull?.note;
+    if (note == null) return;
+    await _repository.pinNote(id, !note.pinned);
+    await refreshNotes();
+    final updated = await _repository.getNote(id);
+    if (updated != null) await _enqueueAndSchedule(updated);
+  }
+
+  /// 切换归档（FR-05）。归档后的笔记不出现在默认列表，但可在归档视图查看。
+  Future<void> toggleArchiveNote(String id) async {
+    final note = _notes.where((s) => s.note.id == id).firstOrNull?.note;
+    if (note == null) return;
+    await _repository.archiveNote(id, !note.archived);
+    if (_selectedNoteId == id && note.archived == false) {
+      // 当前选中的笔记被归档后不再可见，清空选中以避免编辑区悬空。
+      _selectedNoteId = null;
+    }
+    await refreshNotes();
+    final updated = await _repository.getNote(id);
+    if (updated != null) await _enqueueAndSchedule(updated);
+  }
+
+  /// 把笔记移动到目标笔记本（BR-20.1）。`null` 表示移出到「全部笔记 / 收件箱」。
+  Future<void> moveNoteToNotebook(String id, String? notebookId) async {
+    final note = await _repository.moveNoteToNotebook(id, notebookId);
+    await refreshNotes();
+    await _enqueueAndSchedule(note);
+  }
+
+  /// 删除笔记本：软删除 + 级联处置（BR-20.3 / BR-20.4）。
+  ///
+  /// - 笔记不随之删除：把该笔记本下未删除笔记的 notebookId 置 null（移出到
+  ///   「全部笔记」），避免误删内容。
+  /// - 子笔记本上提到被删节点的父级：保留层级但避免悬挂引用。
+  /// - 软删除的笔记本作为墓碑参与同步（BR-19.5），子笔记本与笔记因 reparent /
+  ///   moveNoteToNotebook 各自 bump version，也独立入队同步。
+  Future<void> deleteNotebook(String id) async {
+    final target = _notebooks.where((n) => n.id == id).firstOrNull;
+    if (target == null) return;
+    final newParentId = target.parentId;
+
+    // 1) 子笔记本上提到被删节点的父级。
+    final children = _notebooks.where((n) => n.parentId == id).toList();
+    for (final child in children) {
+      final reparented = await _repository.reparentNotebook(child.id, newParentId);
+      _enqueueNotebook(reparented);
+    }
+
+    // 2) 该笔记本下的笔记移出到「全部笔记」。
+    final occupants = await _repository.listNotes(
+        notebookId: id, includeArchived: true);
+    for (final s in occupants) {
+      if (s.note.isDeleted) continue;
+      final moved = await _repository.moveNoteToNotebook(s.note.id, null);
+      await _enqueueAndSchedule(moved);
+    }
+
+    // 3) 软删除笔记本本体。
+    await _repository.removeNotebook(id);
+    final tombstoned = await _repository.getNotebook(id);
+    if (tombstoned != null) _enqueueNotebook(tombstoned);
+
+    if (_selectedNotebookId == id) {
+      _selectedNotebookId = null;
+      _inboxMode = false;
+    }
+    await refreshNotebooks();
+    await refreshNotes();
+  }
+
+  /// 在同级内上移笔记本（与上一个兄弟交换 sortOrder）。
+  Future<void> moveNotebookUp(String id) async {
+    final siblings = _notebooks.where((n) => n.parentId == _parentOf(id)).toList()
+      ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    final idx = siblings.indexWhere((n) => n.id == id);
+    if (idx <= 0) return;
+    final prev = siblings[idx - 1];
+    final cur = siblings[idx];
+    final a = await _repository.reorderNotebook(cur.id, prev.sortOrder);
+    final b = await _repository.reorderNotebook(prev.id, cur.sortOrder);
+    _enqueueNotebook(a);
+    _enqueueNotebook(b);
+    await refreshNotebooks();
+  }
+
+  /// 在同级内下移笔记本（与下一个兄弟交换 sortOrder）。
+  Future<void> moveNotebookDown(String id) async {
+    final siblings = _notebooks.where((n) => n.parentId == _parentOf(id)).toList()
+      ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    final idx = siblings.indexWhere((n) => n.id == id);
+    if (idx < 0 || idx >= siblings.length - 1) return;
+    final next = siblings[idx + 1];
+    final cur = siblings[idx];
+    final a = await _repository.reorderNotebook(cur.id, next.sortOrder);
+    final b = await _repository.reorderNotebook(next.id, cur.sortOrder);
+    _enqueueNotebook(a);
+    _enqueueNotebook(b);
+    await refreshNotebooks();
+  }
+
+  /// 取笔记本的 parentId（找不到时返回 null，视为根级）。
+  String? _parentOf(String id) =>
+      _notebooks.where((n) => n.id == id).firstOrNull?.parentId;
+
+  /// 笔记本变更入同步队列（仅当已连服务端时有效）。
+  void _enqueueNotebook(Notebook notebook) {
+    final client = _syncClient;
+    if (client == null) return;
+    client.enqueueNotebook(notebook);
+    _syncDebounce?.cancel();
+    _syncDebounce = Timer(const Duration(milliseconds: 700), syncNow);
   }
 
   // ---- 同步 ----

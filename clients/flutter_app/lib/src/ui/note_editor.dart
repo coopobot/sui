@@ -6,9 +6,10 @@ import 'package:provider/provider.dart';
 
 import '../platform/attachment_picker.dart';
 import 'app_controller.dart';
+import 'markdown_editing_controller.dart';
 import 'markdown_editor.dart';
 
-/// 笔记编辑页：标题 + Markdown 编辑器（源码/预览双轨） + 标签。
+/// 笔记编辑页：标题 + 格式工具栏 + Markdown 编辑器（格式 / 源码 / 预览三态） + 标签。
 /// 编辑变更实时保存到仓储并追加一条修订。
 class NoteEditor extends StatefulWidget {
   const NoteEditor({super.key});
@@ -19,11 +20,20 @@ class NoteEditor extends StatefulWidget {
 
 class _NoteEditorState extends State<NoteEditor> {
   final TextEditingController _title = TextEditingController();
-  final TextEditingController _content = TextEditingController();
+  final MarkdownEditingController _content = MarkdownEditingController();
   final TextEditingController _tagInput = TextEditingController();
+
+  /// 共享撤销 / 重做控制器：正文输入与工具栏指令的写入落在同一个撤销栈上。
+  final UndoHistoryController _undoHistory = UndoHistoryController();
+
+  /// 正文焦点节点：工具栏执行指令后据此把焦点交还正文，便于连贯排版。
+  final FocusNode _contentFocus = FocusNode();
+
   List<String> _tags = [];
   List<Attachment> _attachments = [];
-  bool _preview = false;
+
+  /// 三态编辑模式：格式（默认）/ 源码 / 预览。正本始终是 Markdown。
+  EditorMode _mode = EditorMode.formatted;
   bool _loaded = false;
   String? _loadedNoteId;
 
@@ -36,6 +46,8 @@ class _NoteEditorState extends State<NoteEditor> {
     _title.dispose();
     _content.dispose();
     _tagInput.dispose();
+    _undoHistory.dispose();
+    _contentFocus.dispose();
     super.dispose();
   }
 
@@ -99,6 +111,152 @@ class _NoteEditorState extends State<NoteEditor> {
     }
   }
 
+  /// 格式工具栏：一行可横向滚动的排版指令。每条指令都只在正本 Markdown 上做
+  /// 纯文本改写（`EditorFormat`），不回写中间态，保证「格式 / 源码」所见一致。
+  Widget _buildFormatToolbar() {
+    return SizedBox(
+      height: 44,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          children: [
+            _fmtIcon(Icons.format_bold, '加粗', FormatCommand.bold),
+            _fmtIcon(Icons.format_italic, '斜体', FormatCommand.italic),
+            _fmtIcon(
+              Icons.format_strikethrough,
+              '删除线',
+              FormatCommand.strikethrough,
+            ),
+            const _ToolbarDivider(),
+            _fmtIcon(Icons.looks_one_outlined, '标题 1', FormatCommand.heading1),
+            _fmtIcon(Icons.looks_two_outlined, '标题 2', FormatCommand.heading2),
+            _fmtIcon(Icons.looks_3_outlined, '标题 3', FormatCommand.heading3),
+            const _ToolbarDivider(),
+            _fmtIcon(
+              Icons.format_list_bulleted,
+              '无序列表',
+              FormatCommand.bulletList,
+            ),
+            _fmtIcon(
+              Icons.format_list_numbered,
+              '有序列表',
+              FormatCommand.orderedList,
+            ),
+            _fmtIcon(Icons.format_quote, '引用', FormatCommand.blockquote),
+            _fmtIcon(Icons.data_object, '代码块', FormatCommand.codeBlock),
+            const _ToolbarDivider(),
+            _fmtIcon(Icons.link, '链接', FormatCommand.link),
+            IconButton(
+              tooltip: '插入图片',
+              icon: const Icon(Icons.image_outlined),
+              onPressed: _pickAndAttach,
+            ),
+            _fmtIcon(Icons.horizontal_rule, '分割线', FormatCommand.divider),
+            const _ToolbarDivider(),
+            // 撤销 / 重做：与正文输入共用同一个撤销栈，故按钮可用性随其变化重绘。
+            ListenableBuilder(
+              listenable: _undoHistory,
+              builder: (context, _) => Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: '撤销',
+                    icon: const Icon(Icons.undo),
+                    onPressed: _undoHistory.value.canUndo
+                        ? () => _undoHistory.undo()
+                        : null,
+                  ),
+                  IconButton(
+                    tooltip: '重做',
+                    icon: const Icon(Icons.redo),
+                    onPressed: _undoHistory.value.canRedo
+                        ? () => _undoHistory.redo()
+                        : null,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _fmtIcon(IconData icon, String tooltip, FormatCommand command) {
+    return IconButton(
+      tooltip: tooltip,
+      icon: Icon(icon),
+      onPressed: () => _applyCommand(command),
+    );
+  }
+
+  /// 对当前选区执行排版指令，并把结果即时回写正本。
+  void _applyCommand(FormatCommand command) {
+    final value = _content.value;
+    // 光标失焦时 selection 为 -1；此时以文末作为落点，避免指令无处施加。
+    final sel = value.selection;
+    final start = sel.isValid ? sel.start : value.text.length;
+    final end = sel.isValid ? sel.end : value.text.length;
+    _writeBack(EditorFormat.apply(command, value.text, start, end));
+  }
+
+  /// 把指令产物写回正文控制器并恢复选区，随后即时保存。
+  ///
+  /// 通过 `controller.value` 整体赋值（而非只改 `text`），既能让 EditableText 的
+  /// 原生撤销栈记录这次程序化写入，也能把选区落到 `FormatResult` 指定的位置。
+  void _writeBack(FormatResult result) {
+    final text = result.text;
+    final start = result.selectionStart.clamp(0, text.length);
+    final end = result.selectionEnd.clamp(0, text.length);
+    _content.value = TextEditingValue(
+      text: text,
+      selection: TextSelection(baseOffset: start, extentOffset: end),
+    );
+    // 点工具栏会让正文失焦；交还焦点，排版后可立即继续输入。
+    if (_mode != EditorMode.preview) _contentFocus.requestFocus();
+    _save();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 图片尺寸调整（ADR-007 / M2-T07）
+  // ---------------------------------------------------------------------------
+
+  /// 光标落在某个图片引用（含属性块）范围内时返回该图片，否则 null。
+  ///
+  /// 只在折叠选区（纯光标）时检测；选中文本时不弹尺寸条，避免与选区操作冲突。
+  ParsedImage? get _imageAtCursor {
+    final sel = _content.value.selection;
+    if (!sel.isValid || !sel.isCollapsed) return null;
+    final pos = sel.start;
+    final text = _content.text;
+    var from = 0;
+    while (true) {
+      final img = EditorFormat.findImage(text, from);
+      if (img == null) return null;
+      final spanEnd = img.attributeEnd > 0 ? img.attributeEnd : img.end;
+      if (pos >= img.start && pos <= spanEnd) return img;
+      from = spanEnd;
+    }
+  }
+
+  /// 对指定图片应用尺寸，只重写其属性块，其余字符不动（BR-24.1）。
+  ///
+  /// 写回后把光标置于图片引用末尾（`image.end`），确保仍在图片范围内，
+  /// 便于连续切换预设或拖拽滑块。
+  void _applyImageSize(ParsedImage image, ImageSize? size) {
+    final newText = EditorFormat.setImageSize(_content.text, image, size);
+    // image.end 始终在 setImageSize 产出的新文本中有效（该方法只改写属性块，
+    // 图片引用部分位置不变）。
+    final pos = image.end.clamp(0, newText.length);
+    _content.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: pos),
+    );
+    _contentFocus.requestFocus();
+    _save();
+  }
+
   @override
   Widget build(BuildContext context) {
     final id = context.watch<AppController>().selectedNoteId;
@@ -116,6 +274,9 @@ class _NoteEditorState extends State<NoteEditor> {
     if (id == null) {
       return const _EmptyEditor();
     }
+
+    // 检测光标是否落在图片引用内（用于条件显示图片尺寸条）。
+    final imageAtCursor = _imageAtCursor;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -171,15 +332,28 @@ class _NoteEditorState extends State<NoteEditor> {
           padding: const EdgeInsets.all(8),
           child: Row(
             children: [
-              SegmentedButton<bool>(
+              SegmentedButton<EditorMode>(
                 segments: const [
-                  ButtonSegment(value: false, label: Text('编辑')),
-                  ButtonSegment(value: true, label: Text('预览')),
+                  ButtonSegment(
+                    value: EditorMode.formatted,
+                    label: Text('格式'),
+                    icon: Icon(Icons.text_fields),
+                  ),
+                  ButtonSegment(
+                    value: EditorMode.source,
+                    label: Text('源码'),
+                    icon: Icon(Icons.code),
+                  ),
+                  ButtonSegment(
+                    value: EditorMode.preview,
+                    label: Text('预览'),
+                    icon: Icon(Icons.visibility_outlined),
+                  ),
                 ],
-                selected: {_preview},
+                selected: {_mode},
                 onSelectionChanged: (sel) {
-                  setState(() => _preview = sel.first);
-                  _save();
+                  // 三态只切换「怎么画 / 能不能改」，正本不变，故无需保存。
+                  setState(() => _mode = sel.first);
                 },
                 showSelectedIcon: false,
               ),
@@ -211,12 +385,30 @@ class _NoteEditorState extends State<NoteEditor> {
             ],
           ),
         ),
+        // 格式工具栏只在可编辑的两态（格式 / 源码）下出现；预览态是只读渲染，
+        // 不给排版入口，避免「点了没反应」的困惑。
+        if (_mode != EditorMode.preview) ...[
+          const Divider(height: 1),
+          _buildFormatToolbar(),
+          // 图片尺寸条：光标落在图片引用内时弹出，用预设或滑块调整尺寸，
+          // 尺寸以 `{width=...}` 写回正本（ADR-007）。
+          if (imageAtCursor != null) ...[
+            const Divider(height: 1),
+            _ImageSizeBar(
+              image: imageAtCursor,
+              onApply: (size) => _applyImageSize(imageAtCursor, size),
+            ),
+          ],
+        ],
+        const Divider(height: 1),
         Expanded(
           child: MarkdownEditor(
             controller: _content,
-            preview: _preview,
+            mode: _mode,
             onChanged: () => _save(),
             imageBuilder: _buildImage,
+            undoController: _undoHistory,
+            focusNode: _contentFocus,
           ),
         ),
         if (_attachments.isNotEmpty) _buildAttachmentBar(context),
@@ -249,9 +441,16 @@ class _NoteEditorState extends State<NoteEditor> {
   ///
   /// 引用写进正文是刻意的：canonical 正本只有 Markdown，附件与正文必须一起
   /// 同步，否则换台设备拉到笔记却不知道它带附件。
+  ///
+  /// 图片在光标处插入（`EditorFormat.insertImage`），而非总是追加到文末——
+  /// 这样用户在正文中间也能就地插图。
   Future<void> _pickAndAttach() async {
     final id = _controller.selectedNoteId;
     if (id == null) return;
+
+    // 在打开文件选择器之前记下光标位置；选择器是异步的，回来时光标可能已移动。
+    final sel = _content.value.selection;
+    var insertAt = sel.isValid ? sel.start : _content.text.length;
 
     List<PickedAttachment> picked;
     try {
@@ -262,7 +461,8 @@ class _NoteEditorState extends State<NoteEditor> {
     }
     if (picked.isEmpty) return;
 
-    final refs = <String>[];
+    var text = _content.text;
+    var count = 0;
     for (final f in picked) {
       try {
         final att = await _controller.addAttachmentFromBytes(
@@ -270,24 +470,31 @@ class _NoteEditorState extends State<NoteEditor> {
           filename: f.filename,
           bytes: f.bytes,
         );
-        refs.add('![${att.filename}](sui://${att.sha256})');
+        final result = EditorFormat.insertImage(
+          text,
+          insertAt,
+          insertAt,
+          filename: att.filename,
+          sha256: att.sha256,
+        );
+        text = result.text;
+        insertAt = result.selectionStart;
+        count++;
       } catch (e) {
         _toast('附件「${f.filename}」添加失败：$e');
       }
     }
-    if (refs.isEmpty) return;
+    if (count == 0) return;
 
     setState(() {
       _attachments = _controller.attachments;
-      final buf = StringBuffer(_content.text);
-      if (buf.isNotEmpty && !buf.toString().endsWith('\n')) buf.write('\n');
-      for (final r in refs) {
-        buf.write('\n$r\n');
-      }
-      _content.text = buf.toString();
+      _content.value = TextEditingValue(
+        text: text,
+        selection: TextSelection.collapsed(offset: insertAt),
+      );
     });
     await _save();
-    _toast('已添加 ${refs.length} 个附件');
+    _toast('已添加 $count 个附件');
   }
 
   Future<void> _removeAttachment(Attachment a) async {
@@ -428,6 +635,120 @@ class _NoteEditorState extends State<NoteEditor> {
           ),
         ) ??
         false;
+  }
+}
+
+/// 格式工具栏里的分隔竖线。
+class _ToolbarDivider extends StatelessWidget {
+  const _ToolbarDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Container(
+        width: 1,
+        height: 20,
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        color: Theme.of(context).dividerColor,
+      ),
+    );
+  }
+}
+
+/// 图片尺寸调整条：原始 / 小 / 中 / 大 四档预设 + 像素宽度滑块。
+///
+/// 预设对应百分比写回（`{width=25%}` 等）；滑块产出像素宽度（`{width=400}`），
+/// 即规格 §5.1 中「拖拽手柄产出像素宽度」的等价交互。尺寸只重写图片属性块，
+/// 不触碰正文其它字符（BR-24.1）。
+class _ImageSizeBar extends StatefulWidget {
+  const _ImageSizeBar({required this.image, required this.onApply});
+
+  final ParsedImage image;
+  final void Function(ImageSize? size) onApply;
+
+  @override
+  State<_ImageSizeBar> createState() => _ImageSizeBarState();
+}
+
+class _ImageSizeBarState extends State<_ImageSizeBar> {
+  late double _sliderPx;
+
+  @override
+  void initState() {
+    super.initState();
+    _sliderPx = _currentPx();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ImageSizeBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 图片切换、或预设改了尺寸后，滑块要同步到当前值。
+    if (oldWidget.image.size != widget.image.size) {
+      _sliderPx = _currentPx();
+    }
+  }
+
+  double _currentPx() {
+    final w = widget.image.size.width;
+    if (w != null && w.unit == SizeUnit.pixel) return w.value.toDouble();
+    return 400;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final current = widget.image.size;
+    final scheme = Theme.of(context).colorScheme;
+    return SizedBox(
+      height: 44,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          children: [
+            Text('图片尺寸',
+                style: Theme.of(context).textTheme.labelSmall),
+            const SizedBox(width: 4),
+            _preset('原始', ImageSize.auto, current, scheme),
+            _preset('小', EditorFormat.presetSmall, current, scheme),
+            _preset('中', EditorFormat.presetMedium, current, scheme),
+            _preset('大', EditorFormat.presetLarge, current, scheme),
+            const _ToolbarDivider(),
+            Expanded(
+              child: Slider(
+                min: 100,
+                max: 800,
+                value: _sliderPx.clamp(100, 800),
+                divisions: 35,
+                label: '${_sliderPx.round()}px',
+                onChanged: (v) => setState(() => _sliderPx = v),
+                onChangeEnd: (v) => widget.onApply(
+                  ImageSize(
+                    width: ImageDimension(v.round(), SizeUnit.pixel),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _preset(
+    String label,
+    ImageSize size,
+    ImageSize current,
+    ColorScheme scheme,
+  ) {
+    final selected = current == size;
+    return TextButton(
+      onPressed: () => widget.onApply(size),
+      style: TextButton.styleFrom(
+        foregroundColor: selected ? scheme.primary : null,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
+      ),
+      child: Text(label),
+    );
   }
 }
 

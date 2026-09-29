@@ -14,6 +14,8 @@ export 'src/models/notebook.dart';
 export 'src/models/revision.dart';
 export 'src/models/sync_config.dart';
 export 'src/models/tag.dart';
+export 'src/models/tag_summary.dart';
+export 'src/format/editor_format.dart';
 export 'src/repository/note_repository.dart';
 export 'src/repository/settings_store.dart';
 export 'src/db/app_database.dart';

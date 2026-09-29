@@ -6,6 +6,7 @@ import '../models/note.dart';
 import '../models/notebook.dart';
 import '../models/revision.dart';
 import '../models/tag.dart';
+import '../models/tag_summary.dart';
 import '../util/ids.dart';
 
 /// 笔记仓储：对本地库（drift/SQLite）的领域操作。
@@ -86,6 +87,38 @@ class NoteRepository {
     ));
   }
 
+  /// 修改笔记本在同级中的排序权重（BR-20.2：sortOrder 随 FR-19 同步）。
+  ///
+  /// 仅写 sortOrder + version + updatedAt；UI 负责计算目标位置与兄弟交换。
+  /// 不删除 / 不重命名，故无需写 revision（笔记本无修订表）。
+  Future<Notebook> reorderNotebook(String id, int sortOrder) async {
+    final notebook = await getNotebook(id);
+    if (notebook == null) throw StateError('notebook not found: $id');
+    await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
+        .write(NotebooksCompanion(
+      sortOrder: Value(sortOrder),
+      version: Value(notebook.version + 1),
+      updatedAt: Value(DateTime.now()),
+    ));
+    return (await getNotebook(id))!;
+  }
+
+  /// 把笔记本挂到新的父节点下（级联删除时把子笔记本上提到被删节点的父级）。
+  ///
+  /// 不校验循环引用：调用方（AppController.deleteNotebook）保证目标 parentId
+  /// 是被删节点的父级，结构上不可能形成环。
+  Future<Notebook> reparentNotebook(String id, String? parentId) async {
+    final notebook = await getNotebook(id);
+    if (notebook == null) throw StateError('notebook not found: $id');
+    await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
+        .write(NotebooksCompanion(
+      parentId: Value(parentId),
+      version: Value(notebook.version + 1),
+      updatedAt: Value(DateTime.now()),
+    ));
+    return (await getNotebook(id))!;
+  }
+
   /// ---- 标签 ----
 
   Future<Tag> createTag({String? id, required String name, DateTime? now}) async {
@@ -136,6 +169,25 @@ class NoteRepository {
       version: Value(tag.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
+  }
+
+  /// 列出全部标签及其关联笔记数量（FR-22 / BR-22.1）。
+  ///
+  /// 数量只统计**未软删除**的笔记；已软删除的笔记不计入。
+  /// 无关联笔记的标签也会返回（count=0），便于在总览中展示但置灰。
+  Future<List<TagSummary>> listTagSummaries() async {
+    final tags = await listTags();
+    final out = <TagSummary>[];
+    for (final tag in tags) {
+      final rows = await (db.select(db.noteTags).join([
+        innerJoin(db.notes, db.notes.id.equalsExp(db.noteTags.noteId)),
+      ])
+            ..where(db.noteTags.tagId.equals(tag.id))
+            ..where(db.notes.isDeleted.equals(false)))
+          .get();
+      out.add(TagSummary(tag: tag, noteCount: rows.length));
+    }
+    return out;
   }
 
   /// ---- 笔记 ----
@@ -279,6 +331,78 @@ class NoteRepository {
     return summaries;
   }
 
+  /// 按多个标签筛选笔记（BR-22.2：多标签取**交集**）。
+  ///
+  /// 与 [listNotes] 共用过滤条件（笔记本 / 搜索 / 归档），额外要求每条笔记
+  /// 同时关联 `tagNames` 中的**全部**标签。空 tagNames 时退化为 [listNotes]。
+  /// 仅返回未软删除的笔记。
+  Future<List<NoteSummary>> listNotesByTags(
+    List<String> tagNames, {
+    String? notebookId,
+    String? search,
+    bool includeArchived = false,
+  }) async {
+    final names = tagNames.where((n) => n.trim().isNotEmpty).toList();
+    if (names.isEmpty) {
+      return listNotes(
+        notebookId: notebookId,
+        search: search,
+        includeArchived: includeArchived,
+      );
+    }
+    // 分别取每个标签关联的 noteId 集合，然后求交集——在 Dart 层做集合运算，
+    // 避免构造复杂的 EXISTS 子查询。交集语义满足 BR-22.2。
+    Set<String>? intersection;
+    for (final name in names) {
+      final rows = await (db.select(db.noteTags).join([
+        innerJoin(db.tags, db.tags.id.equalsExp(db.noteTags.tagId)),
+        innerJoin(db.notes, db.notes.id.equalsExp(db.noteTags.noteId)),
+      ])
+            ..where(db.tags.name.equals(name))
+            ..where(db.notes.isDeleted.equals(false)))
+          .get();
+      final ids = rows
+          .map((r) => r.read(db.noteTags.noteId))
+          .whereType<String>()
+          .toSet();
+      if (intersection == null) {
+        intersection = ids;
+      } else {
+        intersection = intersection.intersection(ids);
+      }
+      // 中途交集为空，提前退出。
+      if (intersection.isEmpty) return const [];
+    }
+    if (intersection == null || intersection.isEmpty) return const [];
+    final ids = intersection;
+
+    // 在交集内按笔记本 / 搜索 / 归档二次过滤，再排序。
+    final notes$ = db.notes;
+    final q = db.select(notes$)
+      ..where((n) => n.isDeleted.equals(false))
+      ..where((n) => n.id.isIn(ids));
+    if (notebookId != null) {
+      q.where((n) => n.notebookId.isValue(notebookId));
+    }
+    if (!includeArchived) {
+      q.where((n) => n.archived.equals(false));
+    }
+    if (search != null && search.isNotEmpty) {
+      final like = '%${search.toLowerCase()}%';
+      q.where((n) =>
+          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+    }
+    q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
+
+    final rows = await q.get();
+    final notes = rows.map((r) => r.toModel()).toList();
+    final summaries = <NoteSummary>[];
+    for (final n in notes) {
+      summaries.add(NoteSummary(note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
+    }
+    return summaries;
+  }
+
   Future<void> archiveNote(String id, bool archived) async {
     await (db.update(db.notes)..where((n) => n.id.equals(id)))
         .write(NotesCompanion(
@@ -293,6 +417,24 @@ class NoteRepository {
       pinned: Value(pinned),
       updatedAt: Value(DateTime.now()),
     ));
+  }
+
+  /// 用户发起的「移动到…」：写入新的 notebookId 并 bump version，
+  /// 让 sync 能感知到笔记变更（BR-19.7 / BR-20.1）。
+  ///
+  /// 与 [updateNoteNotebook] 区别：后者只覆盖 notebookId 不 bump version，
+  /// 用于同步下行；本方法面向用户操作，需要触发推送。
+  /// 不写 revision：归属变更不属于内容修订，避免污染版本链。
+  Future<Note> moveNoteToNotebook(String id, String? notebookId) async {
+    final note = await getNote(id);
+    if (note == null) throw StateError('note not found: $id');
+    await (db.update(db.notes)..where((n) => n.id.equals(id)))
+        .write(NotesCompanion(
+      notebookId: Value(notebookId),
+      version: Value(note.version + 1),
+      updatedAt: Value(DateTime.now()),
+    ));
+    return (await getNote(id))!;
   }
 
   /// 逻辑删除笔记（墓碑，保持跨端同步收敛），并连带墓碑化它的附件映射。
