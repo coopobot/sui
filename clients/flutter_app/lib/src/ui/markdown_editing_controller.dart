@@ -86,7 +86,7 @@ class MarkdownEditingController extends TextEditingController {
         );
       }
       spans.add(WidgetSpan(
-        alignment: PlaceholderAlignment.middle,
+        alignment: PlaceholderAlignment.top,
         child: builder(context, image),
       ));
       // 引用首字符由 WidgetSpan 的 1 个码元占位，其余用零宽透明文本补齐。

@@ -72,6 +72,67 @@ void main() {
       expect(span.children!.whereType<WidgetSpan>(), isEmpty);
       expect(span.toPlainText(), controller.text);
     });
+
+    // 回归：BUG2「格式模式图片悬浮在整篇笔记之上」。
+    // 根因是 WidgetSpan 采用中线对齐（middle），呈现单元远高于单行行高时，
+    // 其顶部会被抬到字段之上。修法为行顶对齐（top），使行高**向下**扩展。
+    // 见 editor-formatting.md §5.4「嵌入几何（垂直对齐）」。
+    testWidgets('格式模式高图不溢出到字段之上（WidgetSpan 行顶对齐）',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final controller =
+          MarkdownEditingController(text: '前 ![](sui://deadbeef) 后');
+      controller.styled = true;
+      // 呈现单元远高于单行行高，构成「高图」场景（默认尺寸随容器自适应，
+      // 竖向可远超一行）。
+      controller.formatImageBuilder = (context, image) => const SizedBox(
+            key: ValueKey<String>('format-image'),
+            width: 240,
+            height: 360,
+          );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: TextField(
+              controller: controller,
+              expands: true,
+              maxLines: null,
+              decoration: const InputDecoration(border: InputBorder.none),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final fieldRect = tester.getRect(find.byType(TextField));
+      final imageRect =
+          tester.getRect(find.byKey(const ValueKey<String>('format-image')));
+
+      // 前置条件：确实构成高图场景（高于单行行高）。
+      expect(
+        imageRect.height,
+        greaterThan(100),
+        reason: '呈现单元应远高于单行，构成高图场景',
+      );
+      // 核心断言：图片顶部不得溢出到字段之上（中线对齐会使 top 变负）。
+      expect(
+        imageRect.top,
+        greaterThanOrEqualTo(fieldRect.top),
+        reason: '格式模式图片必须落在字段内（行顶对齐），'
+            '不得因居中对齐把顶部溢出到整篇笔记之上（BUG2）',
+      );
+
+      // 偏移契约仍须成立（BR-27.1）。
+      final span = controller.buildTextSpan(
+        context: tester.element(find.byType(TextField)),
+        style: const TextStyle(),
+        withComposing: false,
+      );
+      expect(span.toPlainText().length, controller.text.length);
+    });
   });
 
   group('ImageSelectResizeHandle（选中图片调尺寸，BR-27.2）', () {
