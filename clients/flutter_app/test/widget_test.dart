@@ -123,7 +123,10 @@ void main() {
     await controller.saveNote(id, title: '标题', content: '', tags: const []);
     final after = await repo.getNote(id);
 
-    expect(after!.version, before!.version + 1);
+    // Notes.version 是服务端基线镜像，本地保存不推进（sync-protocol §3）；
+    // 变更以新增修订体现。
+    expect(after!.version, before!.version);
+    expect(after.revisionCount, before.revisionCount + 1);
     expect(after.title, '标题');
     await db.close();
   });
@@ -143,7 +146,9 @@ void main() {
     await controller.saveNote(id, title: '', content: '', tags: const []);
     final cleared = await repo.getNote(id);
     expect(cleared!.contentMarkdown, '');
-    expect(cleared.version, withContent.version + 1);
+    // 基线镜像不随本地保存推进，但清空作为一次内容修订被记录。
+    expect(cleared.version, withContent.version);
+    expect(cleared.revisionCount, greaterThan(withContent.revisionCount));
     await db.close();
   });
 }

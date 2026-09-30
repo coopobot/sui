@@ -6,6 +6,8 @@ class Revision {
   final String title;
   final String contentMarkdown;
   final String? diffDelta;
+  /// 已同步的服务端版本号；null = 未同步草稿（sync-protocol §8.2/§9.3）。
+  final int? serverVersion;
   final String sourceDevice;
   final bool isConflict;
   final DateTime createdAt;
@@ -17,6 +19,7 @@ class Revision {
     this.title = '',
     required this.contentMarkdown,
     this.diffDelta,
+    this.serverVersion,
     this.sourceDevice = '',
     this.isConflict = false,
     required this.createdAt,

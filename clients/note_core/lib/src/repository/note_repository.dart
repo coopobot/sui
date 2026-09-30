@@ -24,6 +24,24 @@ class NoteRepository {
 
   NoteRepository(this.db, {this.deviceId = ''});
 
+  /// 下一条本地修订编号：`max(现存 revision.version) + 1`。
+  ///
+  /// 与 `Notes.version`（服务端基线镜像）解耦：本地多次编辑不会把编号推到服务端
+  /// 版本之上，也不会与服务端下发的版本号撞号（sync-protocol §3）。
+  Future<int> _nextRevisionVersion(String noteId) async {
+    final row = await (db.selectOnly(db.revisions)
+          ..addColumns([db.revisions.version.max()])
+          ..where(db.revisions.noteId.equals(noteId)))
+        .getSingle();
+    return (row.read(db.revisions.version.max()) ?? 0) + 1;
+  }
+
+  /// 同步上行成功后回写服务端基线镜像（`Notes.version = appliedVersion`）。
+  Future<void> setNoteServerVersion(String id, int version) async {
+    await (db.update(db.notes)..where((n) => n.id.equals(id)))
+        .write(NotesCompanion(version: Value(version)));
+  }
+
   /// ---- 笔记本 ----
 
   Future<Notebook> createNotebook({
@@ -210,10 +228,16 @@ class NoteRepository {
     bool archived = false,
     DateTime? now,
     String? sourceDevice,
+    int? version,
   }) async {
     final t = now ?? DateTime.now();
     final nid = id ?? newId();
     final src = sourceDevice ?? deviceId;
+    // Notes.version 是服务端基线镜像：本地新建（尚未同步）基线为 0；
+    // 由 pull 落库的远端笔记以服务端版本为基线。首条修订独立编号：
+    // 新建时为 1，远端落库时沿用服务端版本号（sync-protocol §3）。
+    final baseVersion = version ?? 0;
+    final firstRevision = version ?? 1;
     await db.transaction(() async {
       await db.into(db.notes).insert(NotesCompanion.insert(
             id: nid,
@@ -222,7 +246,7 @@ class NoteRepository {
             contentMarkdown: Value(contentMarkdown),
             pinned: Value(pinned),
             archived: Value(archived),
-            version: const Value(1),
+            version: Value(baseVersion),
             createdAt: t,
             updatedAt: t,
             sourceDevice: Value(src),
@@ -230,14 +254,15 @@ class NoteRepository {
       if (tags.isNotEmpty) {
         await _replaceTags(nid, tags);
       }
-      // 首条修订
+      // 首条修订：pull 落库时 server_version = 服务端版本；本地新建为 null（§9.4）
       await db.into(db.revisions).insert(RevisionsCompanion.insert(
             id: newId(),
             noteId: nid,
-            version: 1,
+            version: firstRevision,
             title: Value(title),
             contentMarkdown: contentMarkdown,
             sourceDevice: Value(src),
+            serverVersion: version != null ? Value(version) : const Value.absent(),
             createdAt: t,
           ));
       await (db.update(db.notes)..where((n) => n.id.equals(nid)))
@@ -284,7 +309,9 @@ class NoteRepository {
 
     final nextTitle = title ?? note.title;
     final nextContent = contentMarkdown ?? note.contentMarkdown;
-    final nextVersion = note.version + 1;
+    // 本地修订编号取 max(现存 revision.version) + 1，与「服务端基线镜像」
+    // （Notes.version）解耦；本地编辑不得推进 Notes.version（sync-protocol §3）。
+    final nextVersion = await _nextRevisionVersion(id);
 
     await db.transaction(() async {
       await _replaceTags(
@@ -295,7 +322,6 @@ class NoteRepository {
           .write(NotesCompanion(
         title: Value(nextTitle),
         contentMarkdown: Value(nextContent),
-        version: Value(nextVersion),
         updatedAt: Value(t),
       ));
       await db.into(db.revisions).insert(RevisionsCompanion.insert(
@@ -305,6 +331,8 @@ class NoteRepository {
             title: Value(nextTitle),
             contentMarkdown: nextContent,
             sourceDevice: Value(deviceId),
+            // 本地编辑产生的草稿：server_version = null（§9.4）
+            serverVersion: const Value.absent(),
             createdAt: t,
           ));
       await (db.update(db.notes)..where((n) => n.id.equals(id)))
@@ -417,18 +445,18 @@ class NoteRepository {
     return summaries;
   }
 
-  /// 用户发起的归档/取消归档（FR-25）：写入归档位并 bump version，
-  /// 让 sync 能感知到这次变更（BR-19.7）。
+  /// 用户发起的归档/取消归档（FR-25）：写入归档位，让 sync 感知到这次变更
+  /// （BR-19.7）。
   ///
-  /// 与 [applyRemoteArchived] 区别：后者用于同步下行，不改 version。
+  /// 与 [applyRemoteArchived] 区别：后者用于同步下行。
   /// 不写 revision：归档不属于内容修订，避免污染版本链。
+  /// 不改 `version`：它是服务端基线镜像，本地编辑不得推进（sync-protocol §3）。
   Future<void> archiveNote(String id, bool archived) async {
     final note = await getNote(id);
     if (note == null) throw StateError('note not found: $id');
     await (db.update(db.notes)..where((n) => n.id.equals(id)))
         .write(NotesCompanion(
       archived: Value(archived),
-      version: Value(note.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
   }
@@ -476,10 +504,13 @@ class NoteRepository {
             ? Value(sourceDevice)
             : const Value.absent(),
       ));
+      // 撞号安全：历史遗留库可能对同一 (noteId, version) 存有重复行，
+      // 用 get() 判空而非 getSingleOrNull()，避免 "Too many elements"。
       final exists = await (db.select(db.revisions)
-            ..where((r) => r.noteId.equals(id) & r.version.equals(version)))
-          .getSingleOrNull();
-      if (exists == null) {
+            ..where((r) => r.noteId.equals(id) & r.version.equals(version))
+            ..limit(1))
+          .get();
+      if (exists.isEmpty) {
         await db.into(db.revisions).insert(RevisionsCompanion.insert(
               id: newId(),
               noteId: id,
@@ -487,6 +518,8 @@ class NoteRepository {
               title: Value(title),
               contentMarkdown: contentMarkdown,
               sourceDevice: Value(sourceDevice ?? note.sourceDevice),
+              // 远端内容落库：server_version = 服务端版本（§9.4，幂等跳过已存在版本）
+              serverVersion: Value(version),
               createdAt: updatedAt,
             ));
         await (db.update(db.notes)..where((n) => n.id.equals(id)))
@@ -504,19 +537,18 @@ class NoteRepository {
     ));
   }
 
-  /// 用户发起的「移动到…」：写入新的 notebookId 并 bump version，
-  /// 让 sync 能感知到笔记变更（BR-19.7 / BR-20.1）。
+  /// 用户发起的「移动到…」：写入新的 notebookId，让 sync 感知笔记变更
+  /// （BR-19.7 / BR-20.1）。
   ///
-  /// 与 [updateNoteNotebook] 区别：后者只覆盖 notebookId 不 bump version，
-  /// 用于同步下行；本方法面向用户操作，需要触发推送。
+  /// 与 [updateNoteNotebook] 区别：后者用于同步下行。
   /// 不写 revision：归属变更不属于内容修订，避免污染版本链。
+  /// 不改 `version`：它是服务端基线镜像，本地编辑不得推进（sync-protocol §3）。
   Future<Note> moveNoteToNotebook(String id, String? notebookId) async {
     final note = await getNote(id);
     if (note == null) throw StateError('note not found: $id');
     await (db.update(db.notes)..where((n) => n.id.equals(id)))
         .write(NotesCompanion(
       notebookId: Value(notebookId),
-      version: Value(note.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
     return (await getNote(id))!;
@@ -603,7 +635,6 @@ class NoteRepository {
         isDeleted: const Value(false),
         deletedAt: const Value<DateTime?>(null),
         notebookId: Value(notebookId),
-        version: Value(note.version + 1),
         updatedAt: Value(DateTime.now()),
       ));
       final atts = await (db.select(db.attachments)
@@ -629,12 +660,74 @@ class NoteRepository {
   }
 
   /// 获取指定版本的修订。
+  ///
+  /// 撞号安全：历史遗留库可能有重复行，取其中一条，避免 getSingleOrNull()
+  /// 抛 "Too many elements"。
   Future<Revision?> getRevision(String noteId, int version) async {
     final row = await (db.select(db.revisions)
-          ..where((t) => t.noteId.equals(noteId) & t.version.equals(version)))
+          ..where((t) => t.noteId.equals(noteId) & t.version.equals(version))
+          ..limit(1))
         .getSingleOrNull();
     return row?.toModel();
   }
+
+  /// 列出本地已同步的修订行（`server_version IS NOT NULL`）——离线历史骨架。
+  ///
+  /// 在线时历史以服务端 `GET /notes/{id}/revisions` 为准；离线回退用本方法
+  /// 取本地已落库的版本节点（sync-protocol §8.3）。
+  Future<List<Revision>> listSyncedRevisions(String noteId) async {
+    final rows = await (db.select(db.revisions)
+          ..where((t) => t.noteId.equals(noteId) & t.serverVersion.isNotNull())
+          ..orderBy([(t) => OrderingTerm.desc(t.serverVersion)]))
+        .get();
+    return rows.map((r) => r.toModel()).toList();
+}
+
+  /// 列出最近一次已同步版本**之后**的本地草稿（未同步分组）。
+  ///
+  /// 取 `server_version IS NULL` 且 `version > MAX(server_version IS NOT NULL`
+  /// 的行) 的行；按 `version ASC` 返回，用于未同步分组逐条展示（§8.3）。
+  Future<List<Revision>> listUnsyncedRevisions(String noteId) async {
+    final maxSynced = await (db.selectOnly(db.revisions)
+          ..addColumns([db.revisions.version.max()])
+          ..where(db.revisions.noteId.equals(noteId) &
+              db.revisions.serverVersion.isNotNull()))
+        .getSingle();
+    final baseVersion = maxSynced.read(db.revisions.version.max()) ?? 0;
+    final rows = await (db.select(db.revisions)
+          ..where((t) =>
+              t.noteId.equals(noteId) &
+              t.serverVersion.isNull() &
+              t.version.isBiggerThanValue(baseVersion))
+          ..orderBy([(t) => OrderingTerm.asc(t.version)]))
+        .get();
+    return rows.map((r) => r.toModel()).toList();
+}
+
+  /// push 成功后回填 `server_version = appliedVersion` 到指定修订行（§9.5）。
+  ///
+  /// 精确回填到 `pushedRevisionVersion` 对应的那条，不受在途期间新编辑
+  /// 产生的更高 version revision 干扰。
+  Future<void> setRevisionServerVersion(
+    String noteId,
+    int revisionVersion,
+    int serverVersion,
+) async {
+    await (db.update(db.revisions)
+          ..where((t) =>
+              t.noteId.equals(noteId) & t.version.equals(revisionVersion)))
+        .write(RevisionsCompanion(serverVersion: Value(serverVersion)));
+}
+
+  /// 当前本地最大修订号 `MAX(revisions.version)`（无则 0）。
+  /// 供 SyncClient 在 enqueue 时记录 `pushedRevisionVersion`（§9.5）。
+  Future<int> maxRevisionVersion(String noteId) async {
+    final row = await (db.selectOnly(db.revisions)
+          ..addColumns([db.revisions.version.max()])
+          ..where(db.revisions.noteId.equals(noteId)))
+        .getSingle();
+    return row.read(db.revisions.version.max()) ?? 0;
+}
 
   /// 恢复到指定历史版本：以旧内容创建一个新版本（不重写历史）。
   ///
@@ -648,14 +741,15 @@ class NoteRepository {
     if (note == null) throw StateError('note not found: $noteId');
 
     final t = DateTime.now();
-    final nextVersion = note.version + 1;
+    // 恢复到历史版本 = 一次本地内容编辑：修订编号取 max(现存)+1，
+    // 不改 Notes.version（服务端基线镜像，sync-protocol §3）。
+    final nextVersion = await _nextRevisionVersion(noteId);
 
     await db.transaction(() async {
       await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
           .write(NotesCompanion(
         title: Value(rev.title),
         contentMarkdown: Value(rev.contentMarkdown),
-        version: Value(nextVersion),
         updatedAt: Value(t),
       ));
       await db.into(db.revisions).insert(RevisionsCompanion.insert(
@@ -665,6 +759,8 @@ class NoteRepository {
             title: Value(rev.title),
             contentMarkdown: rev.contentMarkdown,
             sourceDevice: Value(deviceId),
+            // 还原后内容需重新 push：server_version = null（§9.4）
+            serverVersion: const Value.absent(),
             createdAt: t,
           ));
       await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
@@ -980,6 +1076,7 @@ extension _RevisionRowEx on RevisionRow {
         title: title,
         contentMarkdown: contentMarkdown,
         diffDelta: diffDelta,
+        serverVersion: serverVersion,
         sourceDevice: sourceDevice,
         isConflict: isConflict,
         createdAt: createdAt,

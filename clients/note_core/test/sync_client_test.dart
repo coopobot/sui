@@ -64,6 +64,54 @@ void main() {
       syncer.close();
     });
 
+    // 回归 BUG：push 成功后必须把服务端基线镜像回写本地 Notes.version，
+    // 否则离线编辑会不断抬升本地版本、与服务端版本永久发散
+    // （现象：服务端 33 / 客户端 37、39；离线端重连后无法收敛）。
+    test('push 成功回写 Notes.version = appliedVersion', () async {
+      final note = await repo.createNote(title: 'A', contentMarkdown: '# A');
+      final syncer = newClient((req) async => jsonResponse(200, {
+            'ok': true,
+            'results': [
+              {'id': note.id, 'accepted': true, 'appliedVersion': 7}
+            ]
+          }));
+
+      await syncer.enqueue(note);
+      await syncer.push();
+
+      final after = await repo.getNote(note.id);
+      expect(after!.version, 7, reason: 'Notes.version 是服务端基线镜像');
+      syncer.close();
+    });
+
+    // 回归 BUG：离线期间本地多次编辑不得抬升 Notes.version（基线镜像），
+    // 本地修订使用独立编号；一次 push 后版本即与服务端收敛。
+    test('离线多次编辑后一次 push：本地基线版本不无限增长', () async {
+      final note = await repo.createNote(title: 'A', contentMarkdown: 'v1');
+      await repo.updateNoteContent(note.id, contentMarkdown: 'v2');
+      await repo.updateNoteContent(note.id, contentMarkdown: 'v3');
+      final edited =
+          await repo.updateNoteContent(note.id, contentMarkdown: 'v4');
+      expect(edited.version, note.version, reason: '本地编辑不推进基线镜像');
+
+      final syncer = newClient((req) async => jsonResponse(200, {
+            'ok': true,
+            'results': [
+              {'id': note.id, 'accepted': true, 'appliedVersion': 1}
+            ]
+          }));
+
+      await syncer.enqueue(edited);
+      await syncer.push();
+
+      final after = await repo.getNote(note.id);
+      expect(after!.version, 1, reason: '回写服务端 appliedVersion');
+      // 本地修订链保持连续 1..4，未与服务端版本撞号
+      final revs = await repo.listRevisions(note.id);
+      expect(revs.map((r) => r.version).toList(), [4, 3, 2, 1]);
+      syncer.close();
+    });
+
     test('push 冲突 → 本地合并 + 重新入队（base 刷新为服务端版本）', () async {
       final note =
           await repo.createNote(title: '本地标题', contentMarkdown: '本地正文');
@@ -141,7 +189,8 @@ void main() {
       final fetched = await repo.getNote('remote-note');
       expect(fetched, isNotNull);
       expect(fetched!.title, '远端');
-      expect(fetched.version, 1);
+      // 远端笔记以服务端版本为基线镜像（sync-protocol §3）。
+      expect(fetched.version, 3);
       syncer.close();
     });
 

@@ -169,6 +169,11 @@ class AppController extends ChangeNotifier {
   Timer? _syncDebounce;
   Timer? _syncTicker;
 
+  /// 连接代次：每次断开 / 重连自增一次。正在跑的同步会记下自己的代次，
+  /// 结束后若代次已变，说明连接已被替换，其结果（成功或失败）都必须丢弃，
+  /// 否则会用「已关闭的 http.Client」报错污染新连接的同步状态。
+  int _connGeneration = 0;
+
   /// 周期兜底同步间隔。
   ///
   /// 离线期间的本地改动只能积在 Outbox：WS 断了等不到广播，用户也可能不再编辑
@@ -700,17 +705,20 @@ class AppController extends ChangeNotifier {
     if (client == null) return;
     if (_syncState == SyncState.syncing) return;
 
+    final generation = _connGeneration;
     _syncState = SyncState.syncing;
     _syncError = null;
     notifyListeners();
     try {
       await client.sync();
+      if (generation != _connGeneration) return;
       _lastSyncedAt = DateTime.now();
       _syncState = SyncState.idle;
       await refreshNotebooks();
       await refreshTags();
       await refreshNotes();
     } catch (e) {
+      if (generation != _connGeneration) return;
       _syncError = _describeError(e);
       _syncState = SyncState.error;
     }
@@ -792,6 +800,7 @@ class AppController extends ChangeNotifier {
   AuthClient _authClient() => _auth ??= AuthClient();
 
   Future<void> _teardownConnection() async {
+    _connGeneration++;
     _syncDebounce?.cancel();
     _syncDebounce = null;
     _syncTicker?.cancel();
@@ -870,6 +879,28 @@ class AppController extends ChangeNotifier {
   Future<List<Revision>> listRevisions(String noteId) async {
     return await _repository.listRevisions(noteId);
   }
+
+  /// 在线拉取服务端修订历史（sync-protocol §8.3）。
+  /// 服务端未配置或请求失败时返回空列表（UI 回退到本地已同步行）。
+  Future<List<RemoteRevision>> fetchRemoteRevisions(String noteId) async {
+    final sc = _syncClient;
+    if (sc == null) return const [];
+    try {
+      return await sc.fetchRemoteRevisions(noteId);
+    } catch (_) {
+      return const [];
+    }
+}
+
+  /// 本地已同步修订节点（离线历史骨架，§8.3）。
+  Future<List<Revision>> listSyncedRevisions(String noteId) async {
+    return await _repository.listSyncedRevisions(noteId);
+}
+
+  /// 本地未同步草稿分组（§8.3）。
+  Future<List<Revision>> listUnsyncedRevisions(String noteId) async {
+    return await _repository.listUnsyncedRevisions(noteId);
+}
 
   /// 恢复到指定历史版本。恢复后刷新笔记列表和编辑器内容。
   Future<void> restoreRevision(String noteId, int version) async {

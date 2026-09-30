@@ -34,5 +34,6 @@ dart test
 ## 说明
 
 - drift 生成的数据类名带 `Row` 后缀（如 `NoteRow`），避免与域模型（`Note`）冲突。
-- 首条修订 version=1 与 Notes.version 初始化对齐，保证历史排序稳定。
+- 版本模型：`Notes.version` 是**服务端基线镜像**（仅在 pull 应用服务端笔记、或本地草稿推送成功后回写 `appliedVersion`），本地编辑**不**对它 `+1`；离线草稿的修订编号独立取自 `revisions.version = max(现存)+1`，因此多端并发编辑后版本不会发散。
+- 首条修订 `version=1` 与新建笔记的本地基线初始化对齐，保证历史排序稳定；drift schema v6 升级会对既有库去重同号修订并重算基线。
 - 附件写入示例见 `test/note_repository_test.dart` 的 BlobStore 用例。

@@ -1642,6 +1642,12 @@ class $RevisionsTable extends Revisions
   late final GeneratedColumn<String> diffDelta = GeneratedColumn<String>(
       'diff_delta', aliasedName, true,
       type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _serverVersionMeta =
+      const VerificationMeta('serverVersion');
+  @override
+  late final GeneratedColumn<int> serverVersion = GeneratedColumn<int>(
+      'server_version', aliasedName, true,
+      type: DriftSqlType.int, requiredDuringInsert: false);
   static const VerificationMeta _sourceDeviceMeta =
       const VerificationMeta('sourceDevice');
   @override
@@ -1674,6 +1680,7 @@ class $RevisionsTable extends Revisions
         title,
         contentMarkdown,
         diffDelta,
+        serverVersion,
         sourceDevice,
         isConflict,
         createdAt
@@ -1721,6 +1728,12 @@ class $RevisionsTable extends Revisions
       context.handle(_diffDeltaMeta,
           diffDelta.isAcceptableOrUnknown(data['diff_delta']!, _diffDeltaMeta));
     }
+    if (data.containsKey('server_version')) {
+      context.handle(
+          _serverVersionMeta,
+          serverVersion.isAcceptableOrUnknown(
+              data['server_version']!, _serverVersionMeta));
+    }
     if (data.containsKey('source_device')) {
       context.handle(
           _sourceDeviceMeta,
@@ -1760,6 +1773,8 @@ class $RevisionsTable extends Revisions
           DriftSqlType.string, data['${effectivePrefix}content_markdown'])!,
       diffDelta: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}diff_delta']),
+      serverVersion: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}server_version']),
       sourceDevice: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}source_device'])!,
       isConflict: attachedDatabase.typeMapping
@@ -1782,6 +1797,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
   final String title;
   final String contentMarkdown;
   final String? diffDelta;
+  final int? serverVersion;
   final String sourceDevice;
   final bool isConflict;
   final DateTime createdAt;
@@ -1792,6 +1808,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
       required this.title,
       required this.contentMarkdown,
       this.diffDelta,
+      this.serverVersion,
       required this.sourceDevice,
       required this.isConflict,
       required this.createdAt});
@@ -1805,6 +1822,9 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
     map['content_markdown'] = Variable<String>(contentMarkdown);
     if (!nullToAbsent || diffDelta != null) {
       map['diff_delta'] = Variable<String>(diffDelta);
+    }
+    if (!nullToAbsent || serverVersion != null) {
+      map['server_version'] = Variable<int>(serverVersion);
     }
     map['source_device'] = Variable<String>(sourceDevice);
     map['is_conflict'] = Variable<bool>(isConflict);
@@ -1822,6 +1842,9 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
       diffDelta: diffDelta == null && nullToAbsent
           ? const Value.absent()
           : Value(diffDelta),
+      serverVersion: serverVersion == null && nullToAbsent
+          ? const Value.absent()
+          : Value(serverVersion),
       sourceDevice: Value(sourceDevice),
       isConflict: Value(isConflict),
       createdAt: Value(createdAt),
@@ -1838,6 +1861,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
       title: serializer.fromJson<String>(json['title']),
       contentMarkdown: serializer.fromJson<String>(json['contentMarkdown']),
       diffDelta: serializer.fromJson<String?>(json['diffDelta']),
+      serverVersion: serializer.fromJson<int?>(json['serverVersion']),
       sourceDevice: serializer.fromJson<String>(json['sourceDevice']),
       isConflict: serializer.fromJson<bool>(json['isConflict']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
@@ -1853,6 +1877,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
       'title': serializer.toJson<String>(title),
       'contentMarkdown': serializer.toJson<String>(contentMarkdown),
       'diffDelta': serializer.toJson<String?>(diffDelta),
+      'serverVersion': serializer.toJson<int?>(serverVersion),
       'sourceDevice': serializer.toJson<String>(sourceDevice),
       'isConflict': serializer.toJson<bool>(isConflict),
       'createdAt': serializer.toJson<DateTime>(createdAt),
@@ -1866,6 +1891,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
           String? title,
           String? contentMarkdown,
           Value<String?> diffDelta = const Value.absent(),
+          Value<int?> serverVersion = const Value.absent(),
           String? sourceDevice,
           bool? isConflict,
           DateTime? createdAt}) =>
@@ -1876,6 +1902,8 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
         title: title ?? this.title,
         contentMarkdown: contentMarkdown ?? this.contentMarkdown,
         diffDelta: diffDelta.present ? diffDelta.value : this.diffDelta,
+        serverVersion:
+            serverVersion.present ? serverVersion.value : this.serverVersion,
         sourceDevice: sourceDevice ?? this.sourceDevice,
         isConflict: isConflict ?? this.isConflict,
         createdAt: createdAt ?? this.createdAt,
@@ -1890,6 +1918,9 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
           ? data.contentMarkdown.value
           : this.contentMarkdown,
       diffDelta: data.diffDelta.present ? data.diffDelta.value : this.diffDelta,
+      serverVersion: data.serverVersion.present
+          ? data.serverVersion.value
+          : this.serverVersion,
       sourceDevice: data.sourceDevice.present
           ? data.sourceDevice.value
           : this.sourceDevice,
@@ -1908,6 +1939,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
           ..write('title: $title, ')
           ..write('contentMarkdown: $contentMarkdown, ')
           ..write('diffDelta: $diffDelta, ')
+          ..write('serverVersion: $serverVersion, ')
           ..write('sourceDevice: $sourceDevice, ')
           ..write('isConflict: $isConflict, ')
           ..write('createdAt: $createdAt')
@@ -1917,7 +1949,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
 
   @override
   int get hashCode => Object.hash(id, noteId, version, title, contentMarkdown,
-      diffDelta, sourceDevice, isConflict, createdAt);
+      diffDelta, serverVersion, sourceDevice, isConflict, createdAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1928,6 +1960,7 @@ class RevisionRow extends DataClass implements Insertable<RevisionRow> {
           other.title == this.title &&
           other.contentMarkdown == this.contentMarkdown &&
           other.diffDelta == this.diffDelta &&
+          other.serverVersion == this.serverVersion &&
           other.sourceDevice == this.sourceDevice &&
           other.isConflict == this.isConflict &&
           other.createdAt == this.createdAt);
@@ -1940,6 +1973,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
   final Value<String> title;
   final Value<String> contentMarkdown;
   final Value<String?> diffDelta;
+  final Value<int?> serverVersion;
   final Value<String> sourceDevice;
   final Value<bool> isConflict;
   final Value<DateTime> createdAt;
@@ -1951,6 +1985,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
     this.title = const Value.absent(),
     this.contentMarkdown = const Value.absent(),
     this.diffDelta = const Value.absent(),
+    this.serverVersion = const Value.absent(),
     this.sourceDevice = const Value.absent(),
     this.isConflict = const Value.absent(),
     this.createdAt = const Value.absent(),
@@ -1963,6 +1998,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
     this.title = const Value.absent(),
     required String contentMarkdown,
     this.diffDelta = const Value.absent(),
+    this.serverVersion = const Value.absent(),
     this.sourceDevice = const Value.absent(),
     this.isConflict = const Value.absent(),
     required DateTime createdAt,
@@ -1979,6 +2015,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
     Expression<String>? title,
     Expression<String>? contentMarkdown,
     Expression<String>? diffDelta,
+    Expression<int>? serverVersion,
     Expression<String>? sourceDevice,
     Expression<bool>? isConflict,
     Expression<DateTime>? createdAt,
@@ -1991,6 +2028,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
       if (title != null) 'title': title,
       if (contentMarkdown != null) 'content_markdown': contentMarkdown,
       if (diffDelta != null) 'diff_delta': diffDelta,
+      if (serverVersion != null) 'server_version': serverVersion,
       if (sourceDevice != null) 'source_device': sourceDevice,
       if (isConflict != null) 'is_conflict': isConflict,
       if (createdAt != null) 'created_at': createdAt,
@@ -2005,6 +2043,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
       Value<String>? title,
       Value<String>? contentMarkdown,
       Value<String?>? diffDelta,
+      Value<int?>? serverVersion,
       Value<String>? sourceDevice,
       Value<bool>? isConflict,
       Value<DateTime>? createdAt,
@@ -2016,6 +2055,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
       title: title ?? this.title,
       contentMarkdown: contentMarkdown ?? this.contentMarkdown,
       diffDelta: diffDelta ?? this.diffDelta,
+      serverVersion: serverVersion ?? this.serverVersion,
       sourceDevice: sourceDevice ?? this.sourceDevice,
       isConflict: isConflict ?? this.isConflict,
       createdAt: createdAt ?? this.createdAt,
@@ -2044,6 +2084,9 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
     if (diffDelta.present) {
       map['diff_delta'] = Variable<String>(diffDelta.value);
     }
+    if (serverVersion.present) {
+      map['server_version'] = Variable<int>(serverVersion.value);
+    }
     if (sourceDevice.present) {
       map['source_device'] = Variable<String>(sourceDevice.value);
     }
@@ -2068,6 +2111,7 @@ class RevisionsCompanion extends UpdateCompanion<RevisionRow> {
           ..write('title: $title, ')
           ..write('contentMarkdown: $contentMarkdown, ')
           ..write('diffDelta: $diffDelta, ')
+          ..write('serverVersion: $serverVersion, ')
           ..write('sourceDevice: $sourceDevice, ')
           ..write('isConflict: $isConflict, ')
           ..write('createdAt: $createdAt, ')
@@ -3966,6 +4010,7 @@ typedef $$RevisionsTableCreateCompanionBuilder = RevisionsCompanion Function({
   Value<String> title,
   required String contentMarkdown,
   Value<String?> diffDelta,
+  Value<int?> serverVersion,
   Value<String> sourceDevice,
   Value<bool> isConflict,
   required DateTime createdAt,
@@ -3978,6 +4023,7 @@ typedef $$RevisionsTableUpdateCompanionBuilder = RevisionsCompanion Function({
   Value<String> title,
   Value<String> contentMarkdown,
   Value<String?> diffDelta,
+  Value<int?> serverVersion,
   Value<String> sourceDevice,
   Value<bool> isConflict,
   Value<DateTime> createdAt,
@@ -4011,6 +4057,9 @@ class $$RevisionsTableFilterComposer
 
   ColumnFilters<String> get diffDelta => $composableBuilder(
       column: $table.diffDelta, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get serverVersion => $composableBuilder(
+      column: $table.serverVersion, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<String> get sourceDevice => $composableBuilder(
       column: $table.sourceDevice, builder: (column) => ColumnFilters(column));
@@ -4050,6 +4099,10 @@ class $$RevisionsTableOrderingComposer
   ColumnOrderings<String> get diffDelta => $composableBuilder(
       column: $table.diffDelta, builder: (column) => ColumnOrderings(column));
 
+  ColumnOrderings<int> get serverVersion => $composableBuilder(
+      column: $table.serverVersion,
+      builder: (column) => ColumnOrderings(column));
+
   ColumnOrderings<String> get sourceDevice => $composableBuilder(
       column: $table.sourceDevice,
       builder: (column) => ColumnOrderings(column));
@@ -4087,6 +4140,9 @@ class $$RevisionsTableAnnotationComposer
 
   GeneratedColumn<String> get diffDelta =>
       $composableBuilder(column: $table.diffDelta, builder: (column) => column);
+
+  GeneratedColumn<int> get serverVersion => $composableBuilder(
+      column: $table.serverVersion, builder: (column) => column);
 
   GeneratedColumn<String> get sourceDevice => $composableBuilder(
       column: $table.sourceDevice, builder: (column) => column);
@@ -4127,6 +4183,7 @@ class $$RevisionsTableTableManager extends RootTableManager<
             Value<String> title = const Value.absent(),
             Value<String> contentMarkdown = const Value.absent(),
             Value<String?> diffDelta = const Value.absent(),
+            Value<int?> serverVersion = const Value.absent(),
             Value<String> sourceDevice = const Value.absent(),
             Value<bool> isConflict = const Value.absent(),
             Value<DateTime> createdAt = const Value.absent(),
@@ -4139,6 +4196,7 @@ class $$RevisionsTableTableManager extends RootTableManager<
             title: title,
             contentMarkdown: contentMarkdown,
             diffDelta: diffDelta,
+            serverVersion: serverVersion,
             sourceDevice: sourceDevice,
             isConflict: isConflict,
             createdAt: createdAt,
@@ -4151,6 +4209,7 @@ class $$RevisionsTableTableManager extends RootTableManager<
             Value<String> title = const Value.absent(),
             required String contentMarkdown,
             Value<String?> diffDelta = const Value.absent(),
+            Value<int?> serverVersion = const Value.absent(),
             Value<String> sourceDevice = const Value.absent(),
             Value<bool> isConflict = const Value.absent(),
             required DateTime createdAt,
@@ -4163,6 +4222,7 @@ class $$RevisionsTableTableManager extends RootTableManager<
             title: title,
             contentMarkdown: contentMarkdown,
             diffDelta: diffDelta,
+            serverVersion: serverVersion,
             sourceDevice: sourceDevice,
             isConflict: isConflict,
             createdAt: createdAt,

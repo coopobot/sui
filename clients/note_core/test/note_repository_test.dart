@@ -71,10 +71,12 @@ void main() {
       final note = await repo.createNote(contentMarkdown: 'v1');
       final v2 =
           await repo.updateNoteContent(note.id, contentMarkdown: 'v2 修改');
-      expect(v2.version, note.version + 1);
+      // Notes.version 是服务端基线镜像，本地编辑不推进（sync-protocol §3）。
+      expect(v2.version, note.version);
       expect(v2.revisionCount, 2);
       final revs = await repo.listRevisions(note.id);
       expect(revs, hasLength(2));
+      expect(revs.first.version, 2);
       expect(revs.first.contentMarkdown, 'v2 修改');
       expect(revs.last.contentMarkdown, 'v1');
     });
@@ -107,8 +109,40 @@ void main() {
       final got = await repo.getNote(note.id);
       expect(got!.archived, isTrue);
       expect(got.pinned, isTrue);
-      // 归档须 bump version，使同步层能感知这次变更（BUG4）。
-      expect(got.version, note.version + 1);
+      // Notes.version 是服务端基线镜像，归档/置顶不推进（sync-protocol §3）；
+      // 变更由 sync 层的 dirty 标记与 updatedAt 感知，而非版本号。
+      expect(got.version, note.version);
+    });
+
+    // 回归 BUG：历史遗留库可能对同一 (noteId, version) 存有重复修订行，
+    // 旧代码用 getSingleOrNull() 读取会抛 StateError: Too many elements。
+    test('撞号历史安全：同号重复修订不抛 Too many elements', () async {
+      final note = await repo.createNote(contentMarkdown: 'v1');
+      for (var i = 0; i < 2; i++) {
+        await db.into(db.revisions).insert(RevisionsCompanion.insert(
+              id: 'dup-$i',
+              noteId: note.id,
+              version: 5,
+              contentMarkdown: 'dup',
+              createdAt: DateTime.now(),
+            ));
+      }
+
+      // 读取同号修订应返回其一而非抛异常。
+      expect(await repo.getRevision(note.id, 5), isNotNull);
+
+      // 同步下行应用同号修订（幂等去重）也不应抛异常。
+      await repo.applyRemoteNoteContent(
+        note.id,
+        title: 'dup',
+        contentMarkdown: 'dup',
+        version: 5,
+        updatedAt: DateTime.now(),
+      );
+      final revs = (await repo.listRevisions(note.id))
+          .where((r) => r.version == 5)
+          .toList();
+      expect(revs, isNotEmpty);
     });
   });
 

@@ -48,7 +48,7 @@ class Notes extends Table {
   DateTimeColumn get createdAt => dateTime()();
   DateTimeColumn get updatedAt => dateTime()();
   DateTimeColumn get deletedAt => dateTime().nullable()();
-  // 同步相关：base 指向服务端权威版本；本地未同步草稿走同表版本计数
+  // 同步相关：version 是服务端基线镜像（仅由同步层回写）；本地草稿编号见 revisions.version
   IntColumn get version => integer().withDefault(const Constant(0))();
   TextColumn get sourceDevice => text().withDefault(const Constant(''))();
 
@@ -75,6 +75,7 @@ class Revisions extends Table {
   TextColumn get title => text().withDefault(const Constant(''))();
   TextColumn get contentMarkdown => text()();
   TextColumn get diffDelta => text().nullable()();
+  IntColumn get serverVersion => integer().nullable()();
   TextColumn get sourceDevice => text().withDefault(const Constant(''))();
   BoolColumn get isConflict => boolean().withDefault(const Constant(false))();
   DateTimeColumn get createdAt => dateTime()();
@@ -156,7 +157,7 @@ class AppDatabase extends _$AppDatabase {
       AppDatabase(openConnection(basePath: basePath));
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -174,8 +175,28 @@ class AppDatabase extends _$AppDatabase {
           if (from <= 4) {
             await m.addColumn(blobRefs, blobRefs.uploadedAt);
           }
+          if (from <= 5) {
+            await m.addColumn(revisions, revisions.serverVersion);
+            await _migrateToV6();
+          }
         },
       );
+
+  /// v5 -> v6：修正版本模型（sync-protocol §3）。
+  ///
+  /// 旧库把「本地修订计数器」与「服务端基线」混用于 `Notes.version`，导致版本发散、
+  /// 历史出现同号重复行（触发 "Too many elements"）。这里做一次幂等修复：
+  ///   1. 去重 `revisions`：同一 (note_id, version) 仅保留一行；
+  ///   2. 重算每条笔记的 `revision_count`；
+  ///   3. 把 `Notes.version` 归一到「现存最大修订号」，作为服务端基线镜像起点。
+  Future<void> _migrateToV6() async {
+    await customStatement('DELETE FROM revisions WHERE rowid NOT IN '
+        '(SELECT MIN(rowid) FROM revisions GROUP BY note_id, version)');
+    await customStatement('UPDATE notes SET revision_count = COALESCE('
+        '(SELECT COUNT(*) FROM revisions WHERE revisions.note_id = notes.id), 0)');
+    await customStatement('UPDATE notes SET version = COALESCE('
+        '(SELECT MAX(version) FROM revisions WHERE revisions.note_id = notes.id), 0)');
+  }
 
   /// 便捷：硬删除某笔记及其所有关联（测试/清理用）。
   Future<void> removeNoteCascade(String noteId) => transaction(() async {

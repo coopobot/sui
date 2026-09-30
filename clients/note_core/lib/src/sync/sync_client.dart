@@ -62,10 +62,15 @@ class SyncClient {
 
   /// 新增一条待推送的笔记变更（编辑保存时调用）。
   ///
-  /// 会把当前笔记的本地版本与 base 记录下来，以便推送时声明 baseVersion。
+  /// base 取「最近一次已知的服务端基线」：首次为 `Notes.version`（服务端基线镜像），
+  /// 此后为上一次推送成功回写的 base；**不再回退到 `note.version - 1`**（sync-protocol §3）。
   Future<void> enqueue(Note note) async {
-    final base = _baseVersion.putIfAbsent(note.id, () => note.version - 1);
+    final base = _baseVersion.putIfAbsent(note.id, () => note.version);
     final existing = _outbox.indexWhere((e) => e.noteId == note.id);
+    // 记录 push 时对应的本地修订号（= MAX(revisions.version)），用于 push
+    // 成功后精确回填 server_version（sync-protocol §9.5）。
+    final pushedRevisionVersion =
+        await repository.maxRevisionVersion(note.id);
     final item = OutboxItem(
       noteId: note.id,
       title: note.title,
@@ -74,6 +79,7 @@ class SyncClient {
       version: note.version,
       isDeleted: note.isDeleted,
       archived: note.archived,
+      pushedRevisionVersion: pushedRevisionVersion,
     );
     if (existing >= 0) {
       _outbox[existing] = item; // 合并成一条（只推最终内容）
@@ -208,6 +214,17 @@ class SyncClient {
       if (idx < 0) continue;
       final item = _outbox[idx];
       if (r.accepted) {
+        // 回写服务端基线镜像 Notes.version = appliedVersion（sync-protocol §4.1）。
+        await repository.setNoteServerVersion(item.noteId, r.appliedVersion);
+        // 精确回填 server_version 到 push 时对应的那条修订（§9.5），
+        // 不受在途期间新编辑产生的更高 version revision 干扰。
+        if (item.pushedRevisionVersion > 0) {
+          await repository.setRevisionServerVersion(
+            item.noteId,
+            item.pushedRevisionVersion,
+            r.appliedVersion,
+          );
+        }
         _baseVersion[item.noteId] = r.appliedVersion;
         _outbox.removeAt(idx);
       } else {
@@ -309,6 +326,7 @@ class SyncClient {
           contentMarkdown: n['content'] as String? ?? '',
           archived: (n['archived'] as bool?) ?? false,
           sourceDevice: (n['sourceDevice'] as String?) ?? '',
+          version: ver,
         );
         _baseVersion[id] = ver;
         await _applyRemoteTags(id, n);
@@ -517,7 +535,7 @@ class SyncClient {
   /// - 标题：取较长一方（启发式，避免丢字）。
   /// - 正文：将服务端版本 + 本地草稿版本以 diff3 方式合并的简化版。
   ///   简化实现：若两端差异较小则拼接；否则创建一条冲突修订，提示用户。
-  /// 合并后写入本地版本 +1，下次 push 以新 base 重发。
+  /// 合并结果写为一条本地草稿（独立修订编号），下次 push 以新 base 重发。
   Future<void> _mergeLocalWithServer(
       OutboxItem local, _ServerNote server) async {
     final localTitle = local.title;
@@ -538,10 +556,11 @@ class SyncClient {
     );
     // 新草稿的 base = 服务端版本
     _baseVersion[local.noteId] = server.version;
-    // 下一次 push 以新版本（note.version）作为 version 声明
-    // 且 base = server.version。
+    // 下一次 push 以 server.version 作为 base 声明重发。
     // 重新入队
     final existing = _outbox.indexWhere((e) => e.noteId == local.noteId);
+    final pushedRevisionVersion =
+        await repository.maxRevisionVersion(note.id);
     final item = OutboxItem(
       noteId: note.id,
       title: note.title,
@@ -550,6 +569,7 @@ class SyncClient {
       version: note.version,
       isDeleted: note.isDeleted,
       archived: note.archived,
+      pushedRevisionVersion: pushedRevisionVersion,
     );
     if (existing >= 0) {
       _outbox[existing] = item;
@@ -621,6 +641,9 @@ class OutboxItem {
   final int version;
   final bool isDeleted;
   final bool archived;
+  /// 入队时本地 `MAX(revisions.version)`，push 成功后据此精确回填
+  /// `server_version`（sync-protocol §9.5）。
+  final int pushedRevisionVersion;
 
   OutboxItem({
     required this.noteId,
@@ -630,6 +653,7 @@ class OutboxItem {
     required this.version,
     required this.isDeleted,
     required this.archived,
+    required this.pushedRevisionVersion,
   });
 }
 

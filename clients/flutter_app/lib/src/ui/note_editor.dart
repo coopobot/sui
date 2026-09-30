@@ -83,7 +83,8 @@ class _NoteEditorState extends State<NoteEditor> {
           .firstOrNull;
       _tags = s?.tags ?? [];
       _loaded = true;
-      _lastVersion = note.version;
+      _boundTitle = note.title;
+      _boundContent = note.contentMarkdown;
     }
     if (note?.id != _loadedNoteId) {
       _loadedNoteId = note?.id;
@@ -98,7 +99,18 @@ class _NoteEditorState extends State<NoteEditor> {
     }
   }
 
-  int? _lastVersion;
+  /// 上一次绑定到输入框的标题 / 正文。
+  ///
+  /// 仅当底层内容真正被外部改写时才重绑输入框：`Notes.version` 在 push 成功后
+  /// 会作为「服务端基线镜像」被回写（`setNoteServerVersion`），此时内容并未变化，
+  /// 不能据此重绑，否则正在输入的字词会被同步刷掉。
+  String? _boundTitle;
+  String? _boundContent;
+
+  bool _hasExternalChange(Note note) =>
+      !_loaded ||
+      note.title != _boundTitle ||
+      note.contentMarkdown != _boundContent;
 
   Future<void> _save() async {
     final id = _controller.selectedNoteId;
@@ -113,8 +125,14 @@ class _NoteEditorState extends State<NoteEditor> {
       );
     } finally {
       _pendingSaves--;
-      // 全部保存落盘后对齐版本，避免后续 build 把自身保存误判为外部变化。
-      if (_pendingSaves == 0) _lastVersion = _note?.version;
+      // 全部保存落盘后对齐基线，避免后续 build 把自身保存误判为外部变化。
+      if (_pendingSaves == 0) {
+        final note = _note;
+        if (note != null) {
+          _boundTitle = note.title;
+          _boundContent = note.contentMarkdown;
+        }
+      }
     }
   }
 
@@ -296,14 +314,14 @@ class _NoteEditorState extends State<NoteEditor> {
   Widget build(BuildContext context) {
     final id = context.watch<AppController>().selectedNoteId;
     // 仅在「首次载入 / 切换到另一篇笔记 / 内容被外部改写（恢复修订、同步拉取）」
-    // 时重绑输入框；自身保存也会让 version 自增，若无条件重绑，打字时每次保存
-    // 都会把 selection 置回 -1，表现为光标跳到行首、难以输入。
+    // 时重绑输入框。判定依据是标题 / 正文内容是否真的变了，而非 version：
+    // `updateNoteContent` 不改 `Notes.version`，而 push 成功后 `setNoteServerVersion`
+    // 会把 `Notes.version` 回写为服务端基线（内容不变），若用 version 判定，会在
+    // 输入过程中误判为外部变化并重绑，把已敲入的字词刷掉。
     final note = _note;
     final switched = note != null && note.id != _loadedNoteId;
     if (note != null &&
-        (switched ||
-            (_pendingSaves == 0 &&
-                (!_loaded || note.version != _lastVersion)))) {
+        (switched || (_pendingSaves == 0 && _hasExternalChange(note)))) {
       _loadNote();
     }
     if (id == null) {
