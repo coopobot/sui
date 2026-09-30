@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 command -v go >/dev/null 2>&1 || export PATH="$PATH:/home/aiuser/go-sdk/go/bin"
 
 # 监听地址与数据目录，可用环境变量覆盖
-export SUI_ADDR="${SUI_ADDR:-:8080}"
+export SUI_ADDR="${SUI_ADDR:-127.0.0.1:8080}"
 export SUI_DATA="${SUI_DATA:-/home/aiuser/sui-demo-data}"
 
 LOG=/tmp/sui-server.log

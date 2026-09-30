@@ -13,7 +13,7 @@ build-server:
 
 ## run-server: build then run the server (addr overridable via SUI_ADDR)
 run-server: build-server
-	SUI_ADDR=$${SUI_ADDR:-:8080} ./$(BIN)
+	SUI_ADDR=$${SUI_ADDR:-127.0.0.1:8080} ./$(BIN)
 
 ## test: run all Go tests
 test:

@@ -21,7 +21,7 @@ import (
 func main() {
 	addr := os.Getenv("SUI_ADDR")
 	if addr == "" {
-		addr = ":8080"
+		addr = "127.0.0.1:8080"
 	}
 	dataDir := os.Getenv("SUI_DATA")
 	if dataDir == "" {
