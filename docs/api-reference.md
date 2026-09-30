@@ -22,14 +22,16 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 
 > 本服务为**单用户**模式：仅允许创建唯一账号（首启注册后自助注册关闭，再次注册返回 403 `already-initialized`）。`/api/v1/ws` 端点须携带有效 Token（`?token=<token>` 或 `Authorization: Bearer`），未通过返回 401。
 
+> 笔记正本 `content`（`content_markdown`）为**原样存储**的 Markdown，服务端不做语义解析：客户端编辑器新增的 GFM 任务项（`- [ ]` / `- [x]`）与高亮（`==文字==`）均作为普通文本随笔记 push/pull 逐字节往返，语义只由客户端呈现层解释。
+
 ## 健康检查与心跳
 
 ```bash
 curl http://localhost:8080/healthz
-# → {"ok":true,"service":"sui-server","version":"0.5.0","time":"...","initialized":false}
+# → {"ok":true,"service":"sui-server","version":"0.6.0","time":"...","initialized":false}
 
 curl http://localhost:8080/api/v1/ping
-# → {"ok":true,"service":"sui-server","version":"0.5.0","time":"...","msg":"pong","initialized":false}
+# → {"ok":true,"service":"sui-server","version":"0.6.0","time":"...","msg":"pong","initialized":false}
 ```
 
 > `initialized` 表示服务端是否已存在账号（单用户模式：建号后自助注册关闭）。首启未建号时为

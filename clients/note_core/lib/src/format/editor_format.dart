@@ -13,19 +13,27 @@
 library;
 
 /// 工具栏格式指令。作用域见 editor-formatting.md §3。
+///
+/// M5 起补充 `highlight` / `taskList` / `indent` / `outdent` / `clearFormat`：
+/// 与工具栏按钮**同一套**实现（BR-30.4），快捷键只是它的另一个入口（§9）。
 enum FormatCommand {
   bold,
   italic,
   strikethrough,
+  highlight,
   heading1,
   heading2,
   heading3,
   bulletList,
   orderedList,
+  taskList,
   blockquote,
   codeBlock,
   link,
   divider,
+  indent,
+  outdent,
+  clearFormat,
 }
 
 /// 文本变换结果：新正本 + 新选区（供 UI 回填 `TextEditingController`）。
@@ -152,6 +160,16 @@ abstract final class EditorFormat {
         return _link(text, selectionStart, selectionEnd);
       case FormatCommand.divider:
         return _divider(text, selectionStart, selectionEnd);
+      case FormatCommand.highlight:
+        return _inline(text, selectionStart, selectionEnd, '==');
+      case FormatCommand.taskList:
+        return _taskList(text, selectionStart, selectionEnd);
+      case FormatCommand.indent:
+        return _indent(text, selectionStart, selectionEnd);
+      case FormatCommand.outdent:
+        return _outdent(text, selectionStart, selectionEnd);
+      case FormatCommand.clearFormat:
+        return _clearFormat(text, selectionStart, selectionEnd);
     }
   }
 
@@ -315,6 +333,146 @@ abstract final class EditorFormat {
     final pos = blockStart + 4;
     return FormatResult(newText, pos, pos);
   }
+
+  static FormatResult _taskList(String text, int start, int end) {
+    return _mapLines(text, start, end, (line, _) {
+      final m = _taskLine.firstMatch(line);
+      if (m != null) {
+        final checked = m.group(2)!.toLowerCase() == 'x';
+        return '${m.group(1)}[${checked ? ' ' : 'x'}]${m.group(3)}';
+      }
+      return line.isEmpty ? '- [ ]' : '- [ ] $line';
+    });
+  }
+
+  /// 切换 [offset] 所在行的任务项勾选态（`[ ]` ↔ `[x]`）。
+  ///
+  /// 非任务项行返回 null（按普通正文处理，不误改）。仅改动方括号内一个字符，
+  /// 行内其余字符逐字不动（BR-31.2 / `TaskListToggleRoundTrip`）。
+  static FormatResult? toggleTaskChecked(
+    String text,
+    int offset, [
+    int? caretEnd,
+  ]) {
+    final s = offset.clamp(0, text.length);
+    final e = (caretEnd ?? offset).clamp(0, text.length);
+    final lineStart = s == 0 ? 0 : text.lastIndexOf('\n', s - 1) + 1;
+    var lineEnd = text.indexOf('\n', lineStart);
+    if (lineEnd == -1) lineEnd = text.length;
+    final m = _taskLine.firstMatch(text.substring(lineStart, lineEnd));
+    if (m == null) return null;
+    final checked = m.group(2)!.toLowerCase() == 'x';
+    final newLine = '${m.group(1)}[${checked ? ' ' : 'x'}]${m.group(3)}';
+    final newText =
+        text.substring(0, lineStart) + newLine + text.substring(lineEnd);
+    return FormatResult(newText, s, e);
+  }
+
+  /// 块级呈现单元内按下回车时的正本变换（仅格式化模式，§11.2 / BR-32.4）。
+  ///
+  /// 返回 null 表示**交由默认行为**（在光标处插入换行）；非 null 结果用于
+  /// 「空块交互」，与源码 / 预览两态内容保持一致（AC-92）：
+  /// - 空列表项（`- ` / `* ` / `+ `，无文本）回车 → 移除标记、退出列表；
+  /// - 任务项（`- [ ]` / `- [x]`，空或含文本）回车 → 续行，新建 `- [ ] `；
+  /// - 空引用行（`> ` / `>`，无文本）回车 → 移除标记、退出引用。
+  ///
+  /// 仅在**行尾**触发；仅重写当前行的标记，其余字符一律不动。
+  static FormatResult? blockNewline(String text, int offset, [int? caretEnd]) {
+    final s = offset.clamp(0, text.length);
+    final e = (caretEnd ?? offset).clamp(0, text.length);
+    final lineStart = s == 0 ? 0 : text.lastIndexOf('\n', s - 1) + 1;
+    var lineEnd = text.indexOf('\n', lineStart);
+    if (lineEnd == -1) lineEnd = text.length;
+
+    // 行中回车交由默认行为，避免打断行内编辑。
+    if (e < lineEnd) return null;
+
+    final line = text.substring(lineStart, lineEnd);
+
+    // 任务项：续行，保持缩进并新建未勾选任务。
+    if (_taskLine.hasMatch(line)) {
+      final indent = _leadingWhitespace.firstMatch(line)!.group(0)!;
+      final insert = '\n$indent- [ ] ';
+      final pos = lineEnd + insert.length;
+      return FormatResult(
+        text.substring(0, lineEnd) + insert + text.substring(lineEnd),
+        pos,
+        pos,
+      );
+    }
+
+    // 空列表项：移除标记，退出列表（留在空行）。
+    if (_emptyBulletLine.hasMatch(line)) {
+      final newText = text.substring(0, lineStart) + text.substring(lineEnd);
+      return FormatResult(newText, lineStart, lineStart);
+    }
+
+    // 空引用行：移除标记，退出引用。
+    if (_emptyQuoteLine.hasMatch(line)) {
+      final newText = text.substring(0, lineStart) + text.substring(lineEnd);
+      return FormatResult(newText, lineStart, lineStart);
+    }
+
+    return null;
+  }
+
+  static FormatResult _indent(String text, int start, int end) {
+    return _mapLines(text, start, end, (line, _) {
+      if (line.isEmpty) return line;
+      return '  $line';
+    });
+  }
+
+  static FormatResult _outdent(String text, int start, int end) {
+    return _mapLines(text, start, end, (line, _) {
+      if (line.startsWith('\t')) return line.substring(1);
+      var n = 0;
+      while (n < 2 && n < line.length && line[n] == ' ') {
+        n++;
+      }
+      return line.substring(n);
+    });
+  }
+
+  static FormatResult _clearFormat(String text, int start, int end) {
+    final s = start.clamp(0, text.length);
+    final e = end.clamp(0, text.length);
+    final (from, to) = s == e ? _blockRange(text, s, e) : (s, e);
+    var cleared = text.substring(from, to);
+    var previous = '';
+    while (previous != cleared) {
+      previous = cleared;
+      for (final re in _inlineRemovable) {
+        cleared = cleared.replaceAllMapped(re, (m) => m.group(1)!);
+      }
+    }
+    final newText = text.substring(0, from) + cleared + text.substring(to);
+    return FormatResult(newText, from, from + cleared.length);
+  }
+
+  /// 任务项行：行首（可含缩进）`- [ ]` / `- [x]`，其后为任务文本（§10.1）。
+  static final RegExp _taskLine =
+      RegExp(r'^([ \t]*[-*+][ \t]+)\[([ xX])\](.*)$');
+
+  /// 空列表项行：仅含标记、无文本（供回车退出列表，§11.2）。
+  static final RegExp _emptyBulletLine = RegExp(r'^[ \t]*[-*+][ \t]+$');
+
+  /// 空引用行：仅含 `>`、无文本（供回车退出引用，§11.2）。
+  static final RegExp _emptyQuoteLine = RegExp(r'^[ \t]*>[ \t]?$');
+
+  /// 行首空白（用于任务续行时保持缩进）。
+  static final RegExp _leadingWhitespace = RegExp(r'^[ \t]*');
+
+  /// `简化格式` 可移除的行内标记对（长标记先行，避免误伤内部单字符）。
+  static final List<RegExp> _inlineRemovable = [
+    RegExp(r'\*\*(.+?)\*\*', dotAll: true),
+    RegExp(r'__(.+?)__', dotAll: true),
+    RegExp(r'~~(.+?)~~', dotAll: true),
+    RegExp(r'==(.+?)==', dotAll: true),
+    RegExp(r'`(.+?)`', dotAll: true),
+    RegExp(r'\*(.+?)\*', dotAll: true),
+    RegExp(r'_(.+)_', dotAll: true),
+  ];
 
   /// 对选区覆盖的整行区间逐行应用 [transform]，返回整体重写后的结果。
   static FormatResult _mapLines(

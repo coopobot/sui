@@ -2,6 +2,9 @@
 ///
 /// 覆盖：工具栏指令 → Markdown 往返与幂等切换、未触碰不透传改写、
 /// 粘贴转义与富文本降级、图片尺寸的插入 / 解析容错 / 写回往返。
+/// M5 补充：快捷键 ↔ 工具栏指令同源（`ShortcutMappingEquivalence`）、
+/// 任务清单勾选往返（`TaskListToggleRoundTrip`）、高亮与删除线互不混淆
+/// （`HighlightParseRoundTrip`）、块级呈现单元空块交互（`BlockUnitBehavior`）。
 library;
 
 import 'package:note_core/note_core.dart';
@@ -250,4 +253,172 @@ void main() {
       expect(out, '![a](sui://x){width=320}');
     });
   });
+
+  group('ShortcutMappingEquivalence（快捷键 ↔ 工具栏指令同源，产出完全一致）', () {
+    // §9 的每个快捷键都等价于 §3 的一个 FormatCommand：同一实现、同一产出。
+    // 绑定在 UI 层；此处校验「指令 → 确定 Markdown」及行内指令的幂等切换。
+    final cases = <FormatCommand, (String, int, int, String)>{
+      FormatCommand.bold: ('x', 0, 1, '**x**'),
+      FormatCommand.italic: ('x', 0, 1, '*x*'),
+      FormatCommand.strikethrough: ('x', 0, 1, '~~x~~'),
+      FormatCommand.highlight: ('x', 0, 1, '==x=='),
+      FormatCommand.taskList: ('x', 0, 1, '- [ ] x'),
+      FormatCommand.bulletList: ('x', 0, 1, '- x'),
+      FormatCommand.orderedList: ('x', 0, 1, '1. x'),
+      FormatCommand.blockquote: ('x', 0, 1, '> x'),
+      FormatCommand.codeBlock: ('x', 0, 1, '```\nx\n```'),
+      FormatCommand.heading1: ('x', 0, 0, '# x'),
+      FormatCommand.heading2: ('x', 0, 0, '## x'),
+      FormatCommand.heading3: ('x', 0, 0, '### x'),
+      FormatCommand.link: ('x', 0, 1, '[x](url)'),
+      FormatCommand.divider: ('p', 0, 0, '---\np'),
+      FormatCommand.indent: ('x', 0, 1, '  x'),
+      FormatCommand.outdent: ('  x', 0, 3, 'x'),
+    };
+
+    test('每个指令产出确定的 Markdown（同源保证等价）', () {
+      cases.forEach((command, c) {
+        final (text, s, e, expected) = c;
+        expect(EditorFormat.apply(command, text, s, e).text, expected,
+            reason: '$command');
+      });
+    });
+
+    test('行内指令二次触发取消（幂等切换）', () {
+      for (final command in [
+        FormatCommand.bold,
+        FormatCommand.italic,
+        FormatCommand.strikethrough,
+        FormatCommand.highlight,
+      ]) {
+        final r1 = EditorFormat.apply(command, 'x', 0, 1);
+        final r2 = EditorFormat.apply(
+            command, r1.text, r1.selectionStart, r1.selectionEnd);
+        expect(r2.text, 'x', reason: '$command 应可取消');
+      }
+    });
+  });
+
+  group('TaskListToggleRoundTrip（勾选框切换回写、再解析一致）', () {
+    test('- [ ] ↔ - [x] 往返且只改方括号内一个字符', () {
+      const src = '前文\n- [ ] 买牛奶 后文\n尾行';
+      final r1 = EditorFormat.toggleTaskChecked(src, src.indexOf('['))!;
+      expect(r1.text, '前文\n- [x] 买牛奶 后文\n尾行');
+      expect(_diffCount(src, r1.text), 1, reason: '仅方括号内一个字符变化');
+
+      final r2 = EditorFormat.toggleTaskChecked(r1.text, r1.text.indexOf('['))!;
+      expect(r2.text, src, reason: '再点应还原');
+    });
+
+    test('缩进 / 其它符号（* +）的任务项同样支持', () {
+      final r1 = EditorFormat.toggleTaskChecked('  * [x] done', 3)!;
+      expect(r1.text, '  * [ ] done');
+      final r2 = EditorFormat.toggleTaskChecked('+ [ ] t', 2)!;
+      expect(r2.text, '+ [x] t');
+    });
+
+    test('非任务项行返回 null（按普通正文处理，不误改）', () {
+      expect(EditorFormat.toggleTaskChecked('普通段落', 0), isNull);
+      expect(EditorFormat.toggleTaskChecked('- 普通列表项', 2), isNull);
+    });
+
+    test('taskList 指令：普通行变任务项，再触发取消勾选', () {
+      final r1 = EditorFormat.apply(FormatCommand.taskList, '任务', 0, 2);
+      expect(r1.text, '- [ ] 任务');
+      final r2 = EditorFormat.apply(
+          FormatCommand.taskList, r1.text, 0, r1.text.length);
+      expect(r2.text, '- [x] 任务');
+    });
+  });
+
+  group('HighlightParseRoundTrip（高亮 ==…== 与删除线互不混淆）', () {
+    test('高亮包裹与取消', () {
+      final r1 = EditorFormat.apply(FormatCommand.highlight, '重点', 0, 2);
+      expect(r1.text, '==重点==');
+      final r2 = EditorFormat.apply(
+          FormatCommand.highlight, r1.text, r1.selectionStart, r1.selectionEnd);
+      expect(r2.text, '重点');
+    });
+
+    test('高亮与删除线标记不同、互不混淆', () {
+      expect(EditorFormat.apply(FormatCommand.highlight, 'a', 0, 1).text,
+          '==a==');
+      expect(EditorFormat.apply(FormatCommand.strikethrough, 'a', 0, 1).text,
+          '~~a~~');
+      final r = EditorFormat.apply(FormatCommand.highlight, '~~a~~', 2, 3);
+      expect(r.text, '~~==a==~~', reason: '高亮不吞掉既有删除线标记');
+    });
+
+    test('clearFormat 移除高亮，但不识别语法原样透传', () {
+      expect(
+          EditorFormat.apply(FormatCommand.clearFormat, 'a ==b== c', 0, 9).text,
+          'a b c');
+      expect(
+          EditorFormat.apply(FormatCommand.clearFormat, 'a =b= c', 0, 7).text,
+          'a =b= c',
+          reason: '单个 = 非高亮语法，应逐字透传');
+    });
+
+    test('未识别语法在施加其它指令时原样保留', () {
+      const src = '| a | b |\n脚注[^1] ==重点==';
+      final r = EditorFormat.apply(FormatCommand.bold, src, 0, 0);
+      expect(r.text, '****$src', reason: '仅在光标处插入标记对，其余逐字不变');
+    });
+  });
+
+  group('BlockUnitBehavior（块级呈现单元空块交互，§11.2 / AC-92）', () {
+    test('空列表项回车退出列表（移除标记，留在空行）', () {
+      final r = EditorFormat.blockNewline('- ', 2)!;
+      expect(r.text, '');
+      expect(r.selectionStart, 0);
+
+      final mid = EditorFormat.blockNewline('前文\n- \n后文', 5)!;
+      expect(mid.text, '前文\n\n后文');
+      expect(mid.selectionStart, 3, reason: '光标回到空行行首');
+
+      expect(EditorFormat.blockNewline('* ', 2)!.text, '');
+      expect(EditorFormat.blockNewline('+ ', 2)!.text, '');
+    });
+
+    test('任务项回车续行（新建未勾选任务，空 / 含文本均可）', () {
+      final r = EditorFormat.blockNewline('- [ ] 买牛奶', 9)!;
+      expect(r.text, '- [ ] 买牛奶\n- [ ] ');
+      expect(r.selectionStart, r.text.length);
+
+      final empty = EditorFormat.blockNewline('- [x]', 5)!;
+      expect(empty.text, '- [x]\n- [ ] ');
+    });
+
+    test('缩进任务项续行保持缩进', () {
+      final r = EditorFormat.blockNewline('  - [ ] t', 9)!;
+      expect(r.text, '  - [ ] t\n  - [ ] ');
+    });
+
+    test('空引用行回车退出引用（移除标记）', () {
+      expect(EditorFormat.blockNewline('> ', 2)!.text, '');
+      expect(EditorFormat.blockNewline('>', 1)!.text, '');
+    });
+
+    test('行中 / 普通段落 / 非空列表项回车交由默认行为（返回 null）', () {
+      expect(EditorFormat.blockNewline('- abc', 2), isNull, reason: '行中不上抛');
+      expect(EditorFormat.blockNewline('普通段落', 4), isNull);
+      expect(EditorFormat.blockNewline('- 有内容的列表项', 9), isNull);
+    });
+
+    test('空块交互不产生多余保存语义（仅改标记，其余逐字不动）', () {
+      const src = '- \n后文';
+      final r = EditorFormat.blockNewline(src, 2)!;
+      expect(r.text, '\n后文', reason: '仅移除当前行标记');
+    });
+  });
+}
+
+/// 统计两个等长字符串在同一位置的差异字符数（不等长返回 -1）。
+int _diffCount(String a, String b) {
+  if (a.length != b.length) return -1;
+  var n = 0;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) n++;
+  }
+  return n;
 }

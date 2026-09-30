@@ -7,6 +7,31 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-30
+
+M5 里程碑：编辑器交互与呈现增强。
+
+### 新增
+
+- **编辑快捷键（FR-30）** — 格式态新增与工具栏**同源**的编辑快捷键：加粗 `Ctrl+B`、斜体
+  `Ctrl+I`、删除线 `Ctrl+T`、高亮 `Ctrl+Shift+H`、任务项 `Ctrl+Shift+C`、无序 / 有序列表
+  `Ctrl+Shift+W` / `Ctrl+Shift+O`、引用 `Ctrl+Shift+Q`、代码块 `Ctrl+Shift+K`、分隔线
+  `Ctrl+Shift+-`、链接 `Ctrl+K`、标题 1/2/3 `Ctrl+Alt+1/2/3`、缩进 / 取消缩进 `Ctrl+M` /
+  `Ctrl+Shift+M`、清除格式 `Ctrl+Space`；撤销 / 重做沿用原生栈。所有快捷键命中**同一**格式化
+  命令实现，保证与工具栏行为一致（BR-30.4）。
+- **任务列表勾选框（FR-31）** — 格式态把 GFM 任务项 `- [ ]` / `- [x]` 渲染为可点选勾选框，
+  点选仅改写方括号内字符（逐字符回写），正本其余字节不变（BR-31.2）。
+- **行内高亮（FR-31）** — `==文字==` 在**格式态与预览态**均渲染为高亮底色
+  （`tertiaryContainer`），源文本原样保留（BR-31.5）。
+- **聚焦式呈现（FR-32）** — 光标失焦时淡隐标记、聚焦时展开；标题 / 列表 / 引用 / 代码 / 分隔线
+  按块级呈现单元组织，空块回车退出；纯呈现层能力，正本字节不变（BR-32.1）。
+
+### 测试
+
+- 服务端 18/18、note_core 113/113、flutter_app 27/27（新增快捷键映射同源、勾选框与高亮
+  逐字节往返、块级行为单测，以及编辑器增强 widget 测试与端到端「打开不编辑」跨三态逐字节
+  保真用例）。
+
 ## [0.5.0] - 2026-09-30
 
 M4 里程碑：单用户服务化与安全加固。
@@ -119,7 +144,8 @@ M1 里程碑：笔记本分组与标签的云端同步。
 - 编辑为源码 / 预览双轨，富文本 WYSIWYG 未实现。
 - 鉴权为演示级实现，公网部署前需加固（见 [SECURITY.md](SECURITY.md)）。
 
-[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.5.0...HEAD
+[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.6.0...HEAD
+[0.6.0]: https://gitee.com/evangubo/sui/releases/tag/v0.6.0
 [0.5.0]: https://gitee.com/evangubo/sui/releases/tag/v0.5.0
 [0.3.0]: https://gitee.com/evangubo/sui/releases/tag/v0.3.0
 [0.2.0]: https://gitee.com/evangubo/sui/releases/tag/v0.2.0

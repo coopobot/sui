@@ -13,6 +13,9 @@ dependencies:
   note_core:
     path: ../note_core
   flutter_markdown: ^0.7.0
+  # 预览态 `==高亮==` 需要自定义行内语法，直接依赖 markdown 的子包类型
+  # （InlineSyntax / Element），与 flutter_markdown 所用版本保持一致。
+  markdown: ^7.1.1
   provider: ^6.1.0
   intl: ^0.19.0
   path: ^1.9.0

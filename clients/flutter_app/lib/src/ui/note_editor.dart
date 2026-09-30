@@ -46,6 +46,9 @@ class _NoteEditorState extends State<NoteEditor> {
     super.initState();
     // 格式模式：把 `![alt](sui://<sha256>){尺寸}` 渲染为图片呈现单元（FR-27）。
     _content.formatImageBuilder = _buildFormatImage;
+    // 格式模式：把任务项 `- [ ]` / `- [x]` 的勾选框渲染为可点选复选框（§10.1）。
+    _content.formatTaskCheckboxBuilder = _buildTaskCheckbox;
+    _content.onToggleTask = _toggleTask;
   }
 
   @override
@@ -153,6 +156,7 @@ class _NoteEditorState extends State<NoteEditor> {
               '删除线',
               FormatCommand.strikethrough,
             ),
+            _fmtIcon(Icons.format_color_fill, '高亮', FormatCommand.highlight),
             const _ToolbarDivider(),
             _fmtIcon(Icons.looks_one_outlined, '标题 1', FormatCommand.heading1),
             _fmtIcon(Icons.looks_two_outlined, '标题 2', FormatCommand.heading2),
@@ -168,6 +172,19 @@ class _NoteEditorState extends State<NoteEditor> {
               '有序列表',
               FormatCommand.orderedList,
             ),
+            _fmtIcon(Icons.check_box_outlined, '勾选框', FormatCommand.taskList),
+            const _ToolbarDivider(),
+            _fmtIcon(
+              Icons.format_indent_increase,
+              '缩进',
+              FormatCommand.indent,
+            ),
+            _fmtIcon(
+              Icons.format_indent_decrease,
+              '反缩进',
+              FormatCommand.outdent,
+            ),
+            const _ToolbarDivider(),
             _fmtIcon(Icons.format_quote, '引用', FormatCommand.blockquote),
             _fmtIcon(Icons.data_object, '代码块', FormatCommand.codeBlock),
             const _ToolbarDivider(),
@@ -178,6 +195,8 @@ class _NoteEditorState extends State<NoteEditor> {
               onPressed: _pickAndAttach,
             ),
             _fmtIcon(Icons.horizontal_rule, '分割线', FormatCommand.divider),
+            const _ToolbarDivider(),
+            _fmtIcon(Icons.format_clear, '简化格式', FormatCommand.clearFormat),
             const _ToolbarDivider(),
             // 撤销 / 重做：与正文输入共用同一个撤销栈，故按钮可用性随其变化重绘。
             ListenableBuilder(
@@ -224,6 +243,96 @@ class _NoteEditorState extends State<NoteEditor> {
     final start = sel.isValid ? sel.start : value.text.length;
     final end = sel.isValid ? sel.end : value.text.length;
     _writeBack(EditorFormat.apply(command, value.text, start, end));
+  }
+
+  /// 格式模式下把任务项勾选框渲染为可点选复选框；点选即原地切换并回写正本。
+  Widget _buildTaskCheckbox(
+    BuildContext context, {
+    required bool checked,
+    required VoidCallback onToggle,
+  }) {
+    return _TaskCheckbox(checked: checked, onToggle: onToggle);
+  }
+
+  /// 切换某任务项所在行的勾选态，仅改方括号内一个字符（BR-31.2）。
+  void _toggleTask(int lineStart) {
+    final result = EditorFormat.toggleTaskChecked(_content.text, lineStart);
+    if (result == null) return;
+    _writeBack(result);
+  }
+
+  /// 格式模式下回车先经「空块交互」处理（§11.2 / BR-32.4）：空列表项退出列表、
+  /// 任务项续行、空引用行退出引用。命中则原地改写正本并返回 true，未命中返回
+  /// false，交由默认换行。仅在格式模式 + 折叠光标时生效，保证两态内容一致（AC-92）。
+  bool _handleBlockNewline() {
+    if (_mode != EditorMode.formatted) return false;
+    final sel = _content.value.selection;
+    if (!sel.isValid || !sel.isCollapsed) return false;
+    final result = EditorFormat.blockNewline(_content.text, sel.extentOffset);
+    if (result == null) return false;
+    _writeBack(result);
+    return true;
+  }
+
+  /// 快捷键映射（§9）：与工具栏指令**同源**，仅改写正本、不产生新保存语义。
+  ///
+  /// 只在「格式模式」下挂载，且位于正文编辑区子树内，故天然满足「正文编辑区聚焦 +
+  /// 格式模式」的作用域（BR-30.2 / BR-30.5）。未列出的键（如撤销 / 重做）继续冒泡到
+  /// EditableText 的默认文本编辑快捷键。对已应用格式再次触发即取消 / 降级（§9）。
+  static const Map<ShortcutActivator, Intent> _formatShortcuts = {
+    SingleActivator(LogicalKeyboardKey.keyB, control: true):
+        _FormatIntent(FormatCommand.bold),
+    SingleActivator(LogicalKeyboardKey.keyI, control: true):
+        _FormatIntent(FormatCommand.italic),
+    SingleActivator(LogicalKeyboardKey.keyT, control: true):
+        _FormatIntent(FormatCommand.strikethrough),
+    SingleActivator(LogicalKeyboardKey.keyH, control: true, shift: true):
+        _FormatIntent(FormatCommand.highlight),
+    SingleActivator(LogicalKeyboardKey.keyC, control: true, shift: true):
+        _FormatIntent(FormatCommand.taskList),
+    SingleActivator(LogicalKeyboardKey.keyW, control: true, shift: true):
+        _FormatIntent(FormatCommand.bulletList),
+    SingleActivator(LogicalKeyboardKey.keyO, control: true, shift: true):
+        _FormatIntent(FormatCommand.orderedList),
+    SingleActivator(LogicalKeyboardKey.keyQ, control: true, shift: true):
+        _FormatIntent(FormatCommand.blockquote),
+    SingleActivator(LogicalKeyboardKey.keyK, control: true, shift: true):
+        _FormatIntent(FormatCommand.codeBlock),
+    SingleActivator(LogicalKeyboardKey.minus, control: true, shift: true):
+        _FormatIntent(FormatCommand.divider),
+    SingleActivator(LogicalKeyboardKey.keyK, control: true):
+        _FormatIntent(FormatCommand.link),
+    SingleActivator(LogicalKeyboardKey.digit1, control: true, alt: true):
+        _FormatIntent(FormatCommand.heading1),
+    SingleActivator(LogicalKeyboardKey.digit2, control: true, alt: true):
+        _FormatIntent(FormatCommand.heading2),
+    SingleActivator(LogicalKeyboardKey.digit3, control: true, alt: true):
+        _FormatIntent(FormatCommand.heading3),
+    SingleActivator(LogicalKeyboardKey.keyM, control: true):
+        _FormatIntent(FormatCommand.indent),
+    SingleActivator(LogicalKeyboardKey.keyM, control: true, shift: true):
+        _FormatIntent(FormatCommand.outdent),
+    SingleActivator(LogicalKeyboardKey.space, control: true):
+        _FormatIntent(FormatCommand.clearFormat),
+  };
+
+  /// 快捷键动作：统一落到 [_applyCommand]，保证与工具栏「同源同效」（BR-30.4）。
+  Map<Type, Action<Intent>> _formatActions() => {
+        _FormatIntent: CallbackAction<_FormatIntent>(
+          onInvoke: (intent) {
+            _applyCommand(intent.command);
+            return null;
+          },
+        ),
+      };
+
+  /// 仅在格式模式下把编辑区包进 [Shortcuts] / [Actions]；其余模式直连（BR-30.5）。
+  Widget _wrapShortcuts(Widget child) {
+    if (_mode != EditorMode.formatted) return child;
+    return Shortcuts(
+      shortcuts: _formatShortcuts,
+      child: Actions(actions: _formatActions(), child: child),
+    );
   }
 
   /// 把指令产物写回正文控制器并恢复选区，随后即时保存。
@@ -463,13 +572,17 @@ class _NoteEditorState extends State<NoteEditor> {
         ],
         const Divider(height: 1),
         Expanded(
-          child: MarkdownEditor(
-            controller: _content,
-            mode: _mode,
-            onChanged: () => _save(),
-            imageBuilder: _buildImage,
-            undoController: _undoHistory,
-            focusNode: _contentFocus,
+          child: _wrapShortcuts(
+            MarkdownEditor(
+              controller: _content,
+              mode: _mode,
+              onChanged: () => _save(),
+              imageBuilder: _buildImage,
+              undoController: _undoHistory,
+              focusNode: _contentFocus,
+              onBlockNewline:
+                  _mode == EditorMode.formatted ? _handleBlockNewline : null,
+            ),
           ),
         ),
         if (_attachments.isNotEmpty) _buildAttachmentBar(context),
@@ -696,6 +809,40 @@ class _NoteEditorState extends State<NoteEditor> {
           ),
         ) ??
         false;
+  }
+}
+
+/// 携带 [FormatCommand] 的快捷键意图（§9）。
+///
+/// 与工具栏按钮落到同一套 [EditorFormat] 指令实现，确保「同源同效」（BR-30.4）。
+class _FormatIntent extends Intent {
+  const _FormatIntent(this.command);
+
+  final FormatCommand command;
+}
+
+/// 格式模式内联的任务勾选框：点按即切换 `[ ]` ↔ `[x]`（§10.1 / BR-31.2）。
+class _TaskCheckbox extends StatelessWidget {
+  const _TaskCheckbox({required this.checked, required this.onToggle});
+
+  final bool checked;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onToggle,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+        child: Icon(
+          checked ? Icons.check_box : Icons.check_box_outline_blank,
+          size: 18,
+          color: checked ? scheme.primary : scheme.outline,
+        ),
+      ),
+    );
   }
 }
 

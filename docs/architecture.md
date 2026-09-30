@@ -151,9 +151,9 @@
 | `note_shell.dart` | 响应式三栏骨架（宽屏三栏 / 窄屏抽屉 + 导航堆栈） |
 | `notebook_tree.dart` | 笔记本树 + 收件箱 + 全部笔记 + 标签入口 + 归档 / 回收站入口（底部区域） |
 | `note_list.dart` | 笔记列表（置顶 / 剪藏标签 / 搜索过滤） |
-| `note_editor.dart` | 编辑器（标题 / 格式工具栏 / 标签 / 附件卡片 / 历史 / 导出 / 删除） |
-| `markdown_editing_controller.dart` | 「格式 / 源码 / 预览」三态编辑控制器（Markdown 为正本；格式态渲染行内样式与图片单元、支持选中调尺寸） |
-| `markdown_editor.dart` | 源码编辑 + 预览切换（`sizedImageBuilder` 渲染 `sui://` 附件图） |
+| `note_editor.dart` | 编辑器（标题 / 格式工具栏 + 编辑快捷键 / 勾选框点选 / 标签 / 附件卡片 / 历史 / 导出 / 删除） |
+| `markdown_editing_controller.dart` | 「格式 / 源码 / 预览」三态编辑控制器（Markdown 为正本；格式态渲染行内样式、图片单元、任务勾选框与高亮，支持选中调尺寸） |
+| `markdown_editor.dart` | 源码编辑 + 预览切换（`sizedImageBuilder` 渲染 `sui://` 附件图；预览态渲染任务列表与 `==高亮==`） |
 | `revision_panel.dart` | 版本历史侧栏 + 一键恢复 |
 | `app_controller.dart` | 全局状态与业务编排（附件增删 / 上传 / 缓存状态）；同步调度：编辑防抖 0.7s 推送、WS 通知拉取、30s 周期兜底 |
 | `sync_settings_dialog.dart` | 同步设置对话框（服务端地址 / Token / 设备 ID 的录入与校验） |
@@ -165,11 +165,14 @@
 
 ### 3.3 测试
 
-- note_core：97 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
-  缓存 LRU / 配置存取 / 落盘持久化，另含 e2e（首批注册后双端 push/pull→冲突合并→重发；
-  附件映射同步 + 字节按需下载）。
-- flutter_app：17 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
-  第二设备拉取）与 `editor_format_image_test.dart`（格式模式图片渲染与尺寸手柄）。
+- note_core：113 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+  缓存 LRU / 配置存取 / 落盘持久化 / 编辑器格式化（快捷键映射同源、勾选框往返、`==高亮==`
+  往返、块级行为），另含 e2e（首批注册后双端 push/pull→冲突合并→重发；附件映射同步 +
+  字节按需下载）。
+- flutter_app：27 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
+  第二设备拉取）、`editor_format_image_test.dart`（格式模式图片渲染与尺寸手柄）与
+  `editor_enhancement_test.dart` / `editor_enhancement_e2e_test.dart`（编辑器增强：编辑快捷键、
+  勾选框点选回写、`==高亮==` 三态渲染，以及「打开不编辑」跨三态逐字节保真）。
 - 运行前确保 `libsqlite3` 可用（见[快速开始 §2.3](getting-started.md#23-sqlite3-native-库drift-依赖仅原生平台)）。
 
 ## 4. 同步协议与冲突解决
@@ -376,7 +379,7 @@ sui/
     │   │   ├── repository/      # note_repository.dart
     │   │   ├── sync/            # sync_client.dart
     │   │   └── util/            # ids.dart / mime_kind.dart
-    │   └── test/                # 97 用例
+    │   └── test/                # 113 用例
     └── flutter_app/             # Flutter 客户端
         ├── lib/src/
         │   ├── app.dart / main.dart / bootstrap.dart
@@ -396,10 +399,11 @@ sui/
 - **服务端**：Go 构建通过、18/18 测试通过；`ping` / `register` / `login` / `push` / `pull` /
   `blobs`(HEAD/PUT/GET) / `revisions` / `clips` / `ws` 全部实测正常，鉴权 401、密码错误 401、
   已建号后重复注册 403、坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
-- **note_core**：97/97 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
-  缓存 LRU / 配置存取 / 落盘持久化 + e2e 同步等）。
-- **flutter_app**：17/17 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
-  第二台设备拉取到；以及格式模式图片渲染与尺寸手柄用例）。
+- **note_core**：113/113 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+  缓存 LRU / 配置存取 / 落盘持久化 / 编辑器格式化 + e2e 同步等）。
+- **flutter_app**：27/27 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
+  第二台设备拉取到；格式模式图片渲染与尺寸手柄；编辑器增强的快捷键 / 勾选框 / 高亮与
+  「打开不编辑」保真用例）。
 - **同步链路**：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
   同步触发点有三：编辑防抖 0.7s 推送、WS 通知拉取、**30s 周期兜底**（让「断网改动在恢复
   网络后自动补上」成立，而不必等用户再编辑一次）。
@@ -432,6 +436,12 @@ sui/
   真源，支持多设备登录。
 - **剪藏 id 幂等（M4）**：剪藏 id 改为 ≥128 bit 摘要（`clip-<32hex>`），新增
   `notes.source_url` 作幂等键 —— 同 URL 复用既有笔记（版本递增），异 URL 各自成篇。
+- **编辑器交互增强（M5）**：格式态新增与工具栏**同源**的编辑快捷键（加粗 / 斜体 / 删除线 /
+  高亮 / 任务项 / 列表 / 引用 / 代码块 / 分隔线 / 链接 / 标题 / 缩进 / 清除格式，撤销重做沿用
+  原生栈）；GFM 任务列表 `- [ ]` / `- [x]` 可点选勾选框（仅改写方括号内字符，逐字符回写）；
+  `==高亮==` 在格式态与预览态**均**渲染（`tertiaryContainer` 底色）；块级呈现单元（标题 / 列表 /
+  引用 / 代码 / 分隔线）与空块回车退出的聚焦式呈现。以上均为**呈现层**能力，正本 Markdown
+  字节不变（「打开 →（不编辑）→ 关闭」逐字节保真，BR-32.1 / AC-91 / AC-93）。
 
 ### 8.2 历史缺口（均已修复）
 
