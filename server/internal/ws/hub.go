@@ -28,8 +28,11 @@ func NewHub() *Hub {
 	}
 }
 
-// Handle 处理 WebSocket 升级与连接生命周期。
-func (h *Hub) Handle(w http.ResponseWriter, r *http.Request) {
+// Serve 处理 WebSocket 升级与连接生命周期。
+//
+// M4/BR-35.x：鉴权由上层（api.handleWS）在升级前完成，故进入 Serve 的连接均视为
+// 已鉴权，广播只发往此集合。
+func (h *Hub) Serve(w http.ResponseWriter, r *http.Request) {
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: []string{"*"}, // 允许跨域（鉴权由上层保证）
 	})

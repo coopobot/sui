@@ -10,7 +10,7 @@ import (
 	"sui/note-server/internal/sync"
 )
 
-// handleRegister 创建用户并返回 token（明文，供客户端 bootstrap 使用）。
+// handleRegister 首启建号并签发会话 token（单用户实例的注册网关）。
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
@@ -24,8 +24,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "username/password required"})
 		return
 	}
-	// 简化：不存储密码哈希，仅演示 token 发放。生产应做哈希。
-	token, err := s.store.CreateUser(req.Username, "plain:"+req.Password)
+	// 单用户服务（ADR-009 / BR-33.2）：实例已初始化即永久关闭自助注册。
+	initialized, err := s.store.HasAnyUser()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "internal error"})
+		return
+	}
+	if initialized {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "already-initialized"})
+		return
+	}
+	token, err := s.store.CreateUser(req.Username, req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "user exists"})
 		return
@@ -47,9 +56,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "username/password required"})
 		return
 	}
-	// 简化实现：验证密码（明文前缀存储），成功则生成新 token
-	// 生产环境应使用密码哈希 + 数据库查询
-	token, err := s.store.LoginUser(req.Username, "plain:"+req.Password)
+	// 校验 PBKDF2 密码哈希（M4/BR-36.1），成功则签发新会话 token。
+	token, err := s.store.LoginUser(req.Username, req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid credentials"})
 		return

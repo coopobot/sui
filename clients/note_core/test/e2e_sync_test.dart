@@ -16,6 +16,7 @@ void main() {
   late Process server;
   late String dataDir;
   late String serverBin;
+  late String token;
 
   setUpAll(() async {
     final repoRoot = Directory.current.parent.parent.path;
@@ -43,6 +44,23 @@ void main() {
       },
     );
     await _waitUntilReady(serverUrl);
+
+    // M4/BR-33.2：服务首次启动仅允许创建唯一账号，此后注册网关关闭。
+    // 因此在本组用例开头完成一次性注册，各用例复用同一账号的会话。
+    final client = Client();
+    try {
+      final regResp = await client.post(
+        Uri.parse('$serverUrl/api/v1/register'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'username': 'e2e', 'password': 'x'}),
+      );
+      if (regResp.statusCode != 200) {
+        fail('首启注册失败：${regResp.statusCode} ${regResp.body}');
+      }
+      token = (jsonDecode(regResp.body) as Map)['token'] as String;
+    } finally {
+      client.close();
+    }
   });
 
   tearDownAll(() async {
@@ -53,15 +71,8 @@ void main() {
     } catch (_) {}
   });
 
-  test('端到端：注册 + push + pull + 冲突合并 + 再次推送成功', () async {
+  test('端到端：push + pull + 冲突合并 + 再次推送成功', () async {
     final client = Client();
-    final regResp = await client.post(
-      Uri.parse('$serverUrl/api/v1/register'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'username': 'alice', 'password': 'x'}),
-    );
-    expect(regResp.statusCode, 200);
-    final token = (jsonDecode(regResp.body) as Map)['token'] as String;
 
     final dbA = AppDatabase.memory();
     final repoA = NoteRepository(dbA, deviceId: 'dev-a');
@@ -131,13 +142,6 @@ void main() {
 
   test('端到端：附件映射随笔记同步，字节按需下载', () async {
     final client = Client();
-    final regResp = await client.post(
-      Uri.parse('$serverUrl/api/v1/register'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'username': 'bob', 'password': 'x'}),
-    );
-    expect(regResp.statusCode, 200);
-    final token = (jsonDecode(regResp.body) as Map)['token'] as String;
 
     // 附件字节内容寻址：hash = sha256(bytes)
     final bytes = Uint8List.fromList(utf8.encode('附件字节内容 hello'));
@@ -216,13 +220,6 @@ void main() {
 
   test('端到端：新设备首拉完整分组树与标签并本地落库', () async {
     final client = Client();
-    final regResp = await client.post(
-      Uri.parse('$serverUrl/api/v1/register'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'username': 'carol', 'password': 'x'}),
-    );
-    expect(regResp.statusCode, 200);
-    final token = (jsonDecode(regResp.body) as Map)['token'] as String;
 
     // 设备 A：建两级分组 + 标签 + 归属分组的笔记，全部推送。
     final dbA = AppDatabase.memory();
@@ -291,13 +288,6 @@ void main() {
 
   test('端到端：归档状态同步；本地待推送草稿不被远端旧状态覆盖', () async {
     final client = Client();
-    final regResp = await client.post(
-      Uri.parse('$serverUrl/api/v1/register'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'username': 'dave', 'password': 'x'}),
-    );
-    expect(regResp.statusCode, 200);
-    final token = (jsonDecode(regResp.body) as Map)['token'] as String;
 
     final dbA = AppDatabase.memory();
     final repoA = NoteRepository(dbA, deviceId: 'dev-a');

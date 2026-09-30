@@ -7,10 +7,10 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
 | GET | `/healthz` | 否 | 健康检查 |
-| GET | `/api/v1/ping` | 否 | 心跳（返回 `{"ok":true}`） |
-| POST | `/api/v1/register` | 否 | 注册：`{"username","password"}` → `{"ok","token","username"}` |
+| GET | `/api/v1/ping` | 否 | 心跳（返回 `{"ok":true,"initialized":<bool>}`；`initialized` 表示是否已建号） |
+| POST | `/api/v1/register` | 否 | 首启注册（单用户）：`{"username","password"}` → `{"ok","token","username"}`；建号后返回 403 |
 | POST | `/api/v1/login` | 否 | 登录：`{"username","password"}` → `{"ok","token","username"}` |
-| GET | `/api/v1/ws` | 否* | WebSocket 变更通知（业务消息由客户端自行鉴权） |
+| GET | `/api/v1/ws?token=<token>` | ✅ | WebSocket 变更通知（`?token=` 或 `Bearer` 鉴权） |
 | POST | `/api/v1/sync/push` | ✅ | 推送批量变更（见下） |
 | GET | `/api/v1/sync/pull?since=<RFC3339>` | ✅ | 增量拉取变更 |
 | PUT | `/api/v1/blobs/{hash}` | ✅ | 上传附件字节 |
@@ -18,19 +18,22 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 | HEAD | `/api/v1/blobs/{hash}` | ✅ | 附件存在性 |
 | GET | `/api/v1/notes/{id}/revisions` | ✅ | 修订列表 |
 | GET | `/api/v1/notes/{id}/revisions/{version}` | ✅ | 修订详情 |
-| POST | `/api/v1/clips` | ✅ | 网页剪藏：`{"url","title","html"}` → 净化入库 |
+| POST | `/api/v1/clips` | ✅ | 网页剪藏：`{"url","title","html"}` → 净化入库（按 URL 幂等复用） |
 
-> \* `/api/v1/ws` 端点本身不校验 Token，业务消息的鉴权由客户端自行处理。
+> 本服务为**单用户**模式：仅允许创建唯一账号（首启注册后自助注册关闭，再次注册返回 403 `already-initialized`）。`/api/v1/ws` 端点须携带有效 Token（`?token=<token>` 或 `Authorization: Bearer`），未通过返回 401。
 
 ## 健康检查与心跳
 
 ```bash
 curl http://localhost:8080/healthz
-# → {"ok":true,"service":"sui-server","version":"0.1.0","time":"..."}
+# → {"ok":true,"service":"sui-server","version":"0.5.0","time":"...","initialized":false}
 
 curl http://localhost:8080/api/v1/ping
-# → {"ok":true,"service":"sui-server","version":"0.1.0","time":"...","msg":"pong"}
+# → {"ok":true,"service":"sui-server","version":"0.5.0","time":"...","msg":"pong","initialized":false}
 ```
+
+> `initialized` 表示服务端是否已存在账号（单用户模式：建号后自助注册关闭）。首启未建号时为
+> `false`，建号后为 `true`；`/healthz` 沿用同一响应壳，判定请以 `/api/v1/ping` 为准。
 
 ## 注册与登录
 
@@ -196,7 +199,7 @@ curl -X POST http://localhost:8080/api/v1/register \
 ## WebSocket 通知
 
 ```
-GET /api/v1/ws
+GET /api/v1/ws?token=<token>
 ```
 
 push / 剪藏成功后服务端广播 `{"type":"changed"}`；客户端收到后触发一次增量 pull。
@@ -206,7 +209,7 @@ push / 剪藏成功后服务端广播 `{"type":"changed"}`；客户端收到后�
 | 场景 | HTTP 状态 |
 |------|-----------|
 | 未携带 / 携带坏 Token | 401 |
-| 重复注册 | 409 |
+| 已建号后重复注册 | 403（`already-initialized`） |
 | 请求体格式错误 | 400 |
 | 资源不存在 | 404 |
 

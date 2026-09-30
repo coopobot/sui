@@ -725,8 +725,13 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 探测服务端：版本号 + 是否已完成首启建号（M4/BR-33.4）。
+  Future<({String version, bool initialized})> probeServer(String baseUrl) =>
+      _authClient().pingInfo(baseUrl);
+
   /// 探测服务端连通性，成功返回服务端版本号，失败抛异常（UI 捕获展示）。
-  Future<String> testConnection(String baseUrl) => _authClient().ping(baseUrl);
+  Future<String> testConnection(String baseUrl) async =>
+      (await probeServer(baseUrl)).version;
 
   /// 注册新账号并连接。成功返回 null，失败返回可展示的错误文案。
   Future<String?> registerAndConnect({
@@ -827,7 +832,11 @@ class AppController extends ChangeNotifier {
     final scheme = base.startsWith('https') ? 'wss' : 'ws';
     final host = base.replaceFirst(RegExp('^https?'), scheme);
     try {
-      final ch = WebSocketChannel.connect(Uri.parse('$host/api/v1/ws'));
+      // M4/BR-35.x：WS 端点须鉴权；token 走查询串（浏览器 WebSocket 握手
+      // 无法自定义 Authorization 头）。
+      final ch = WebSocketChannel.connect(Uri.parse(
+        '$host/api/v1/ws?token=${Uri.encodeQueryComponent(_config.token)}',
+      ));
       _ws = ch;
       _wsSub = ch.stream.listen(
         (_) => _onRemoteChange(),
@@ -848,6 +857,7 @@ class AppController extends ChangeNotifier {
     if (e is HttpException) {
       return switch (e.statusCode) {
         409 => '用户已存在，请改用「登录」',
+        403 => '该服务端已初始化（单用户实例），请改用「登录并连接」',
         401 => '用户名或密码错误',
         400 => '请求无效（用户名/密码不能为空）',
         _ => 'HTTP ${e.statusCode}: ${e.body}',

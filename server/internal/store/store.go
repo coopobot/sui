@@ -5,11 +5,14 @@
 package store
 
 import (
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -41,6 +44,7 @@ func (s *Store) migrate() error {
 			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
+			password_salt TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
@@ -57,6 +61,7 @@ func (s *Store) migrate() error {
 			is_deleted INTEGER NOT NULL DEFAULT 0, -- 墓碑
 			archived INTEGER NOT NULL DEFAULT 0,  -- 归档状态（FR-25）
 			source_device TEXT NOT NULL DEFAULT '', -- 最近一次修改的来源设备
+			source_url TEXT, -- 剪藏专用幂等键（普通笔记为 NULL，M4/BR-34.3）
 			updated_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS revisions (
@@ -135,6 +140,14 @@ func (s *Store) migrate() error {
 	if err := s.ensureColumn("notes", "archived", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// M4/BR-36.1：users 幂等补列 password_salt（每用户随机盐），老库不掉数据。
+	if err := s.ensureColumn("users", "password_salt", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// M4/BR-34.3：notes 幂等补列 source_url（剪藏专用幂等键，可空）。
+	if err := s.ensureColumn("notes", "source_url", "TEXT"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -185,8 +198,55 @@ func (s *Store) VerifyToken(token string) (bool, string) {
 	return true, username
 }
 
-// CreateUser 创建用户并签发首个会话 token。
-func (s *Store) CreateUser(username, passwordHash string) (token string, err error) {
+// passwordIterations 为 PBKDF2 迭代次数（M4/BR-36.1）。
+const passwordIterations = 100000
+
+// HashPassword 以 PBKDF2-HMAC-SHA256 + 每用户随机盐派生密码摘要（M4/BR-36.1）。
+// 返回十六进制编码的 salt 与 hash。
+func HashPassword(password string) (salt, hash string, err error) {
+	raw := make([]byte, 16)
+	if _, err = rand.Read(raw); err != nil {
+		return "", "", err
+	}
+	key, err := pbkdf2.Key(sha256.New, password, raw, passwordIterations, 32)
+	if err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(raw), hex.EncodeToString(key), nil
+}
+
+// verifyPassword 以常量时间比较校验密码（M4/BR-36.1）。
+func verifyPassword(password, saltHex, hashHex string) bool {
+	salt, err := hex.DecodeString(saltHex)
+	if err != nil {
+		return false
+	}
+	want, err := hex.DecodeString(hashHex)
+	if err != nil {
+		return false
+	}
+	got, err := pbkdf2.Key(sha256.New, password, salt, passwordIterations, len(want))
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+// HasAnyUser 报告实例是否已有用户（单用户实例注册网关判定，M4/BR-33.2）。
+func (s *Store) HasAnyUser() (bool, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM users`).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// CreateUser 创建用户并签发首个会话 token（密码以 PBKDF2 哈希存储）。
+func (s *Store) CreateUser(username, password string) (token string, err error) {
+	salt, hash, err := HashPassword(password)
+	if err != nil {
+		return "", err
+	}
 	tok, _ := NewToken()
 	ts := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.db.Begin()
@@ -195,8 +255,8 @@ func (s *Store) CreateUser(username, passwordHash string) (token string, err err
 	}
 	defer tx.Rollback()
 	if _, err = tx.Exec(
-		`INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)`,
-		tok[:16], username, passwordHash, ts,
+		`INSERT INTO users (id, username, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?, ?)`,
+		tok[:16], username, hash, salt, ts,
 	); err != nil {
 		return "", err
 	}
@@ -215,15 +275,26 @@ func (s *Store) CreateUser(username, passwordHash string) (token string, err err
 // LoginUser 验证用户名密码，成功则新增一个独立会话并返回新 token。
 //
 // 登录只追加会话行，不影响该用户其他已登录会话（多设备 / 多 profile 可同时在线）。
-func (s *Store) LoginUser(username, passwordHash string) (string, error) {
-	var storedHash string
+// M4/BR-36.2：若命中旧明文前缀实现（"plain:"），校验通过后顺手幂等升级为 PBKDF2 哈希。
+func (s *Store) LoginUser(username, password string) (string, error) {
+	var storedHash, salt string
 	err := s.db.QueryRow(
-		`SELECT password_hash FROM users WHERE username = ?`, username,
-	).Scan(&storedHash)
+		`SELECT password_hash, password_salt FROM users WHERE username = ?`, username,
+	).Scan(&storedHash, &salt)
 	if err != nil {
 		return "", errors.New("user not found")
 	}
-	if storedHash != passwordHash {
+	if strings.HasPrefix(storedHash, "plain:") {
+		if storedHash != "plain:"+password {
+			return "", errors.New("wrong password")
+		}
+		if newSalt, newHash, herr := HashPassword(password); herr == nil {
+			_, _ = s.db.Exec(
+				`UPDATE users SET password_hash = ?, password_salt = ? WHERE username = ?`,
+				newHash, newSalt, username,
+			)
+		}
+	} else if !verifyPassword(password, salt, storedHash) {
 		return "", errors.New("wrong password")
 	}
 	tok, _ := NewToken()
@@ -263,6 +334,7 @@ type NoteRow struct {
 	IsDeleted       bool
 	Archived        bool
 	SourceDevice    string
+	SourceURL       string
 	UpdatedAt       time.Time
 }
 
@@ -297,11 +369,12 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 func (s *Store) GetNote(id string) (*NoteRow, error) {
 	var r NoteRow
 	var del, arch int
+	var srcURL sql.NullString
 	var ts string
 	err := s.db.QueryRow(
-		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, updated_at
+		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, source_url, updated_at
 		 FROM notes WHERE id = ?`, id,
-	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &r.SourceDevice, &ts)
+	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &r.SourceDevice, &srcURL, &ts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -310,8 +383,39 @@ func (s *Store) GetNote(id string) (*NoteRow, error) {
 	}
 	r.IsDeleted = del != 0
 	r.Archived = arch != 0
+	r.SourceURL = srcURL.String
 	r.UpdatedAt = parseTime(ts)
 	return &r, nil
+}
+
+// GetNoteBySourceURL 按剪藏幂等键查既有笔记 id（M4/BR-34.3）；无命中返回 ""。
+func (s *Store) GetNoteBySourceURL(sourceURL string) (string, error) {
+	if sourceURL == "" {
+		return "", nil
+	}
+	var id string
+	err := s.db.QueryRow(
+		`SELECT id FROM notes WHERE source_url = ? LIMIT 1`, sourceURL,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// SetNoteSourceURL 为剪藏笔记登记幂等键；不覆盖已有的其它归属（M4/BR-34.3）。
+func (s *Store) SetNoteSourceURL(noteID, sourceURL string) error {
+	if sourceURL == "" {
+		return nil
+	}
+	_, err := s.db.Exec(
+		`UPDATE notes SET source_url = ? WHERE id = ? AND (source_url IS NULL OR source_url = '')`,
+		sourceURL, noteID,
+	)
+	return err
 }
 
 // UpsertNote 落库笔记（增量），同时记录一条修订。返回新版本号。

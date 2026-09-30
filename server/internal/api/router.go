@@ -3,6 +3,8 @@ package api
 
 import (
 	"net/http"
+	"os"
+	"strings"
 
 	"sui/note-server/internal/auth"
 	"sui/note-server/internal/blob"
@@ -37,12 +39,12 @@ func (s *Server) Hub() *ws.Hub { return s.hub }
 func (s *Server) Router() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealth)
-	mux.HandleFunc("GET /api/v1/ping", handlePing)
+	mux.HandleFunc("GET /api/v1/ping", s.handlePing)
 	mux.HandleFunc("POST /api/v1/register", s.handleRegister)
 	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
 
-	// WebSocket 端点（公开连接，实际业务消息由客户端自行鉴权）
-	mux.HandleFunc("GET /api/v1/ws", s.hub.Handle)
+	// WebSocket 端点（M4/BR-35.x：须鉴权，未通过 → 401）
+	mux.HandleFunc("GET /api/v1/ws", s.handleWS)
 
 	// 受保护路由挂载在同一 mux 下，交由 auth 中间件包裹。
 	root := NewRouter(s)
@@ -54,8 +56,41 @@ func (s *Server) Router() http.Handler {
 	mux.Handle("/api/v1/clips", authWrap)
 	mux.Handle("/api/v1/logout", authWrap)
 
-	// CORS 中间件包裹最外层
-	return cors.Middleware(nil, mux) // 空 origin 列表 = 开发模式全允许
+	// CORS 中间件包裹最外层（M4/BR-36.3：SUI_ALLOWED_ORIGINS 白名单，未配置时开发默认）
+	return cors.Middleware(allowedOrigins(), mux)
+}
+
+// allowedOrigins 解析 SUI_ALLOWED_ORIGINS（逗号分隔）；为空返回 nil（开发模式全允许）。
+func allowedOrigins() []string {
+	raw := strings.TrimSpace(os.Getenv("SUI_ALLOWED_ORIGINS"))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// handleWS 校验 WS 连接鉴权（?token= 或 Bearer），未通过 → 401（M4/BR-35.x）。
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	if token == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		return
+	}
+	if ok, _ := s.store.VerifyToken(token); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		return
+	}
+	s.hub.Serve(w, r)
 }
 
 // NewRouter 返回承载受保护 handler 的子路由（供鉴权中间件包裹）。

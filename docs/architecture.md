@@ -57,7 +57,7 @@
 | `auth` | `Bearer` Token 中间件 |
 | `clip` | 网页净化：Readability 启发式选主内容 + HTML→Markdown |
 | `ws` | WebSocket Hub：push/剪藏成功后广播 `{"type":"changed"}` |
-| `cors` | 跨域中间件（开发模式全允许） |
+| `cors` | 跨域中间件（`SUI_ALLOWED_ORIGINS` 白名单；未配置时开发模式全允许） |
 
 ### 2.2 数据模型（SQLite，服务端）
 
@@ -66,8 +66,9 @@
 
 | 表 | 用途 |
 |----|------|
-| `users` | 用户（id / username / password_hash / token / created_at） |
-| `notes` | 笔记元数据（id / title / content_markdown / notebook_id / version / is_deleted / archived / source_device / updated_at） |
+| `users` | 用户（id / username / password_hash / password_salt / created_at）。单用户模式至多一行 |
+| `sessions` | 会话令牌（token / username / created_at），多设备 / 多 profile 各持一行 |
+| `notes` | 笔记元数据（id / title / content_markdown / notebook_id / version / is_deleted / archived / source_device / source_url / updated_at）。`source_url` 为剪藏幂等键（普通笔记为 NULL） |
 | `revisions` | 修订历史（id / note_id / version / title / content_markdown / source_device / is_conflict / created_at） |
 | `blobs` | 附件字节登记（sha256 / size / refcount / created_at）。**refcount 唯一来源是 `attachments` 映射**：指向该 hash 的有效映射条数 |
 | `attachments` | 附件-笔记映射（id / note_id / filename / mime_kind / byte_size / sha256 / storage_ref / thumbnail_ref / embedded_pos / is_deleted / created_at / updated_at） |
@@ -76,7 +77,7 @@
 | `note_tags` | 笔记-标签多对多关联（note_id / tag_id） |
 
 关键索引：`idx_notes_updated`、`idx_revisions_note`、`idx_revisions_note_ver`、`idx_notes_isdel`、
-`idx_attachments_note`、`idx_notebooks_updated`、`idx_tags_updated`、`idx_note_tags_note`、`idx_note_tags_tag`。
+`idx_attachments_note`、`idx_notebooks_updated`、`idx_tags_updated`、`idx_note_tags_note`、`idx_note_tags_tag`、`idx_sessions_user`。
 
 > **同步净荷（M1 起，M2 增补）**：push 请求体在 `items`（笔记）之外新增 `notebooks` / `tags` 两个数组，
 > 笔记条目新增 `notebookId`（指针语义：缺省=不变、`""`=移入收件箱、有值=归属该笔记本）与
@@ -86,7 +87,7 @@
 > M2 起笔记条目增带 `archived`（归档状态，随 push/pull 往返、跨端一致）。
 > 旧表清单中的 `outbox` 为设计预留描述，代码中并未建表，已从本表移除。
 
-### 2.3 测试清单（`internal/api/handlers_test.go`）
+### 2.3 测试清单（`internal/api/handlers_test.go` + `internal/api/m4_test.go`）
 
 | 测试 | 覆盖 |
 |------|------|
@@ -101,6 +102,11 @@
 | `TestSyncNotebookTagPayload` | 笔记本 / 标签净荷往返 + `notebookId` / `tagIds` + 冲突回传 `serverVersion` |
 | `TestSyncArchivedFlag` | 归档状态 `archived` 净荷往返 |
 | `TestSyncNotebookCreateRename` | 笔记本新建 / 重命名变更上行与 pull 收敛 |
+| `TestPingInitialized` | `initialized` 心跳（首启 `false` → 建号后 `true`） |
+| `TestRegisterGatewayClosed` | 首启后注册网关关闭（403 `already-initialized`） |
+| `TestLoginRejectsWrongPassword` | 密码哈希校验（错误密码 401，正确密码可登录） |
+| `TestWsAuthRequired` | WS 端点鉴权（无 token 拒绝 / 有效 token 升级） |
+| `TestClipIDUniqueness` | 剪藏 id ≥128 bit + 同 URL 幂等复用 / 异 URL 区分 |
 
 ## 3. 客户端
 
@@ -118,7 +124,7 @@
 | `mimeKindFor()` | 由扩展名推断附件大类（卡片图标用） |
 | `DeviceId` | 设备标识（冲突合并 / 来源标记用） |
 
-**本机数据表（drift，`schemaVersion = 5`）**：定义见
+**本机数据表（drift，`schemaVersion = 6`）**：定义见
 [`clients/note_core/lib/src/db/app_database.dart`](../clients/note_core/lib/src/db/app_database.dart)。
 
 | 表 | 用途 | 随同步上行 |
@@ -159,10 +165,10 @@
 
 ### 3.3 测试
 
-- note_core：90 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
-  缓存 LRU / 配置存取 / 落盘持久化，另含 2 个 e2e（注册→双端 push/pull→冲突合并→重发；
+- note_core：97 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+  缓存 LRU / 配置存取 / 落盘持久化，另含 e2e（首批注册后双端 push/pull→冲突合并→重发；
   附件映射同步 + 字节按需下载）。
-- flutter_app：10 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
+- flutter_app：17 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
   第二设备拉取）与 `editor_format_image_test.dart`（格式模式图片渲染与尺寸手柄）。
 - 运行前确保 `libsqlite3` 可用（见[快速开始 §2.3](getting-started.md#23-sqlite3-native-库drift-依赖仅原生平台)）。
 
@@ -202,8 +208,8 @@
 
 ### 4.4 WebSocket 通知
 
-- 端点：`GET /api/v1/ws`。
-- push / 剪藏成功后广播 `{"type":"changed"}`。
+- 端点：`GET /api/v1/ws?token=<token>`（亦接受 `Authorization: Bearer`）；鉴权未通过 → 401。
+- push / 剪藏成功后向已鉴权连接广播 `{"type":"changed"}`。
 - 客户端收到后触发一次增量 pull；WS 不可用仅静默降级，手动同步与防抖推送仍可用。
 
 ## 5. 附件存储策略（客户端侧）
@@ -370,7 +376,7 @@ sui/
     │   │   ├── repository/      # note_repository.dart
     │   │   ├── sync/            # sync_client.dart
     │   │   └── util/            # ids.dart / mime_kind.dart
-    │   └── test/                # 51 用例
+    │   └── test/                # 97 用例
     └── flutter_app/             # Flutter 客户端
         ├── lib/src/
         │   ├── app.dart / main.dart / bootstrap.dart
@@ -387,12 +393,12 @@ sui/
 
 ### 8.1 已落地并验证
 
-- **服务端**：Go 构建通过、13/13 测试通过；`ping` / `register` / `login` / `push` / `pull` /
-  `blobs`(HEAD/PUT/GET) / `revisions` / `clips` 全部实测正常，鉴权 401、重复注册 409、
-  坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
-- **note_core**：90/90 测试通过（落盘持久化 2 + 配置存取 9 + 附件映射 3 + 引用计数 4 +
-  附件上传 3 + 笔记本/标签同步 6 + 格式化编辑与图片尺寸 + e2e 同步 3 等）。
-- **flutter_app**：10/10 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
+- **服务端**：Go 构建通过、18/18 测试通过；`ping` / `register` / `login` / `push` / `pull` /
+  `blobs`(HEAD/PUT/GET) / `revisions` / `clips` / `ws` 全部实测正常，鉴权 401、密码错误 401、
+  已建号后重复注册 403、坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
+- **note_core**：97/97 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+  缓存 LRU / 配置存取 / 落盘持久化 + e2e 同步等）。
+- **flutter_app**：17/17 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
   第二台设备拉取到；以及格式模式图片渲染与尺寸手柄用例）。
 - **同步链路**：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
   同步触发点有三：编辑防抖 0.7s 推送、WS 通知拉取、**30s 周期兜底**（让「断网改动在恢复
@@ -418,6 +424,14 @@ sui/
 - **代码质量**：`flutter analyze` 两个包 0 问题。
 - **测试稳定性**：两个 e2e 起服务端由固定 `sleep 1.5s` 改为轮询 `/healthz` 探活，
   消除机器繁忙时的「连接被拒」假失败。
+- **单用户服务化（M4）**：服务实例即单用户笔记库；首启建号后关闭自助注册（403
+  `already-initialized`），`/api/v1/ping` 回带 `initialized` 供客户端判定首启状态。
+- **安全加固（M4）**：密码以 PBKDF2-HMAC-SHA256（100000 次迭代）+ 每用户随机盐存储，
+  登录常量时间比对，老库明文密码首登自动升级为哈希；WS 端点须 Token 鉴权；CORS 支持
+  `SUI_ALLOWED_ORIGINS` 白名单（未配置时开发模式全允许）；会话以 `sessions` 表为唯一
+  真源，支持多设备登录。
+- **剪藏 id 幂等（M4）**：剪藏 id 改为 ≥128 bit 摘要（`clip-<32hex>`），新增
+  `notes.source_url` 作幂等键 —— 同 URL 复用既有笔记（版本递增），异 URL 各自成篇。
 
 ### 8.2 历史缺口（均已修复）
 
@@ -432,6 +446,8 @@ sui/
 | 7 | README / 开发者文档的运行命令与实际不符 | ✅ 已修复 | 按文档操作会失败 |
 | 8 | 文档「核心特性」全 ✅ 但部分未在客户端生效 | ✅ 已修复 | 认知偏差 |
 | 9 | 笔记本分组 / 标签 / 笔记-标签关联无云端存储与同步 | ✅ 已修复 | 换设备后分组树与标签不跟随；M1 补齐服务端三表 + 协议净荷 |
+| 10 | WebSocket 端点无需鉴权，任意客户端均可订阅变更广播 | ✅ 已修复 | 未授权方可感知笔记变更；M4 起 WS 须 Token 鉴权 |
+| 11 | 剪藏笔记 id 与手写笔记共用 64 bit 摘要命名空间、可能碰撞 | ✅ 已修复 | 剪藏可能覆盖同名笔记；M4 起改为 ≥128 bit 摘要 + `source_url` 幂等 |
 
 ### 8.3 未实现的设计项
 

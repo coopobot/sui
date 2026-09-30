@@ -41,6 +41,9 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
   bool _messageIsError = false;
   int _usedBytes = 0;
 
+  /// 服务端是否已完成首启建号（null = 尚未探明）。true 时禁用「注册并连接」。
+  bool? _serverInitialized;
+
   String _defaultBaseUrl() {
     final configured = _c.syncConfig.baseUrl;
     // 默认走 localhost：WSL2 只把 localhost 转发到宿主 Windows，127.0.0.1
@@ -52,6 +55,21 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
   void initState() {
     super.initState();
     _loadUsage();
+    _probeInitialized();
+  }
+
+  /// 探测服务端注册状态（M4/BR-33.4）：已初始化则禁用「注册并连接」。
+  ///
+  /// 尽力而为：探测失败不阻塞 UI，保持「未知」（按钮可点），
+  /// 真实错误留给用户实际动作时的反馈。
+  Future<void> _probeInitialized() async {
+    try {
+      final info = await _c.probeServer(_baseUrl.text);
+      if (!mounted) return;
+      setState(() => _serverInitialized = info.initialized);
+    } on Exception {
+      // 忽略：服务端不可达时保持未知。
+    }
   }
 
   Future<void> _loadUsage() async {
@@ -97,8 +115,12 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
   }
 
   Future<void> _test() => _run(() async {
-        final version = await _c.testConnection(_baseUrl.text);
-        return version.isEmpty ? null : '连接正常（服务端版本 $version）';
+        final info = await _c.probeServer(_baseUrl.text);
+        if (mounted) setState(() => _serverInitialized = info.initialized);
+        if (info.version.isEmpty) return null;
+        return info.initialized
+            ? '连接正常（服务端版本 ${info.version} · 已建号，请用「登录并连接」）'
+            : '连接正常（服务端版本 ${info.version}）';
       }, '连接正常');
 
   Future<void> _register() => _run(
@@ -192,7 +214,9 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
                 spacing: 8,
                 children: [
                   OutlinedButton(
-                    onPressed: _busy ? null : _register,
+                    onPressed: (_busy || _serverInitialized == true)
+                        ? null
+                        : _register,
                     child: const Text('注册并连接'),
                   ),
                   OutlinedButton(
@@ -205,6 +229,14 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
                   ),
                 ],
               ),
+              if (_serverInitialized == true) ...[
+                const SizedBox(height: 6),
+                Text(
+                  '该服务端已完成初始化（单用户实例），请使用「登录并连接」。',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.outline),
+                ),
+              ],
               const Divider(height: 28),
               TextField(
                 controller: _token,

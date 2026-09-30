@@ -16,14 +16,23 @@ class AuthClient {
   final http.Client _http;
 
   /// 探测服务端是否可达，成功返回服务端上报的版本号。
-  Future<String> ping(String baseUrl) async {
+  Future<String> ping(String baseUrl) async => (await pingInfo(baseUrl)).version;
+
+  /// 探测服务端：返回版本号与 `initialized`（M4/BR-33.4）。
+  ///
+  /// `initialized=true` 表示该实例已完成首启建号、自助注册永久关闭，
+  /// 客户端应引导用户走「登录」而不是「注册」。
+  Future<({String version, bool initialized})> pingInfo(String baseUrl) async {
     final uri = Uri.parse('${_norm(baseUrl)}/api/v1/ping');
     final resp = await _http.get(uri);
     if (resp.statusCode != 200) {
       throw HttpException(resp.statusCode, resp.body);
     }
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
-    return (data['version'] as String?) ?? '';
+    return (
+      version: (data['version'] as String?) ?? '',
+      initialized: (data['initialized'] as bool?) ?? false,
+    );
   }
 
   /// 注册新账号，返回 Token。

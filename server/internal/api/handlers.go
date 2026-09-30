@@ -11,11 +11,12 @@ import (
 
 // Payload is the shared JSON envelope returned by endpoints.
 type Payload struct {
-	OK      bool   `json:"ok"`
-	Service string `json:"service"`
-	Version string `json:"version"`
-	Time    string `json:"time"`
-	Msg     string `json:"msg,omitempty"`
+	OK          bool   `json:"ok"`
+	Service     string `json:"service"`
+	Version     string `json:"version"`
+	Time        string `json:"time"`
+	Msg         string `json:"msg,omitempty"`
+	Initialized bool   `json:"initialized"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -39,12 +40,19 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handlePing(w http.ResponseWriter, r *http.Request) {
+// handlePing 心跳；返回 initialized 供客户端判断是否仍可注册（M4/BR-33.4）。
+func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
+	initialized, err := s.store.HasAnyUser()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "internal error"})
+		return
+	}
 	writeJSON(w, http.StatusOK, Payload{
-		OK:      true,
-		Service: "sui-server",
-		Version: version.String,
-		Time:    now(),
-		Msg:     "pong",
+		OK:          true,
+		Service:     "sui-server",
+		Version:     version.String,
+		Time:        now(),
+		Msg:         "pong",
+		Initialized: initialized,
 	})
 }

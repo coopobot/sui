@@ -7,6 +7,30 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-30
+
+M4 里程碑：单用户服务化与安全加固。
+
+### 变更
+
+- **服务模式定为单用户（FR-33）** — 一个服务实例即一个用户的笔记库；首启创建唯一账号后关闭
+  自助注册（再次注册返回 403 `already-initialized`），`/api/v1/ping` 回带 `initialized`
+  供客户端判定首启状态。
+- **剪藏 id 幂等与去碰撞（FR-34）** — 剪藏笔记 id 改为 ≥128 bit 摘要（`clip-<32hex>`），
+  不再与手写笔记共用命名空间；服务端 `notes` 表新增 `source_url` 幂等键，同 URL 复用既有
+  笔记（版本递增），异 URL 各自成篇。
+- **WebSocket 广播鉴权（FR-35）** — `/api/v1/ws` 端点改为须 Token 鉴权（`?token=<token>`
+  或 `Authorization: Bearer`），未通过返回 401，不再向未授权客户端广播变更。
+- **密码与传输安全加固（FR-36）** — 密码以 PBKDF2-HMAC-SHA256（100000 次迭代）+ 每用户
+  随机盐存储、登录常量时间比对，老库明文密码首登自动升级；CORS 支持
+  `SUI_ALLOWED_ORIGINS` 白名单（未配置时开发模式全允许）；会话以 `sessions` 表为唯一真源，
+  支持多设备登录。
+
+### 测试
+
+- 服务端 18/18、note_core 97/97、flutter_app 17/17（新增 `initialized` 心跳、注册网关关闭、
+  密码校验、WS 鉴权、剪藏 id 唯一性等用例）。
+
 ## [0.3.0] - 2026-09-29
 
 M2 里程碑：整理体验与格式化编辑。
@@ -95,7 +119,8 @@ M1 里程碑：笔记本分组与标签的云端同步。
 - 编辑为源码 / 预览双轨，富文本 WYSIWYG 未实现。
 - 鉴权为演示级实现，公网部署前需加固（见 [SECURITY.md](SECURITY.md)）。
 
-[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.3.0...HEAD
+[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.5.0...HEAD
+[0.5.0]: https://gitee.com/evangubo/sui/releases/tag/v0.5.0
 [0.3.0]: https://gitee.com/evangubo/sui/releases/tag/v0.3.0
 [0.2.0]: https://gitee.com/evangubo/sui/releases/tag/v0.2.0
 [0.1.0]: https://gitee.com/evangubo/sui/releases/tag/v0.1.0

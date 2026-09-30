@@ -48,10 +48,22 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	sourceLine := "> 来源：[" + req.URL + "](" + req.URL + ")\n\n"
 	fullContent := sourceLine + content
 
-	// 生成 note id（基于 URL 做幂等：同一 URL 多次剪藏 → 更新同一笔记）
-	noteID := "clip-" + hashURL(req.URL)
-	if req.URL == "" {
-		noteID = "clip-" + store.HashBytes([]byte(fullContent[:min(len(fullContent), 200)]))[:16]
+	// 幂等判定（M4/BR-34.2/34.3）：非空 URL 命中 notes.source_url → 复用库内既有 id；
+	// 否则以 ≥128 bit 摘要派生新 id。空 URL 回退为按正文内容摘要唯一化（BR-34.4）。
+	noteID := ""
+	if req.URL != "" {
+		existing, err := s.store.GetNoteBySourceURL(req.URL)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if existing != "" {
+			noteID = existing
+		} else {
+			noteID = "clip-" + hashURL(req.URL)
+		}
+	} else {
+		noteID = "clip-" + store.HashBytes([]byte(fullContent))[:32]
 	}
 
 	// 通过 sync 协议写入（先获取当前版本，再 push）
@@ -78,6 +90,14 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 登记剪藏幂等键（普通笔记不写该列，M4/BR-34.3）
+	if req.URL != "" {
+		if err := s.store.SetNoteSourceURL(noteID, req.URL); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+	}
+
 	// 发送变更通知（WebSocket）
 	s.hub.NotifyChange()
 
@@ -90,8 +110,9 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// hashURL 派生剪藏 id 摘要（≥128 bit，M4/BR-34.1）。
 func hashURL(url string) string {
-	return store.HashBytes([]byte(url))[:16]
+	return store.HashBytes([]byte(url))[:32]
 }
 
 func min(a, b int) int {
