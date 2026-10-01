@@ -1,7 +1,8 @@
 # 网页剪藏
 
-随手记 Sui 提供 Chrome / Edge 扩展，一键把网页正文净化后保存为 Markdown 笔记，
-自动进入「收件箱」。本页同时面向**使用者**与**扩展开发者**。
+随手记 Sui 提供 Chrome / Edge 扩展，一键把网页保存为 Markdown 笔记，自动进入「收件箱」。
+支持两种模式：**智能提取正文**（默认）与**全页快照**——后者会把整页内容（尤其图片）
+本地化入库，即便原网页下线，笔记内容也不受影响。本页同时面向**使用者**与**扩展开发者**。
 
 ## 1. 安装（Chrome / Edge）
 
@@ -28,14 +29,41 @@
 
 | 方式 | 操作 | 效果 |
 |------|------|------|
-| 一键剪藏 | 点击工具栏扩展图标 →「剪藏此页面」 | 保存当前整个网页 |
-| 右键剪藏 | 在页面 / 选中文字 / 链接上右键 →「剪藏到随手记 Sui」 | 保存页面或所选内容 |
+| 一键剪藏 | 点击工具栏扩展图标 → 选择模式 →「剪藏此页面」 | 按所选模式保存当前网页 |
+| 右键剪藏 | 在页面 / 选中文字 / 链接上右键 →「剪藏到随手记 Sui」 | 按**上次使用的模式**保存 |
 
-剪藏流程：
+### 3.1 两种剪藏模式
 
-1. 扩展抓取页面完整 HTML 发送到服务端。
-2. 服务端类 Readability 净化：剔除导航、广告、页脚等噪声，提取正文。
-3. HTML 自动转换为 Markdown，正文开头附来源链接。
+剪藏前可在弹窗中切换模式（分段控件），选择会被记住，下次默认沿用：
+
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| **智能提取正文**（`article`，默认） | 类 Readability 净化：剔除导航、广告、页脚等噪声，只留正文 | 文章、博客、资讯等以正文为主的内容 |
+| **全页快照**（`snapshot`） | 保留整页结构与文档顺序（标题 / 表格 / 图注等按序呈现），产出**语义等价**的 Markdown | 需要完整留档、正文提取不理想、或页面结构本身就是重点 |
+
+> 「全页快照」追求**语义等价**（结构、顺序、图文关系保留），不追求逐像素还原版式。
+
+### 3.2 图片本地化（离线可读）
+
+无论哪种模式，剪藏时都会**尽量把图片本地化**到服务端附件库：
+
+1. 扩展采集页面（对 `article` 与 `snapshot` 一致）：等待完整 DOM、触发懒加载图片。
+2. 服务端按优先级取图地址（`src` → `data-src` / `data-original` / `data-lazy-src` → `srcset` 最大图），
+   相对地址按页面 URL 解析为绝对地址。
+3. 逐张下载图片 → 以 `sha256` 内容寻址存入附件库 → 正文图片引用改写为 `sui://<sha256>`。
+4. 本地化失败的图片**降级保留其绝对外链**，不阻断整篇剪藏，并在完成提示中回带
+   **「N 张图片未本地化」**。
+
+这样即使原网页下线，已本地化的图片仍可从附件库读取（离线可读）。
+
+> 阈值（可通过 `clip.Options` 覆盖）：单图字节上限 **10 MiB**、单篇最多本地化 **200** 张、
+> 总时长上限 **30s**、单图下载超时 **10s**。超出的图片按「降级保留绝对 URL」处理。
+
+### 3.3 剪藏流程
+
+1. 扩展抓取页面完整 HTML（含懒加载图片）发送到服务端。
+2. 服务端按所选模式净化：`article` 提取正文 / `snapshot` 保留整页结构，转 Markdown。
+3. 正文内的图片尽量本地化，失败者保留绝对 URL；正文开头附来源链接。
 4. 以**网页 URL 为幂等键**：同一网页重复剪藏会更新同一篇笔记，不会产生重复。
 5. 笔记自动进入客户端的「收件箱」，来源标记为剪藏（`source_device=clip:web-extension`）。
 
@@ -54,18 +82,23 @@
 | 文件 | 职责 |
 |------|------|
 | `manifest.json` | MV3 清单：权限（activeTab / storage / scripting / contextMenus） |
-| `popup.html/js` | 弹窗：显示当前页信息 + 剪藏按钮 + 状态反馈 |
+| `shared.js` | 共享逻辑：设置读取、模式记忆、整页采集（懒加载触发）、剪藏请求与结果文案（popup 与 service worker 共用） |
+| `popup.html/js` | 弹窗：模式分段控件 + 当前页信息 + 剪藏按钮 + 状态反馈 |
 | `options.html/js` | 设置页：serverUrl + token 配置 + 连接验证（`storage.sync`） |
-| `background.js` | service worker：右键菜单创建 + 菜单剪藏 + badge 状态 |
+| `background.js` | service worker：右键菜单创建 + 菜单剪藏（沿用上次模式）+ badge 状态 |
 
 ### 4.3 剪藏数据流
 
 ```
 popup/background
-  → chrome.scripting.executeScript 取 document.documentElement.outerHTML
-  → POST {serverUrl}/api/v1/clips  {url, title, html} + Bearer token
-  → 服务端 clip.Purify：Readability 选主内容 + HTML→Markdown
+  → chrome.scripting.executeScript（shared.js 的采集函数）
+      · img.loading = eager；用 data-src/data-original/data-lazy-src 回填 src
+      · 滚动整页触发 IntersectionObserver 懒加载；有界等待待加载图片
+  → POST {serverUrl}/api/v1/clips  {url, title, html, mode} + Bearer token
+  → 服务端 clip：按 mode 净化（article 提正文 / snapshot 保整页结构）
+  → 图片本地化：下载 → sha256 → blob.Put → 正文改 sui://；失败降级保留绝对 URL
   → 以 url 哈希为幂等键 upsert 笔记（source_device=clip:web-extension）
+  → 响应回带未本地化图片数 → 扩展提示「剪藏成功 vN（M 张图片未本地化）」
   → WebSocket 广播 changed → 客户端收件箱自动刷新
 ```
 

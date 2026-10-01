@@ -18,7 +18,7 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 | HEAD | `/api/v1/blobs/{hash}` | ✅ | 附件存在性 |
 | GET | `/api/v1/notes/{id}/revisions` | ✅ | 修订列表 |
 | GET | `/api/v1/notes/{id}/revisions/{version}` | ✅ | 修订详情 |
-| POST | `/api/v1/clips` | ✅ | 网页剪藏：`{"url","title","html"}` → 净化入库（按 URL 幂等复用） |
+| POST | `/api/v1/clips` | ✅ | 网页剪藏：`{"url","title","html","mode"}` → 净化 + 图片本地化后入库（按 URL 幂等复用）；`mode` 取 `article`（默认，智能提取正文）/ `snapshot`（全页快照，语义等价 Markdown） |
 
 > 本服务为**单用户**模式：仅允许创建唯一账号（首启注册后自助注册关闭，再次注册返回 403 `already-initialized`）。`/api/v1/ws` 端点须携带有效 Token（`?token=<token>` 或 `Authorization: Bearer`），未通过返回 401。
 
@@ -28,10 +28,10 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 
 ```bash
 curl http://localhost:8080/healthz
-# → {"ok":true,"service":"sui-server","version":"0.6.0","time":"...","initialized":false}
+# → {"ok":true,"service":"sui-server","version":"0.7.0","time":"...","initialized":false}
 
 curl http://localhost:8080/api/v1/ping
-# → {"ok":true,"service":"sui-server","version":"0.6.0","time":"...","msg":"pong","initialized":false}
+# → {"ok":true,"service":"sui-server","version":"0.7.0","time":"...","msg":"pong","initialized":false}
 ```
 
 > `initialized` 表示服务端是否已存在账号（单用户模式：建号后自助注册关闭）。首启未建号时为
@@ -205,6 +205,23 @@ GET /api/v1/ws?token=<token>
 ```
 
 push / 剪藏成功后服务端广播 `{"type":"changed"}`；客户端收到后触发一次增量 pull。
+
+## 剪藏
+
+```bash
+curl -X POST http://localhost:8080/api/v1/clips \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/post","title":"示例文章","html":"<html>...</html>","mode":"snapshot"}'
+# → {"ok":true,"noteId":"clip-...","title":"示例文章","version":1,
+#    "url":"https://example.com/post","mode":"snapshot","unlocalizedImages":0}
+```
+
+- `mode` 可选：`article`（默认，智能提取正文）/ `snapshot`（全页快照，保留整页结构与顺序，
+  语义等价 Markdown）；缺省等价 `article`。
+- 服务端会把正文图片尽量本地化（下载 → `sha256` → 附件库 → 正文改 `sui://<sha256>`）；
+  失败 / 超限的图片降级保留其绝对外链，数量经 `unlocalizedImages` 回带供扩展提示。
+- 幂等键为 `notes.source_url`（与 `mode` 无关）：同 URL 重复剪藏复用既有笔记（版本递增）。
+- 剪藏结果进入「收件箱」，`sourceDevice` 为 `clip:web-extension`。
 
 ## 错误约定
 

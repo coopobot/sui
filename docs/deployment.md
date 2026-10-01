@@ -67,10 +67,10 @@ curl -X POST http://localhost:8080/api/v1/login \
 
 ```bash
 curl http://localhost:8080/healthz
-# → {"ok":true,"service":"sui-server","version":"0.1.0","time":"..."}
+# → {"ok":true,"service":"sui-server","version":"0.7.0","time":"..."}
 
 curl http://localhost:8080/api/v1/ping
-# → {"ok":true,"service":"sui-server","version":"0.1.0","time":"...","msg":"pong"}
+# → {"ok":true,"service":"sui-server","version":"0.7.0","time":"...","msg":"pong"}
 ```
 
 两个接口都返回 JSON 且 `ok` 为 `true`，即表示服务端已就绪。

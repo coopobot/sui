@@ -9,12 +9,16 @@ import (
 	"sui/note-server/internal/sync"
 )
 
-// handleClip 处理网页剪藏：接收 URL + HTML，净化为 Markdown，创建新笔记。
+// handleClip 处理网页剪藏：接收 {url,title,html,mode?}，净化为 Markdown，
+// 本地化页面图片（FR-38），并把正文 + 附件映射一并入库。
+//
+// 幂等键为 notes.source_url（M4/BR-34.2），与 mode 无关（BR-37.5）。
 func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL   string `json:"url"`
 		Title string `json:"title"`
 		HTML  string `json:"html"`
+		Mode  string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad request"})
@@ -25,16 +29,29 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 净化 HTML → Markdown
-	var title, content string
+	// 净化 HTML → Markdown（按 mode 分支），并就地本地化页面图片。
+	var (
+		title, content, mode string
+		assets               []clip.MediaAsset
+		unlocalized          int
+		purified             bool
+	)
 	if req.HTML != "" {
-		result, err := clip.Purify(req.HTML, req.URL)
+		result, err := clip.PurifyWithOptions(req.HTML, clip.Options{
+			PageURL: req.URL,
+			Mode:    req.Mode,
+			Blobs:   s.blobs,
+		})
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "purify failed: " + err.Error()})
 			return
 		}
 		title = result.Title
 		content = result.Content
+		mode = result.Mode
+		assets = result.Assets
+		unlocalized = result.SkippedImages
+		purified = true
 	}
 	// 客户端传的标题优先
 	if req.Title != "" {
@@ -66,6 +83,20 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		noteID = "clip-" + store.HashBytes([]byte(fullContent))[:32]
 	}
 
+	// 组装附件映射（FR-38 / BR-38.2/38.3）：附件 id 由「笔记 id + 图片内容地址」派生，
+	// 稳定可复现 → 重复剪藏同一 URL 时按 id upsert，不产生重复附件行。
+	attachments := make([]sync.AttachmentItem, 0, len(assets))
+	for _, a := range assets {
+		attachments = append(attachments, sync.AttachmentItem{
+			ID:         "att-" + store.HashBytes([]byte(noteID+"|"+a.SHA256))[:32],
+			Filename:   a.Filename,
+			MimeKind:   a.MimeKind,
+			ByteSize:   a.ByteSize,
+			SHA256:     a.SHA256,
+			StorageRef: a.SHA256,
+		})
+	}
+
 	// 通过 sync 协议写入（先获取当前版本，再 push）
 	current, err := s.store.GetNote(noteID)
 	if err != nil {
@@ -84,6 +115,7 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		BaseVersion:  baseVer,
 		Version:      baseVer + 1,
 		SourceDevice: "clip:web-extension",
+		Attachments:  attachments,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -101,13 +133,19 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	// 发送变更通知（WebSocket）
 	s.hub.NotifyChange()
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"ok":      true,
 		"noteId":  noteID,
 		"title":   title,
 		"version": resp.AppliedVersion,
 		"url":     req.URL,
-	})
+	}
+	if purified {
+		// mode 供扩展回显；unlocalizedImages 供扩展提示「N 张图片未本地化」（BR-38.4 / §5）。
+		out["mode"] = mode
+		out["unlocalizedImages"] = unlocalized
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // hashURL 派生剪藏 id 摘要（≥128 bit，M4/BR-34.1）。

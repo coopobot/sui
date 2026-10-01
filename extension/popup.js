@@ -1,15 +1,26 @@
 // popup.js — 剪藏插件弹窗逻辑
 const $ = (id) => document.getElementById(id);
 
-let currentTab = null;
+const MODE_HINTS = {
+  article: '智能提取正文：只保留主要正文。',
+  snapshot: '全页快照：保留整页结构与顺序，原页下线也可读。',
+};
 
-// 初始化：获取当前标签页信息
+let currentTab = null;
+let currentMode = SUI_DEFAULT_MODE;
+
+// 初始化：获取当前标签页信息、恢复上次模式、绑定事件
 document.addEventListener('DOMContentLoaded', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTab = tab;
   $('pageTitle').textContent = tab.title || '(无标题)';
   $('pageUrl').textContent = tab.url || '';
 
+  // 恢复上次选择（默认 article）
+  currentMode = await suiGetLastMode();
+  renderMode();
+
+  $('modeRow').addEventListener('click', onModeClick);
   $('clipBtn').addEventListener('click', handleClip);
   $('optionsBtn').addEventListener('click', openOptions);
   $('settingsLink').addEventListener('click', (e) => {
@@ -18,56 +29,47 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // 检查是否已配置服务端
-  const settings = await getSettings();
+  const settings = await suiGetSettings();
   if (!settings.serverUrl || !settings.token) {
     showStatus('请先配置服务端地址和 Token', 'error');
     $('clipBtn').disabled = true;
   }
 });
 
+// 切换模式（分段控件）并记住选择
+async function onModeClick(e) {
+  const btn = e.target.closest('.mode-btn');
+  if (!btn) return;
+  currentMode = await suiSetLastMode(btn.dataset.mode);
+  renderMode();
+}
+
+function renderMode() {
+  $('modeArticle').classList.toggle('active', currentMode === 'article');
+  $('modeSnapshot').classList.toggle('active', currentMode === 'snapshot');
+  $('modeHint').textContent = MODE_HINTS[currentMode] || MODE_HINTS.article;
+}
+
 async function handleClip() {
   if (!currentTab) return;
   const btn = $('clipBtn');
   btn.disabled = true;
-  showStatus('正在剪藏...', 'loading');
+  showStatus('正在采集页面...', 'loading');
 
   try {
-    // 注入脚本获取页面完整 HTML
-    const [result] = await chrome.scripting.executeScript({
-      target: { tabId: currentTab.id },
-      func: () => {
-        return {
-          title: document.title,
-          url: location.href,
-          html: document.documentElement.outerHTML,
-        };
-      },
-    });
-
-    const pageData = result.result;
-    const settings = await getSettings();
-
-    // 调用服务端剪藏 API
-    const response = await fetch(`${settings.serverUrl.replace(/\/$/, '')}/api/v1/clips`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${settings.token}`,
-      },
-      body: JSON.stringify({
-        url: pageData.url,
-        title: pageData.title,
-        html: pageData.html,
-      }),
-    });
-
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.error || `HTTP ${response.status}`);
+    // 采集完整 DOM（先触发懒加载图片，再取 outerHTML）
+    const pageData = await suiCaptureTab(currentTab.id);
+    if (!pageData || !pageData.html) {
+      throw new Error('采集页面内容失败');
     }
 
-    const data = await response.json();
-    showStatus(`✓ 剪藏成功！v${data.version}`, 'success');
+    showStatus('正在剪藏...', 'loading');
+    const settings = await suiGetSettings();
+    const mode = await suiSetLastMode(currentMode);
+    const data = await suiPostClip(settings, pageData, mode);
+
+    // 结果反馈：附「未本地化」计数附注（§5）
+    showStatus('✓ ' + suiBuildResultMessage(data), 'success');
 
     // 1.5 秒后关闭弹窗
     setTimeout(() => window.close(), 1500);
@@ -85,13 +87,4 @@ function showStatus(msg, type) {
 
 function openOptions() {
   chrome.runtime.openOptionsPage();
-}
-
-async function getSettings() {
-  const defaults = {
-    serverUrl: 'http://localhost:8080',
-    token: '',
-  };
-  const stored = await chrome.storage.sync.get(['serverUrl', 'token']);
-  return { ...defaults, ...stored };
 }

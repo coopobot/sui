@@ -13,10 +13,10 @@ export SUI=http://127.0.0.1:8080
 
 ```bash
 curl -s $SUI/healthz
-# → {"ok":true,"service":"sui-server","version":"0.1.0","time":"..."}
+# → {"ok":true,"service":"sui-server","version":"0.7.0","time":"..."}
 
 curl -s $SUI/api/v1/ping
-# → {"ok":true,"service":"sui-server","version":"0.1.0","time":"...","msg":"pong"}
+# → {"ok":true,"service":"sui-server","version":"0.7.0","time":"...","msg":"pong"}
 ```
 
 ## 2. 注册账号
@@ -119,15 +119,27 @@ curl -s "$SUI/api/v1/notes/note-1/revisions/1" -H "$AUTH"
 
 ## 8. 网页剪藏
 
-`POST /api/v1/clips`，服务端做类 Readability 净化并转 Markdown 后入库：
+`POST /api/v1/clips`，服务端按 `mode` 净化并转 Markdown、本地化图片后入库：
 
 ```bash
+# 智能提取正文（默认）
 curl -s -X POST $SUI/api/v1/clips \
   -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"url":"https://example.com/post","title":"示例文章","html":"<html>...</html>"}'
+  -d '{"url":"https://example.com/post","title":"示例文章","html":"<html>...</html>","mode":"article"}'
+
+# 全页快照（保留整页结构与顺序，语义等价 Markdown）
+curl -s -X POST $SUI/api/v1/clips \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/post","title":"示例文章","html":"<html>...</html>","mode":"snapshot"}'
+# → {"ok":true,"noteId":"clip-...","title":"示例文章","version":1,
+#    "url":"https://example.com/post","mode":"snapshot","unlocalizedImages":0}
 ```
 
-剪藏结果进入「收件箱」，`sourceDevice` 形如 `clip:web-extension`。
+- `mode` 可选，缺省等价 `article`。
+- 正文图片会**尽量本地化**（下载 → `sha256` → 附件库 → 正文改 `sui://<sha256>`）；失败 / 超限的
+  图片降级保留绝对外链，数量经响应 `unlocalizedImages` 回带。
+- 幂等键为 `notes.source_url`（与 `mode` 无关）：同 URL 重复剪藏复用既有笔记（版本递增）。
+- 剪藏结果进入「收件箱」，`sourceDevice` 形如 `clip:web-extension`。
 
 ## 9. 冲突处理流程
 

@@ -55,7 +55,7 @@
 | `store` | SQLite 数据访问层（`Store` 结构体） |
 | `blob` | 附件存储：sha256 分片路径、引用计数、GC |
 | `auth` | `Bearer` Token 中间件 |
-| `clip` | 网页净化：Readability 启发式选主内容 + HTML→Markdown |
+| `clip` | 网页净化：类 Readability 选主内容（`article`）/ 整页保序快照（`snapshot`）+ HTML→Markdown + 图片本地化（下载→sha256→附件库，失败降级保留绝对 URL） |
 | `ws` | WebSocket Hub：push/剪藏成功后广播 `{"type":"changed"}` |
 | `cors` | 跨域中间件（`SUI_ALLOWED_ORIGINS` 白名单；未配置时开发模式全允许） |
 
@@ -87,7 +87,7 @@
 > M2 起笔记条目增带 `archived`（归档状态，随 push/pull 往返、跨端一致）。
 > 旧表清单中的 `outbox` 为设计预留描述，代码中并未建表，已从本表移除。
 
-### 2.3 测试清单（`internal/api/handlers_test.go` + `internal/api/m4_test.go`）
+### 2.3 测试清单（`internal/api/handlers_test.go` + `internal/api/m4_test.go` + `internal/api/m6_test.go`）
 
 | 测试 | 覆盖 |
 |------|------|
@@ -107,6 +107,10 @@
 | `TestLoginRejectsWrongPassword` | 密码哈希校验（错误密码 401，正确密码可登录） |
 | `TestWsAuthRequired` | WS 端点鉴权（无 token 拒绝 / 有效 token 升级） |
 | `TestClipIDUniqueness` | 剪藏 id ≥128 bit + 同 URL 幂等复用 / 异 URL 区分 |
+| `TestClipSnapshotMode` | `snapshot` 模式：整页保序净化（标题 / 表格 / 图注）产出语义等价 Markdown |
+| `TestClipMediaLocalization` | 图片本地化：下载 → sha256 → 附件入库 → 正文改 `sui://` + 附件映射随笔记入库 |
+| `TestClipMediaFailureDegrade` | 单图失败降级：保留（已解析的）**绝对 URL**，不阻断整篇 |
+| `TestClipOfflineReadable` | 离线可读：本地化后按 `sha256` 可从附件库取回图片字节 |
 
 ## 3. 客户端
 
@@ -396,7 +400,7 @@ sui/
 
 ### 8.1 已落地并验证
 
-- **服务端**：Go 构建通过、18/18 测试通过；`ping` / `register` / `login` / `push` / `pull` /
+- **服务端**：Go 构建通过、22/22 测试通过；`ping` / `register` / `login` / `push` / `pull` /
   `blobs`(HEAD/PUT/GET) / `revisions` / `clips` / `ws` 全部实测正常，鉴权 401、密码错误 401、
   已建号后重复注册 403、坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
 - **note_core**：113/113 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
@@ -442,6 +446,13 @@ sui/
   `==高亮==` 在格式态与预览态**均**渲染（`tertiaryContainer` 底色）；块级呈现单元（标题 / 列表 /
   引用 / 代码 / 分隔线）与空块回车退出的聚焦式呈现。以上均为**呈现层**能力，正本 Markdown
   字节不变（「打开 →（不编辑）→ 关闭」逐字节保真，BR-32.1 / AC-91 / AC-93）。
+- **剪藏全页快照与图片本地化（M6）**：`POST /api/v1/clips` 新增 `mode`（`article` 默认 /
+  `snapshot`）；`snapshot` 保留整页结构与文档顺序（标题 / 表格 / 图注保序），产出**语义等价**
+  Markdown（非逐像素还原）。两种模式均**尽量本地化正文图片**（下载 → `sha256` → 附件库 →
+  正文改 `sui://<sha256>`，映射随笔记入库），**原网页下线后图片仍可从附件库读取**；单图
+  失败 / 超限降级为**保留绝对外链**（不阻断整篇），数量经响应 `unlocalizedImages` 回带。
+  Chrome 扩展新增「智能提取正文 / 全页快照」分段控件（默认 `article`、记住上次），采集时
+  等待完整 DOM 并触发懒加载图片。幂等键仍为 `notes.source_url`，与 `mode` 无关。
 
 ### 8.2 历史缺口（均已修复）
 

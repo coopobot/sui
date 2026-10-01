@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "随手记 Sui - 网页剪藏",
-  "version": "0.1.0",
-  "description": "一键剪藏网页到随手记 Sui，自动净化为 Markdown。",
+  "version": "0.7.0",
+  "description": "一键剪藏网页到随手记 Sui：智能提取正文或全页快照，自动净化为 Markdown 并本地化图片。",
   "permissions": [
     "activeTab",
     "storage",

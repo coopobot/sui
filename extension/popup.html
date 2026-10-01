@@ -51,6 +51,37 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .mode-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 14px;
+      background: #f0f0f3;
+      padding: 4px;
+      border-radius: 8px;
+    }
+    .mode-btn {
+      flex: 1;
+      padding: 7px 8px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: #666;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .mode-btn.active {
+      background: #fff;
+      color: #5a4fcf;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    }
+    .mode-hint {
+      margin: -8px 0 14px;
+      font-size: 12px;
+      color: #999;
+      line-height: 1.4;
+    }
     .btn {
       width: 100%;
       padding: 10px 16px;
@@ -114,6 +145,11 @@
       <div class="page-title" id="pageTitle">加载中...</div>
       <div class="page-url" id="pageUrl">-</div>
     </div>
+    <div class="mode-row" id="modeRow">
+      <button class="mode-btn" id="modeArticle" data-mode="article">智能提取正文</button>
+      <button class="mode-btn" id="modeSnapshot" data-mode="snapshot">全页快照</button>
+    </div>
+    <div class="mode-hint" id="modeHint">智能提取正文：只保留主要正文。</div>
     <button class="btn btn-primary" id="clipBtn">剪藏到收件箱</button>
     <button class="btn btn-secondary" id="optionsBtn">设置</button>
     <div class="status" id="status"></div>
@@ -121,6 +157,7 @@
   <div class="footer">
     <a href="#" id="settingsLink">服务端设置</a>
   </div>
+  <script src="shared.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

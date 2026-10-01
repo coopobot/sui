@@ -7,6 +7,34 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-01
+
+M6 里程碑：全页快照与离线自持剪藏。
+
+### 新增
+
+- **全页快照剪藏模式（FR-37）** — 剪藏接口 `POST /api/v1/clips` 新增可选 `mode`：`article`
+  （默认，类 Readability 智能提取正文）/ `snapshot`（保留整页结构与文档顺序，标题 / 表格 /
+  图注等按序呈现，产出**语义等价** Markdown）。两种模式产出的笔记均可在编辑器正常打开与编辑；
+  幂等键仍为 `notes.source_url`，与 `mode` 无关（BR-37.5）。
+- **剪藏媒体本地化（FR-38）** — 剪藏时按优先级取图地址（`src` → `data-src` / `data-original` /
+  `data-lazy-src` → `srcset` 最大图），相对地址按页面 URL 解析；逐张下载 → `sha256` 内容寻址 →
+  存入附件库 → 正文图片引用改写为 `sui://<sha256>`，附件映射随笔记入库（复用既有附件通道）。
+  单图失败 / 超限（单图 **10 MiB**、每篇 **200** 张、总时长 **30s**）**降级保留绝对外链**，
+  不阻断整篇，数量经响应 `unlocalizedImages` 回带。
+- **来源失效仍可读（FR-39）** — 已本地化的图片字节存于服务端附件库，**原网页下线 / 改版 /
+  图片外链失效后，剪藏笔记的正文与图片仍完整可读**，且跨端一致（其他设备按需拉取）。
+- **扩展模式选择与整页采集（M6）** — Chrome 扩展浮层新增「智能提取正文 / 全页快照」分段控件
+  （缺省 `article`、记住上次；右键菜单剪藏沿用上次模式）；采集时等待完整 DOM、回填 `data-src`
+  等并滚动触发懒加载图片；结果反馈回带「（N 张图片未本地化）」。新增 `shared.js`，供 popup 与
+  service worker 共用设置读取、采集与请求逻辑。
+
+### 测试
+
+- 服务端 22/22（新增 `TestClipSnapshotMode` / `TestClipMediaLocalization` /
+  `TestClipMediaFailureDegrade` / `TestClipOfflineReadable`）；note_core 113/113、
+  flutter_app 27/27 全绿（M6 未改动客户端共享核心与 Flutter 客户端）。
+
 ## [0.6.0] - 2026-09-30
 
 M5 里程碑：编辑器交互与呈现增强。
@@ -144,7 +172,8 @@ M1 里程碑：笔记本分组与标签的云端同步。
 - 编辑为源码 / 预览双轨，富文本 WYSIWYG 未实现。
 - 鉴权为演示级实现，公网部署前需加固（见 [SECURITY.md](SECURITY.md)）。
 
-[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.6.0...HEAD
+[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.7.0...HEAD
+[0.7.0]: https://gitee.com/evangubo/sui/releases/tag/v0.7.0
 [0.6.0]: https://gitee.com/evangubo/sui/releases/tag/v0.6.0
 [0.5.0]: https://gitee.com/evangubo/sui/releases/tag/v0.5.0
 [0.3.0]: https://gitee.com/evangubo/sui/releases/tag/v0.3.0
