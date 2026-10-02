@@ -33,11 +33,122 @@ data/
 
 > 备份 = 拷贝整个数据目录。停止服务后复制即可。
 
-## 3. 注册账号与 Token
+## 3. Docker 部署
+
+`server/` 目录提供了 `Dockerfile`，支持直接构建镜像并容器化部署。
+镜像基于 **Alpine**，采用多阶段构建，最终镜像仅约 **15 MB**。
+
+### 3.1 构建镜像
+
+在 `server/` 目录执行：
+
+```bash
+cd server
+docker build -t sui-server:latest .
+```
+
+> 首次构建会下载 Go 工具链与依赖，耗时较长；后续构建会利用 Docker 缓存加速。
+
+### 3.2 启动容器
+
+```bash
+docker run -d \
+  --name sui-server \
+  -p 8080:8080 \
+  -v /path/to/sui-data:/data \
+  --restart unless-stopped \
+  sui-server:latest
+```
+
+参数说明：
+
+| 参数 | 说明 |
+|------|------|
+| `-p 8080:8080` | 映射容器 8080 端口到主机 |
+| `-v /path/to/sui-data:/data` | 挂载数据卷到宿主机目录，持久化 SQLite 与附件 |
+| `--restart unless-stopped` | 容器自动重启（崩溃 / 宿主机重启后自动恢复） |
+| `--name sui-server` | 容器名称，方便后续管理 |
+
+### 3.3 环境变量
+
+可通过 `-e` 覆盖默认配置：
+
+```bash
+docker run -d \
+  --name sui-server \
+  -p 9000:8080 \
+  -e SUI_ADDR=0.0.0.0:8080 \
+  -v /path/to/sui-data:/data \
+  sui-server:latest
+```
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `SUI_ADDR` | `0.0.0.0:8080` | 监听地址（容器内建议保持 `0.0.0.0`） |
+| `SUI_DATA` | `/data` | 数据目录（对应 volume 挂载点） |
+
+### 3.4 健康检查
+
+镜像内置了健康检查，每 30 秒检测一次 `/healthz`：
+
+```bash
+docker inspect --format='{{.State.Health.Status}}' sui-server
+# → healthy
+```
+
+### 3.5 常用操作
+
+```bash
+# 查看日志
+docker logs -f sui-server
+
+# 停止容器
+docker stop sui-server
+
+# 启动容器
+docker start sui-server
+
+# 重启容器
+docker restart sui-server
+
+# 删除容器
+docker rm -f sui-server
+```
+
+### 3.6 Docker Compose（可选）
+
+如需使用 Docker Compose，可在项目根目录创建 `docker-compose.yml`：
+
+```yaml
+services:
+  sui-server:
+    build: ./server
+    image: sui-server:latest
+    container_name: sui-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+```
+
+启动：
+
+```bash
+docker compose up -d
+```
+
+## 4. 注册账号与 Token
 
 服务端采用最简单的 Token 鉴权模型：**一个用户、一个 Token**。
 
-### 3.1 注册（获取 Token）
+### 4.1 注册（获取 Token）
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/register \
@@ -53,7 +164,7 @@ curl -X POST http://localhost:8080/api/v1/register \
 
 记下 `token`，这是所有客户端和扩展访问服务端的凭证。
 
-### 3.2 登录（重新获取 Token）
+### 4.2 登录（重新获取 Token）
 
 忘记 Token 或想更换时：
 
@@ -63,7 +174,7 @@ curl -X POST http://localhost:8080/api/v1/login \
   -d '{"username":"me","password":"secret"}'
 ```
 
-## 4. 验证服务已启动
+## 5. 验证服务已启动
 
 ```bash
 curl http://localhost:8080/healthz
@@ -75,7 +186,7 @@ curl http://localhost:8080/api/v1/ping
 
 两个接口都返回 JSON 且 `ok` 为 `true`，即表示服务端已就绪。
 
-## 5. 公网 / 局域网访问
+## 6. 公网 / 局域网访问
 
 多端同步需要客户端能访问到服务端：
 
@@ -91,12 +202,12 @@ sui.example.com {
 
 服务端已内置 CORS 支持与 WebSocket 升级，反代时保持 `Upgrade` 头即可。
 
-## 6. 备份与恢复
+## 7. 备份与恢复
 
 - **备份**：停止服务端后整体拷贝数据目录（`sui.db` + `blobs/`）。
 - **恢复**：把数据目录放回原路径（或设置 `SUI_DATA` 指向它），重启服务即可。
 
-## 7. 安全与生产化
+## 8. 安全与生产化
 
 > ⚠️ 当前为**演示级实现**。公网部署前必须逐项处理下列问题。
 
@@ -112,7 +223,7 @@ sui.example.com {
 
 源码位置：`server/internal/api` 与 `server/internal/store`。
 
-## 8. 客户端接入
+## 9. 客户端接入
 
 部署完成后，在客户端「同步设置」对话框填入服务端地址与 Token 即可（见
 [用户指南 · 连接服务端](guides/user-guide.md#23-连接服务端首次配置)）；
