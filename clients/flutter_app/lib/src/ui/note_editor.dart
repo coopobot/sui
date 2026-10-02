@@ -489,7 +489,14 @@ class _NoteEditorState extends State<NoteEditor> {
         const Divider(height: 1),
         Padding(
           padding: const EdgeInsets.all(8),
-          child: Row(
+          // 窄屏下「三态分段控件 + 右侧动作图标」一行放不下：用 Wrap 自适应换行，
+          // 避免横向溢出把最右侧的「导出」图标裁掉（B14）。同时不再提供
+          // 「删除笔记」图标 —— 它与其它按钮同处一排、极易误碰（B15）。
+          child: Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            runSpacing: 4,
+            spacing: 12,
             children: [
               SegmentedButton<EditorMode>(
                 segments: const [
@@ -516,30 +523,27 @@ class _NoteEditorState extends State<NoteEditor> {
                 },
                 showSelectedIcon: false,
               ),
-              const Spacer(),
-              IconButton(
-                tooltip: '添加附件',
-                icon: const Icon(Icons.attach_file),
-                onPressed: _pickAndAttach,
-              ),
-              IconButton(
-                tooltip: '版本历史',
-                icon: const Icon(Icons.history),
-                isSelected: context.watch<AppController>().showRevisionPanel,
-                onPressed: () => _controller.toggleRevisionPanel(),
-              ),
-              IconButton(
-                tooltip: '导出 Markdown',
-                icon: const Icon(Icons.file_download_outlined),
-                onPressed: () => _showExportDialog(),
-              ),
-              IconButton(
-                tooltip: '删除笔记',
-                icon: const Icon(Icons.delete_outline),
-                onPressed: () async {
-                  final ok = await _confirmDelete();
-                  if (ok) _controller.deleteNote(id);
-                },
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: '添加附件',
+                    icon: const Icon(Icons.attach_file),
+                    onPressed: _pickAndAttach,
+                  ),
+                  IconButton(
+                    tooltip: '版本历史',
+                    icon: const Icon(Icons.history),
+                    isSelected:
+                        context.watch<AppController>().showRevisionPanel,
+                    onPressed: () => _controller.toggleRevisionPanel(),
+                  ),
+                  IconButton(
+                    tooltip: '导出 Markdown',
+                    icon: const Icon(Icons.file_download_outlined),
+                    onPressed: () => _showExportDialog(),
+                  ),
+                ],
               ),
             ],
           ),
@@ -788,27 +792,6 @@ class _NoteEditorState extends State<NoteEditor> {
         ],
       ),
     );
-  }
-
-  Future<bool> _confirmDelete() async {
-    return await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('删除这篇笔记？'),
-            content: const Text('将移到回收站，可在左侧「回收站」中查看或还原。'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('删除'),
-              ),
-            ],
-          ),
-        ) ??
-        false;
   }
 }
 

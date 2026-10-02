@@ -102,14 +102,9 @@ class _NarrowLayout extends StatelessWidget {
             : null,
         actions: [
           _SyncActions(controller: controller),
-          if (editorOpen)
-            IconButton(
-              tooltip: '删除笔记',
-              icon: const Icon(Icons.delete_outline),
-              onPressed: () =>
-                  controller.deleteNote(controller.selectedNoteId!),
-            )
-          else
+          // 编辑态不再提供「删除笔记」图标：它与同步/设置同处顶栏、极易误碰（B15）。
+          // 删除入口保留在笔记列表的行尾菜单里（需二次确认）。
+          if (!editorOpen)
             IconButton(
               tooltip: '新建笔记',
               icon: const Icon(Icons.note_add_outlined),

@@ -93,6 +93,10 @@ class _SourceEditorState extends State<_SourceEditor> {
   FocusNode? _internalFocus;
   Timer? _debounce;
 
+  /// 正文自身滚动的控制器：`TextField(expands: true)` 内部滚动，配 [Scrollbar]
+  /// 让长文有可见滚动条，便于把光标移到视口下方继续编辑（B13）。
+  final ScrollController _scroll = ScrollController();
+
   @override
   void initState() {
     super.initState();
@@ -104,6 +108,7 @@ class _SourceEditorState extends State<_SourceEditor> {
   @override
   void dispose() {
     _debounce?.cancel();
+    _scroll.dispose();
     _internalFocus?.dispose();
     super.dispose();
   }
@@ -125,30 +130,37 @@ class _SourceEditorState extends State<_SourceEditor> {
     // `expands: true` 要求有界高度，两者相遇会在 layout 阶段断言失败
     // （_RenderDecoration given an infinite size）。父级是 Expanded，
     // 高度本来就有限，让 TextField 自己撑满并内部滚动即可。
-    return TextField(
-      controller: widget.controller,
-      focusNode: _focus,
-      // 交给上层的撤销栈控制器，工具栏的撤销 / 重做按钮据此驱动。
-      undoController: widget.undoController,
-      // 撑满编辑区高度，滚动交给 TextField 自己处理。
-      expands: true,
-      maxLines: null,
-      keyboardType: TextInputType.multiline,
-      style: widget.monospace
-          ? const TextStyle(
-              fontFamily: 'monospace',
-              fontSize: 14,
-              height: 1.6,
-            )
-          : const TextStyle(fontSize: 15, height: 1.6),
-      decoration: InputDecoration(
-        border: InputBorder.none,
-        hintText: widget.monospace
-            ? '# 标题\n\n在这里用 Markdown 书写…\n- 列表项\n- 加粗 **重要**'
-            : '开始书写，或用上方工具栏排版…',
-        hintStyle: TextStyle(color: scheme.outline.withValues(alpha: 0.6)),
+    // 外层再套 Scrollbar（与 TextField 共用同一个 scrollController）：长文有
+    // 可见滚动条，便于把光标移到视口下方继续编辑（B13）。
+    return Scrollbar(
+      controller: _scroll,
+      thumbVisibility: true,
+      child: TextField(
+        controller: widget.controller,
+        focusNode: _focus,
+        scrollController: _scroll,
+        // 交给上层的撤销栈控制器，工具栏的撤销 / 重做按钮据此驱动。
+        undoController: widget.undoController,
+        // 撑满编辑区高度，滚动交给 TextField 自己处理。
+        expands: true,
+        maxLines: null,
+        keyboardType: TextInputType.multiline,
+        style: widget.monospace
+            ? const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 14,
+                height: 1.6,
+              )
+            : const TextStyle(fontSize: 15, height: 1.6),
+        decoration: InputDecoration(
+          border: InputBorder.none,
+          hintText: widget.monospace
+              ? '# 标题\n\n在这里用 Markdown 书写…\n- 列表项\n- 加粗 **重要**'
+              : '开始书写，或用上方工具栏排版…',
+          hintStyle: TextStyle(color: scheme.outline.withValues(alpha: 0.6)),
+        ),
+        onChanged: (_) => _scheduleSave(),
       ),
-      onChanged: (_) => _scheduleSave(),
     );
   }
 
