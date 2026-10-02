@@ -597,37 +597,52 @@ class AppController extends ChangeNotifier {
     await refreshNotes();
   }
 
-  /// 在同级内上移笔记本（与上一个兄弟交换 sortOrder）。
+  /// 在同级内上移笔记本（与上一个兄弟交换位置）。
   Future<void> moveNotebookUp(String id) async {
-    final siblings = _notebooks
-        .where((n) => n.parentId == _parentOf(id))
-        .toList()
-      ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    final siblings = _siblingsOf(id);
     final idx = siblings.indexWhere((n) => n.id == id);
     if (idx <= 0) return;
-    final prev = siblings[idx - 1];
-    final cur = siblings[idx];
-    final a = await _repository.reorderNotebook(cur.id, prev.sortOrder);
-    final b = await _repository.reorderNotebook(prev.id, cur.sortOrder);
-    _enqueueNotebook(a);
-    _enqueueNotebook(b);
-    await refreshNotebooks();
+    final reordered = [...siblings];
+    reordered.insert(idx - 1, reordered.removeAt(idx));
+    await _applyNotebookOrder(reordered);
   }
 
-  /// 在同级内下移笔记本（与下一个兄弟交换 sortOrder）。
+  /// 在同级内下移笔记本（与下一个兄弟交换位置）。
   Future<void> moveNotebookDown(String id) async {
-    final siblings = _notebooks
-        .where((n) => n.parentId == _parentOf(id))
-        .toList()
-      ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+    final siblings = _siblingsOf(id);
     final idx = siblings.indexWhere((n) => n.id == id);
     if (idx < 0 || idx >= siblings.length - 1) return;
-    final next = siblings[idx + 1];
-    final cur = siblings[idx];
-    final a = await _repository.reorderNotebook(cur.id, next.sortOrder);
-    final b = await _repository.reorderNotebook(next.id, cur.sortOrder);
-    _enqueueNotebook(a);
-    _enqueueNotebook(b);
+    final reordered = [...siblings];
+    reordered.insert(idx + 1, reordered.removeAt(idx));
+    await _applyNotebookOrder(reordered);
+  }
+
+  /// 取某笔记本的同级列表，按 (sortOrder, createdAt, id) 稳定排序。
+  ///
+  /// 历史数据可能同级 sortOrder 全部并列（早期版本新建时未分配），
+  /// 此时以 createdAt / id 兜底，保证上移 / 下移有确定的相对位置。
+  List<Notebook> _siblingsOf(String id) {
+    final parentId = _parentOf(id);
+    return _notebooks.where((n) => n.parentId == parentId).toList()
+      ..sort((a, b) {
+        final byOrder = a.sortOrder.compareTo(b.sortOrder);
+        if (byOrder != 0) return byOrder;
+        final byCreated = a.createdAt.compareTo(b.createdAt);
+        if (byCreated != 0) return byCreated;
+        return a.id.compareTo(b.id);
+      });
+  }
+
+  /// 按给定顺序把同级 sortOrder 归一化为 0..n-1，仅写变化的行并各自入同步队列。
+  ///
+  /// 归一化同时修复存量数据「同级 sortOrder 并列」的问题：交换等值原本是空操作，
+  /// 归一化后新顺序才真正落库并触发侧栏刷新。
+  Future<void> _applyNotebookOrder(List<Notebook> ordered) async {
+    for (var i = 0; i < ordered.length; i++) {
+      if (ordered[i].sortOrder == i) continue;
+      final updated = await _repository.reorderNotebook(ordered[i].id, i);
+      _enqueueNotebook(updated);
+    }
     await refreshNotebooks();
   }
 

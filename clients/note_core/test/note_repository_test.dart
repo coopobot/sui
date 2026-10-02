@@ -38,6 +38,31 @@ void main() {
       expect(renamed.name, '新');
       expect(renamed.version, greaterThan(nb.version));
     });
+
+    test('新建同级笔记本 sortOrder 递增，列表按创建顺序返回', () async {
+      final a = await repo.createNotebook(name: 'A');
+      final b = await repo.createNotebook(name: 'B');
+      final c = await repo.createNotebook(name: 'C');
+      expect([a.sortOrder, b.sortOrder, c.sortOrder], [0, 1, 2]);
+      expect((await repo.listNotebooks()).map((n) => n.name), ['A', 'B', 'C']);
+    });
+
+    test('子笔记本排序权重独立于父级', () async {
+      final parent = await repo.createNotebook(name: '父');
+      final other = await repo.createNotebook(name: '另一父');
+      final child = await repo.createNotebook(name: '子', parentId: parent.id);
+      expect(parent.sortOrder, 0);
+      expect(other.sortOrder, 1);
+      expect(child.sortOrder, 0);
+    });
+
+    test('reorderNotebook 改变同级顺序', () async {
+      final a = await repo.createNotebook(name: 'A');
+      final b = await repo.createNotebook(name: 'B');
+      await repo.reorderNotebook(a.id, 1);
+      await repo.reorderNotebook(b.id, 0);
+      expect((await repo.listNotebooks()).map((n) => n.name), ['B', 'A']);
+    });
   });
 
   group('标签', () {

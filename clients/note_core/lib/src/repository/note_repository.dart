@@ -48,21 +48,39 @@ class NoteRepository {
     String? id,
     String? parentId,
     required String name,
-    int sortOrder = 0,
+    int? sortOrder,
     DateTime? now,
   }) async {
     final t = now ?? DateTime.now();
     final nid = id ?? newId();
+    final pid = _normalizeParentId(parentId);
+    final order = sortOrder ?? await _nextNotebookSortOrder(pid);
     await db.into(db.notebooks).insert(NotebooksCompanion.insert(
           id: nid,
-          parentId: Value(_normalizeParentId(parentId)),
+          parentId: Value(pid),
           name: name,
-          sortOrder: Value(sortOrder),
+          sortOrder: Value(order),
           version: const Value(1),
           createdAt: t,
           updatedAt: t,
         ));
     return (await getNotebook(nid))!;
+  }
+
+  /// 同级下一条排序权重：`max(现存 sortOrder) + 1`（含墓碑，避免复号）。
+  ///
+  /// 新建笔记本据此追加到同级末尾。若一律写默认 0，同级会全部并列，
+  /// 上移 / 下移交换等值等于空操作，顺序永远不变（笔记本排序失效的根因）。
+  Future<int> _nextNotebookSortOrder(String? parentId) async {
+    final maxExpr = db.notebooks.sortOrder.max();
+    final q = db.selectOnly(db.notebooks)..addColumns([maxExpr]);
+    if (parentId == null) {
+      q.where(db.notebooks.parentId.isNull());
+    } else {
+      q.where(db.notebooks.parentId.equals(parentId));
+    }
+    final row = await q.getSingle();
+    return (row.read(maxExpr) ?? -1) + 1;
   }
 
   Future<Notebook?> getNotebook(String id) async {
@@ -73,7 +91,11 @@ class NoteRepository {
 
   Future<List<Notebook>> listNotebooks({bool includeDeleted = false}) async {
     final q = db.select(db.notebooks)
-      ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]);
+      ..orderBy([
+        (t) => OrderingTerm.asc(t.sortOrder),
+        (t) => OrderingTerm.asc(t.createdAt),
+        (t) => OrderingTerm.asc(t.id),
+      ]);
     if (!includeDeleted) {
       q.where((t) => t.isDeleted.equals(false));
     }

@@ -151,4 +151,43 @@ void main() {
     expect(cleared.revisionCount, greaterThan(withContent.revisionCount));
     await db.close();
   });
+
+  test('笔记本上移 / 下移改变同级顺序并归一化 sortOrder', () async {
+    final db = AppDatabase.memory();
+    final repo = NoteRepository(db, deviceId: 'widget-test');
+    final controller = AppController(repository: repo, database: db);
+    await controller.bootstrap();
+
+    await controller.createNotebook('A');
+    await controller.createNotebook('B');
+    await controller.createNotebook('C');
+    expect(controller.notebooks.map((n) => n.name).toList(), ['A', 'B', 'C']);
+
+    await controller.moveNotebookUp(controller.notebooks[2].id);
+    expect(controller.notebooks.map((n) => n.name).toList(), ['A', 'C', 'B']);
+
+    await controller.moveNotebookDown(controller.notebooks[0].id);
+    expect(controller.notebooks.map((n) => n.name).toList(), ['C', 'A', 'B']);
+
+    // 归一化后同级 sortOrder 连续，重启后顺序稳定。
+    expect(controller.notebooks.map((n) => n.sortOrder).toList(), [0, 1, 2]);
+    await db.close();
+  });
+
+  test('历史数据同级 sortOrder 全为 0 时上移仍生效（存量自愈）', () async {
+    final db = AppDatabase.memory();
+    final repo = NoteRepository(db, deviceId: 'widget-test');
+    final controller = AppController(repository: repo, database: db);
+
+    // 模拟早期版本：同级 sortOrder 一律为 0（新建时未分配权重）。
+    await repo.createNotebook(name: 'A', sortOrder: 0, now: DateTime(2026, 1, 1));
+    await repo.createNotebook(name: 'B', sortOrder: 0, now: DateTime(2026, 1, 2));
+    await controller.bootstrap();
+    expect(controller.notebooks.map((n) => n.name).toList(), ['A', 'B']);
+
+    await controller.moveNotebookUp(controller.notebooks[1].id);
+    expect(controller.notebooks.map((n) => n.name).toList(), ['B', 'A']);
+    expect(controller.notebooks.map((n) => n.sortOrder).toList(), [0, 1]);
+    await db.close();
+  });
 }

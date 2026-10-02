@@ -374,8 +374,9 @@ Future<String?> _showMoveToNotebookDialog(
   return showDialog<String?>(
     context: context,
     builder: (context) {
-      final roots = controller.notebooks.where((n) => n.parentId == null).toList()
-        ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+      // controller.notebooks 已按 (sortOrder, createdAt, id) 有序，无需再排。
+      final roots =
+          controller.notebooks.where((n) => n.parentId == null).toList();
       return AlertDialog(
         title: const Text('移动到…'),
         content: SizedBox(
@@ -430,10 +431,10 @@ class _NotebookPickerNode extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // controller.notebooks 已按 (sortOrder, createdAt, id) 有序，无需再排。
     final children = controller.notebooks
         .where((n) => n.parentId == nb.id)
-        .toList()
-      ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
+        .toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
