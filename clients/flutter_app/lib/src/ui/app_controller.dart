@@ -5,6 +5,10 @@ import 'package:note_core/note_core.dart';
 import 'package:path/path.dart' as p;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../platform/app_lifecycle.dart';
+import 'desktop_commands.dart';
+import 'markdown_editor.dart';
+
 /// 同步连接状态（供 UI 展示）。
 enum SyncState {
   /// 尚未配置服务端地址 / Token。
@@ -98,6 +102,29 @@ TagSortMode tagSortModeFromName(String? name) {
   }
 }
 
+/// 编辑模式（`formatted` / `source` / `preview`）的持久化名称（M7-T06，键 `ui.editorMode`）。
+///
+/// 枚举本身定义在 `markdown_editor.dart`（编辑器与壳层共用同一类型）。
+extension EditorModeName on EditorMode {
+  String get persistentName => switch (this) {
+        EditorMode.formatted => 'formatted',
+        EditorMode.source => 'source',
+        EditorMode.preview => 'preview',
+      };
+}
+
+/// 反向解析编辑模式持久化字符串；非法或为空时回落到默认 [EditorMode.formatted]。
+EditorMode editorModeFromName(String? name) {
+  switch (name) {
+    case 'source':
+      return EditorMode.source;
+    case 'preview':
+      return EditorMode.preview;
+    default:
+      return EditorMode.formatted;
+  }
+}
+
 /// 笔记列表视图模式（FR-25 归档视图 / FR-26 回收站）。
 enum NoteViewMode {
   /// 常规视图：可按笔记本 / 标签 / 搜索筛选的未删除、未归档笔记。
@@ -187,6 +214,15 @@ class AppController extends ChangeNotifier {
   /// 本机偏好键：标签总览排序方式（M2-T10）。值见 [TagSortMode.persistentName]。
   static const _kTagSortMode = 'tags.sortMode';
 
+  /// 本机偏好键：左侧栏（笔记本树）是否折叠（M7-T06，FR-40）。值 `'true'` / `'false'`。
+  static const _kLeftPanelCollapsed = 'ui.leftPanelCollapsed';
+
+  /// 本机偏好键：中栏（笔记列表）是否折叠（M7-T06，FR-40）。值 `'true'` / `'false'`。
+  static const _kNoteListCollapsed = 'ui.noteListCollapsed';
+
+  /// 本机偏好键：编辑器三态（M7-T06，FR-41 / 详细设计 §5.1）。值见 [EditorModeName.persistentName]。
+  static const _kEditorMode = 'ui.editorMode';
+
   List<Notebook> _notebooks = [];
   List<NoteSummary> _notes = [];
   List<Tag> _tags = [];
@@ -219,10 +255,33 @@ class AppController extends ChangeNotifier {
   bool _showRevisionPanel = false;
   bool _inboxMode = false;
 
+  /// 左侧栏（笔记本树）折叠态（M7-T06，FR-40）：`true` = 已折叠隐藏。
+  bool _leftPanelCollapsed = false;
+
+  /// 中栏（笔记列表）折叠态（M7-T06，FR-40）：`true` = 已折叠隐藏。
+  bool _noteListCollapsed = false;
+
+  /// 编辑器三态（M7-T06，§5.1）：本地视图偏好，不随切换笔记重置。
+  EditorMode _editorMode = EditorMode.formatted;
+
   String? get selectedNotebookId => _selectedNotebookId;
   String? get selectedNoteId => _selectedNoteId;
   bool get showRevisionPanel => _showRevisionPanel;
   bool get inboxMode => _inboxMode;
+
+  /// 当前搜索词（只读）。供 `NoteList` 的搜索框在重挂载后复原文本（AC-112）：
+  /// 中栏折叠时 `NoteList` 被卸载，若搜索框无控制器，再展开时框内为空而列表仍是
+  /// 筛选结果，出现「框空但结果已筛」的呈现分裂。
+  String get query => _query;
+
+  /// 左侧栏是否折叠（FR-40）。
+  bool get leftPanelCollapsed => _leftPanelCollapsed;
+
+  /// 中栏笔记列表是否折叠（FR-40）。
+  bool get noteListCollapsed => _noteListCollapsed;
+
+  /// 当前编辑器模式（FR-41 / §5.1）。
+  EditorMode get editorMode => _editorMode;
 
   /// 当前视图模式（FR-25 / FR-26）。
   NoteViewMode get viewMode => _viewMode;
@@ -243,12 +302,32 @@ class AppController extends ChangeNotifier {
   bool get hasSelection =>
       _selectedNotebookId != null || _query.isNotEmpty || _inboxMode;
 
+  /// 读取布尔型本机偏好：仅 `'true'` 视为真，其余（含 `null` / 非法值）为假。
+  static bool _boolPref(String? raw) => raw == 'true';
+
+  /// 尽力持久化本机 UI 偏好：**落盘失败只记录、不抛出**。
+  ///
+  /// UI 刷新不得依赖落盘成功——写库异常（磁盘满 / 数据库被占用 / 表缺失等）若向上
+  /// 抛出，会把其后的 `notifyListeners()` 一起吞掉，表现为「点了没反应」（M7-T12 实测）。
+  /// 故所有「改内存态 → 落盘」的偏好写入统一走本方法。
+  Future<void> _persistPref(String key, String value) async {
+    try {
+      await _settings.set(key, value);
+    } catch (error, stackTrace) {
+      debugPrint('[AppController] 本机偏好写入失败：$key=$value → $error');
+      debugPrintStack(stackTrace: stackTrace, maxFrames: 8);
+    }
+  }
+
   /// 首次加载：读同步配置 → 装配附件缓存 → 载入本地数据 → 若已配置则连接。
   Future<void> bootstrap() async {
     _config = await _settings.loadSyncConfig();
     _cacheLimitBytes = await _settings.cacheLimitBytes();
     _sortMode = noteSortModeFromName(await _settings.get(_kNoteSortMode));
     _tagSortMode = tagSortModeFromName(await _settings.get(_kTagSortMode));
+    _leftPanelCollapsed = _boolPref(await _settings.get(_kLeftPanelCollapsed));
+    _noteListCollapsed = _boolPref(await _settings.get(_kNoteListCollapsed));
+    _editorMode = editorModeFromName(await _settings.get(_kEditorMode));
     _blobStore = CachedBlobStore(
       local: LocalBlobStore(_blobRoot()),
       meta: SqliteBlobCacheMeta(_db),
@@ -310,7 +389,6 @@ class AppController extends ChangeNotifier {
   Future<void> setTagSortMode(TagSortMode mode) async {
     if (mode == _tagSortMode) return;
     _tagSortMode = mode;
-    await _settings.set(_kTagSortMode, mode.persistentName);
     // 立即重排已加载的列表，避免再查一次库。
     switch (mode) {
       case TagSortMode.countDesc:
@@ -322,6 +400,7 @@ class AppController extends ChangeNotifier {
         break;
     }
     notifyListeners();
+    await _persistPref(_kTagSortMode, mode.persistentName);
   }
 
   Future<void> refreshNotes() async {
@@ -394,9 +473,9 @@ class AppController extends ChangeNotifier {
   Future<void> setSortMode(NoteSortMode mode) async {
     if (mode == _sortMode) return;
     _sortMode = mode;
-    await _settings.set(_kNoteSortMode, mode.persistentName);
     _applySort();
     notifyListeners();
+    await _persistPref(_kNoteSortMode, mode.persistentName);
   }
 
   void selectNotebook(String? id) {
@@ -670,10 +749,17 @@ class AppController extends ChangeNotifier {
         cfg.copyWith(baseUrl: SyncConfig.normalizeBaseUrl(cfg.baseUrl));
     _config = normalized;
     if (persist) {
-      await _settings.saveSyncConfig(
-        baseUrl: normalized.baseUrl,
-        token: normalized.token,
-      );
+      // 落盘失败只记录、不抛出：连接流程不应因「配置写库失败」整体中断
+      // （否则其后的 notifyListeners() 被吞，界面停留在旧状态）。
+      try {
+        await _settings.saveSyncConfig(
+          baseUrl: normalized.baseUrl,
+          token: normalized.token,
+        );
+      } catch (error, stackTrace) {
+        debugPrint('[AppController] 同步配置写入失败：${normalized.baseUrl} → $error');
+        debugPrintStack(stackTrace: stackTrace, maxFrames: 8);
+      }
     }
     if (!normalized.isConfigured) {
       _syncState = SyncState.unconfigured;
@@ -706,7 +792,13 @@ class AppController extends ChangeNotifier {
 
   /// 断开连接：清掉地址与 Token（保留 deviceId 与本地数据）。
   Future<void> disconnect() async {
-    await _settings.clearSyncConfig();
+    // 同 connect：清理落盘失败不应阻断断开流程与界面刷新。
+    try {
+      await _settings.clearSyncConfig();
+    } catch (error, stackTrace) {
+      debugPrint('[AppController] 同步配置清理失败 → $error');
+      debugPrintStack(stackTrace: stackTrace, maxFrames: 8);
+    }
     _config = _config.copyWith(baseUrl: '', token: '');
     await _teardownConnection();
     _syncState = SyncState.unconfigured;
@@ -802,9 +894,14 @@ class AppController extends ChangeNotifier {
   /// 调整附件缓存上限（字节）。立即对已装配的缓存生效并回收超出部分。
   Future<void> setCacheLimitBytes(int bytes) async {
     _cacheLimitBytes = bytes;
-    await _settings.setCacheLimitBytes(bytes);
     await _blobStore?.setCapacity(bytes);
     notifyListeners();
+    try {
+      await _settings.setCacheLimitBytes(bytes);
+    } catch (error, stackTrace) {
+      debugPrint('[AppController] 附件缓存上限写入失败：$bytes → $error');
+      debugPrintStack(stackTrace: stackTrace, maxFrames: 8);
+    }
   }
 
   Future<void> _enqueueAndSchedule(Note note) async {
@@ -899,6 +996,135 @@ class AppController extends ChangeNotifier {
   void setRevisionPanelVisible(bool visible) {
     _showRevisionPanel = visible;
     notifyListeners();
+  }
+
+  // ---- 桌面壳层：面板折叠与编辑模式（M7-T06，FR-40 / FR-41） ----
+
+  /// 切换左侧栏折叠态并持久化。
+  Future<void> toggleLeftPanel() => setLeftPanelCollapsed(!_leftPanelCollapsed);
+
+  /// 切换中栏笔记列表折叠态并持久化。
+  Future<void> toggleNoteList() => setNoteListCollapsed(!_noteListCollapsed);
+
+  /// 幂等置位左侧栏折叠态（供「视图」菜单勾选项使用）。
+  ///
+  /// 只改呈现：不清空 `selectedNotebookId` / `selectedNoteId` / 查询词 / 标签筛选 /
+  /// 排序，不写笔记、不入同步队列、不产生修订（BR-40.2）；折叠态为本机偏好，
+  /// 不写入同步净荷（BR-40.3）。
+  Future<void> setLeftPanelCollapsed(bool collapsed) async {
+    if (collapsed == _leftPanelCollapsed) return;
+    _leftPanelCollapsed = collapsed;
+    // 先刷新界面、再落盘：折叠是纯呈现，持久化失败不得阻断 UI（M7-T12 实测缺陷）。
+    notifyListeners();
+    await _persistPref(_kLeftPanelCollapsed, collapsed ? 'true' : 'false');
+  }
+
+  /// 幂等置位中栏笔记列表折叠态。
+  Future<void> setNoteListCollapsed(bool collapsed) async {
+    if (collapsed == _noteListCollapsed) return;
+    _noteListCollapsed = collapsed;
+    notifyListeners();
+    await _persistPref(_kNoteListCollapsed, collapsed ? 'true' : 'false');
+  }
+
+  /// 置位编辑器模式并持久化（详细设计 §5.1）。
+  ///
+  /// 修正性改进：模式不再随切换笔记重置（视图偏好理应稳定）；三态仍共享同一
+  /// Markdown 正本，切换只改呈现，不保存、不入修订（守 BR-23.1）。
+  Future<void> setEditorMode(EditorMode mode) async {
+    if (mode == _editorMode) return;
+    _editorMode = mode;
+    notifyListeners();
+    await _persistPref(_kEditorMode, mode.persistentName);
+  }
+
+  // ---- 桌面壳层：编辑器命令桥与退出（M7-T08 / M7-T10，FR-41 / 详细设计 §4.2 §7） ----
+
+  /// 活动编辑器的命令桥（详细设计 §4.2）。
+  ///
+  /// 撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选 / 导出 / 回写刷新的真实实现都在
+  /// 编辑器内部（`_NoteEditorState`），壳层触达不到，故由编辑器在 `initState`
+  /// 注册自身、`dispose` 注销。
+  EditorCommandTarget? _editorTarget;
+
+  /// 已注册的编辑器命令桥；未挂载编辑器时为 `null`。
+  EditorCommandTarget? get editorTarget => _editorTarget;
+
+  /// 正文编辑类命令是否可用（BR-41.4 / AC-119）。
+  ///
+  /// 未选笔记 / 预览模式（只读呈现）/ 编辑器未挂载时一律不可用，对应菜单项置灰。
+  bool get canEditContent =>
+      _selectedNoteId != null &&
+      _editorMode != EditorMode.preview &&
+      _editorTarget != null;
+
+  /// 登记活动的编辑器命令桥（由 `_NoteEditorState.initState` 调用）。
+  ///
+  /// 刻意不 `notifyListeners()`：注册发生在构建阶段，通知会触发祖先 `markNeedsBuild`
+  /// 而撞上「构建期重建」断言；菜单项可用性由 `isEnabled` 在菜单展开时现算，无需通知。
+  void registerEditorTarget(EditorCommandTarget target) {
+    if (identical(_editorTarget, target)) return;
+    _editorTarget = target;
+  }
+
+  /// 注销编辑器命令桥（由 `_NoteEditorState.dispose` 调用）。同样不作通知，理由同上。
+  void unregisterEditorTarget(EditorCommandTarget target) {
+    if (!identical(_editorTarget, target)) return;
+    _editorTarget = null;
+  }
+
+  /// 「查找笔记」请求信号（详细设计 §4.3）。
+  ///
+  /// 现有能力中没有「笔记内查找」，故「查找」定义为：先展开中栏，再聚焦其搜索框。
+  /// 用自增计数器而非布尔量——布尔量第二次触发不会变化，`NoteList` 便收不到通知。
+  final ValueNotifier<int> _findNotesRequests = ValueNotifier<int>(0);
+
+  /// 供 `NoteList` 监听的「查找笔记」请求信号。
+  ValueListenable<int> get findNotesRequests => _findNotesRequests;
+
+  /// 尚未被 `NoteList` 消费的「查找」请求。
+  ///
+  /// 「查找」命令会先展开中栏再发信号，而 `setNoteListCollapsed` 的通知在下一次
+  /// 建帧时才生效——此刻中栏尚未挂载，纯 `ValueNotifier` 通知会落空。故用此标志
+  /// 让随后建起来的 `NoteList` 在 `initState` 补一次聚焦（AC-120）。
+  bool _findNotesPending = false;
+
+  /// 请求聚焦笔记列表的搜索框（「编辑 → 查找」）。
+  void requestFindNotes() {
+    _findNotesPending = true;
+    _findNotesRequests.value++;
+  }
+
+  /// 消费待处理的「查找」请求；有则返回 `true`（由 `NoteList` 调用，AC-120）。
+  bool consumeFindNotesRequest() {
+    if (!_findNotesPending) return false;
+    _findNotesPending = false;
+    return true;
+  }
+
+  /// 「文件 → 退出应用」（详细设计 §7）：先结束编辑器防抖落库，再尽力推送，最后退出。
+  ///
+  /// 本地写入本身不防抖，落库随编辑即时发生；但推送到服务端受 `_syncDebounce`
+  /// （700ms）与 30s 周期器节制——进程一结束周期器不再触发，故退出前必须补一次
+  /// 尽力推送，否则本次改动可能停在本地。
+  Future<void> quitApplication() async {
+    await _editorTarget?.flushPendingEdits();
+    await _flushPendingSync();
+    exitApp();
+  }
+
+  /// 退出前的尽力推送：取消防抖并立即同步，带短超时。
+  ///
+  /// 超时 / 失败都不阻塞退出——本地库已经落盘，宁可丢一次推送也不能卡住退出。
+  Future<void> _flushPendingSync() async {
+    _syncDebounce?.cancel();
+    _syncDebounce = null;
+    if (_syncClient == null) return;
+    try {
+      await syncNow().timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // 忽略：退出优先（详细设计 §7）。
+    }
   }
 
   Future<List<Revision>> listRevisions(String noteId) async {
@@ -1054,6 +1280,8 @@ class AppController extends ChangeNotifier {
     _syncClient?.close();
     _blobStore?.dispose();
     _auth?.close();
+    _editorTarget = null;
+    _findNotesRequests.dispose();
     super.dispose();
   }
 }

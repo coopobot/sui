@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import '../platform/attachment_picker.dart';
 import 'app_controller.dart';
+import 'desktop_commands.dart';
 import 'markdown_editing_controller.dart';
 import 'markdown_editor.dart';
 
@@ -18,7 +19,8 @@ class NoteEditor extends StatefulWidget {
   State<NoteEditor> createState() => _NoteEditorState();
 }
 
-class _NoteEditorState extends State<NoteEditor> {
+class _NoteEditorState extends State<NoteEditor>
+    implements EditorCommandTarget {
   final TextEditingController _title = TextEditingController();
   final MarkdownEditingController _content = MarkdownEditingController();
   final TextEditingController _tagInput = TextEditingController();
@@ -33,13 +35,19 @@ class _NoteEditorState extends State<NoteEditor> {
   List<Attachment> _attachments = [];
 
   /// 三态编辑模式：格式（默认）/ 源码 / 预览。正本始终是 Markdown。
-  EditorMode _mode = EditorMode.formatted;
+  /// （M7-T06 上提为 [AppController] 的本地视图偏好，见下方 `_mode` getter。）
   bool _loaded = false;
   String? _loadedNoteId;
 
   /// 正在进行的「写回模型」次数。非零期间禁止用模型内容重绑输入框，
   /// 否则每次敲字触发的保存都会重置标题/正文，selection 被置回 -1，光标跳行首。
   int _pendingSaves = 0;
+
+  /// 已注册到 [AppController] 的命令桥引用（M7-T08，详细设计 §4.2）。
+  ///
+  /// 注册发生在 `initState`，注销发生在 `dispose`——而 `dispose` 内不能再查 `context`
+  /// （元素已失活），因此在此留存注册时的实例，供注销复用。
+  AppController? _registeredController;
 
   @override
   void initState() {
@@ -49,10 +57,17 @@ class _NoteEditorState extends State<NoteEditor> {
     // 格式模式：把任务项 `- [ ]` / `- [x]` 的勾选框渲染为可点选复选框（§10.1）。
     _content.formatTaskCheckboxBuilder = _buildTaskCheckbox;
     _content.onToggleTask = _toggleTask;
+    // 向壳层登记命令桥（FR-41）：登记后「编辑 / 文件」菜单中作用于正文的命令才可用。
+    // 此处刻意不触发 notifyListeners——注册发生在构建阶段，通知会撞上「构建期重建」断言；
+    // 菜单项的可用性是在菜单展开时按 `isEnabled` 现算的，无需依赖通知。
+    _registeredController = _controller;
+    _registeredController!.registerEditorTarget(this);
   }
 
   @override
   void dispose() {
+    _registeredController?.unregisterEditorTarget(this);
+    _registeredController = null;
     _title.dispose();
     _content.dispose();
     _tagInput.dispose();
@@ -62,6 +77,12 @@ class _NoteEditorState extends State<NoteEditor> {
   }
 
   AppController get _controller => context.read<AppController>();
+
+  /// 三态编辑模式（M7-T06 上提，详细设计 §5.1）：取自 [AppController] 的本地视图偏好。
+  ///
+  /// 不再随切换笔记重置（`NoteEditor(key: ValueKey(noteId))` 重建 State 与否都稳定）；
+  /// 三态共享同一 Markdown 正本，切换只改呈现，不保存、不入修订（守 BR-23.1）。
+  EditorMode get _mode => _controller.editorMode;
 
   Note? get _note => _controller.notes
       .where((s) => s.note.id == _controller.selectedNoteId)
@@ -519,7 +540,8 @@ class _NoteEditorState extends State<NoteEditor> {
                 selected: {_mode},
                 onSelectionChanged: (sel) {
                   // 三态只切换「怎么画 / 能不能改」，正本不变，故无需保存。
-                  setState(() => _mode = sel.first);
+                  // 写入 AppController 单一状态源（M7-T06 上提）：与「视图」菜单同源。
+                  _controller.setEditorMode(sel.first);
                 },
                 showSelectedIcon: false,
               ),
@@ -792,6 +814,62 @@ class _NoteEditorState extends State<NoteEditor> {
         ],
       ),
     );
+  }
+
+  // ---- EditorCommandTarget：桌面壳层命令的真实实现（M7-T08，详细设计 §4.2） ----
+  //
+  // 壳层（菜单栏 / 快捷键 / 顶栏按钮）只发命令，真实落在编辑器内部，故由本 State 实现
+  // 该接口并在 initState 注册、dispose 注销。可用性统一由 AppController 判定后置灰。
+
+  @override
+  bool get canUndo => _undoHistory.value.canUndo;
+
+  @override
+  bool get canRedo => _undoHistory.value.canRedo;
+
+  @override
+  void undo() => _undoHistory.undo();
+
+  @override
+  void redo() => _undoHistory.redo();
+
+  @override
+  void cut() => _dispatchTextIntent(
+        const CopySelectionTextIntent.cut(SelectionChangedCause.keyboard),
+      );
+
+  @override
+  void copy() => _dispatchTextIntent(CopySelectionTextIntent.copy);
+
+  @override
+  void paste() => _dispatchTextIntent(
+        const PasteTextIntent(SelectionChangedCause.keyboard),
+      );
+
+  @override
+  void selectAll() => _dispatchTextIntent(
+        const SelectAllTextIntent(SelectionChangedCause.keyboard),
+      );
+
+  @override
+  void exportNote() => _showExportDialog();
+
+  @override
+  Future<void> flushPendingEdits() async {
+    // 本地写入本身不防抖（随编辑即时落库），但编辑器内部对「写回模型」另有一层 400ms
+    // 防抖；退出前补一次 [save]，确保正文以当前字面量落库（详细设计 §7 第 1 步）。
+    await _save();
+  }
+
+  /// 把正文编辑意图派发给 [EditableText] 自带的动作（菜单 / 快捷键与系统行为同源同效）。
+  ///
+  /// 用 `maybeInvoke` 而非 `invoke`：选区折叠 / 剪贴板为空 / 无匹配动作时静默返回，
+  /// 不抛异常——菜单项在壳层已由 `AppController.canEditContent` 统一置灰。
+  void _dispatchTextIntent<T extends Intent>(T intent) {
+    final ctx = _contentFocus.context;
+    if (ctx == null) return; // 预览模式等：正文输入框未挂载
+    Actions.maybeInvoke<T>(ctx, intent);
+    _contentFocus.requestFocus();
   }
 }
 

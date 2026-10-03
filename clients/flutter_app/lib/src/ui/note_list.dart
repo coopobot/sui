@@ -7,12 +7,59 @@ import 'app_controller.dart';
 ///
 /// 列表头部提供排序切换（更新时间 / 创建时间 / 标题）；选择记忆为本机偏好，
 /// 由 [AppController.setSortMode] 落 SQLite，重启保留。
-class NoteList extends StatelessWidget {
+class NoteList extends StatefulWidget {
   const NoteList({super.key, required this.controller});
   final AppController controller;
 
   @override
+  State<NoteList> createState() => _NoteListState();
+}
+
+class _NoteListState extends State<NoteList> {
+  /// 搜索框焦点。供「视图 → 查找」在展开中栏后聚焦（FR-41 / AC-120）。
+  final FocusNode _searchFocus = FocusNode();
+
+  /// 搜索框文本控制器（AC-112）。初值取当前查询词，中栏折叠时本 widget 被卸载，
+  /// 再展开时据此复原框内文本，避免「框空但结果已筛」的呈现分裂。
+  final TextEditingController _searchController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController.text = widget.controller.query;
+    widget.controller.findNotesRequests.addListener(_onFindRequested);
+    // 中栏原先折叠时，「查找」命令会先展开中栏再发信号，信号发出时本 widget
+    // 尚未挂载、监听未生效；此处消费一次待处理请求，确保聚焦不落空（AC-120）。
+    if (widget.controller.consumeFindNotesRequest()) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _searchFocus.requestFocus();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.findNotesRequests.removeListener(_onFindRequested);
+    _searchFocus.dispose();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  /// 收到「查找」请求时聚焦搜索框；中栏若原本折叠，命令侧已先行展开
+  /// （见 [desktopCommands] 的 findNotes），此处无需再管面板可见性。
+  void _onFindRequested() {
+    if (!mounted) return;
+    _searchFocus.requestFocus();
+  }
+
+  AppController get controller => widget.controller;
+
+  @override
   Widget build(BuildContext context) {
+    // 查询词被外部改动（如「视图 → 归档 / 回收站」清空搜索）时同步框内文本（AC-112）。
+    if (_searchController.text != controller.query) {
+      _searchController.text = controller.query;
+    }
     final notes = controller.notes;
 
     return Column(
@@ -35,6 +82,8 @@ class NoteList extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: TextField(
+            controller: _searchController,
+            focusNode: _searchFocus,
             onChanged: controller.search,
             decoration: const InputDecoration(
               hintText: '搜索标题或内容…',

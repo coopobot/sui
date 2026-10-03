@@ -152,16 +152,19 @@
 
 | 文件 | 职责 |
 |------|------|
-| `note_shell.dart` | 响应式三栏骨架（宽屏三栏 / 窄屏抽屉 + 导航堆栈） |
+| `note_shell.dart` | 响应式三栏骨架（宽屏三栏 / 窄屏抽屉 + 导航堆栈）；桌面端左栏 / 中栏按视图偏好**条件渲染**（折叠面板与其分隔线一并消失） |
 | `notebook_tree.dart` | 笔记本树 + 收件箱 + 全部笔记 + 标签入口 + 归档 / 回收站入口（底部区域） |
 | `note_list.dart` | 笔记列表（置顶 / 剪藏标签 / 搜索过滤） |
 | `note_editor.dart` | 编辑器（标题 / 格式工具栏 + 编辑快捷键 / 勾选框点选 / 标签 / 附件卡片 / 历史 / 导出 / 删除） |
 | `markdown_editing_controller.dart` | 「格式 / 源码 / 预览」三态编辑控制器（Markdown 为正本；格式态渲染行内样式、图片单元、任务勾选框与高亮，支持选中调尺寸） |
 | `markdown_editor.dart` | 源码编辑 + 预览切换（`sizedImageBuilder` 渲染 `sui://` 附件图；预览态渲染任务列表与 `==高亮==`） |
 | `revision_panel.dart` | 版本历史侧栏 + 一键恢复 |
-| `app_controller.dart` | 全局状态与业务编排（附件增删 / 上传 / 缓存状态）；同步调度：编辑防抖 0.7s 推送、WS 通知拉取、30s 周期兜底 |
+| `app_controller.dart` | 全局状态与业务编排（附件增删 / 上传 / 缓存状态）；桌面折叠状态 `leftPanelCollapsed` / `noteListCollapsed` 与编辑模式上提（本地视图偏好 `ui.*`，**不进同步**）；退出前落库 `flushPendingEdits`；同步调度：编辑防抖 0.7s 推送、WS 通知拉取、30s 周期兜底 |
+| `desktop_commands.dart` | 桌面命令**单一来源**（`DesktopCommandId` / `DesktopCommand` / `desktopCommands` 注册表）+ `EditorCommandTarget` 接口桥；菜单项 / 顶栏图标按钮 / 快捷键**同源** |
+| `app_menu_bar.dart` | 桌面端自绘菜单栏「文件 / 编辑 / 视图 / 帮助」+ 顶栏折叠切换控件 `PanelToggles`（窄屏 / 非桌面**不渲染**） |
 | `sync_settings_dialog.dart` | 同步设置对话框（服务端地址 / Token / 设备 ID 的录入与校验） |
 | `platform/attachment_picker.dart` | 跨端文件选择（`file_picker`，返回文件名 + 字节） |
+| `platform/app_lifecycle.dart`（+ `_io` / `_web`） | 桌面退出前落库接缝（条件导入）：桌面实现「`flushPendingEdits` → 尽力推送 → 退出」，其他平台降级为空实现 |
 
 **服务端地址**：不写死在代码里，由用户在「同步设置」对话框录入，经
 `SyncConfig.normalizeBaseUrl` 规整后存入本地 SQLite `settings` 表；未填写时输入框以
@@ -169,14 +172,17 @@
 
 ### 3.3 测试
 
-- note_core：113 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
-  缓存 LRU / 配置存取 / 落盘持久化 / 编辑器格式化（快捷键映射同源、勾选框往返、`==高亮==`
-  往返、块级行为），另含 e2e（首批注册后双端 push/pull→冲突合并→重发；附件映射同步 +
-  字节按需下载）。
-- flutter_app：27 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
-  第二设备拉取）、`editor_format_image_test.dart`（格式模式图片渲染与尺寸手柄）与
+- note_core：116 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+  缓存 LRU / 配置存取 / 落盘持久化 / 笔记本排序（同级 `sortOrder` 递增、子笔记本权重独立、
+  重排归一化）/ 编辑器格式化（快捷键映射同源、勾选框往返、`==高亮==` 往返、块级行为），另含
+  e2e（首批注册后双端 push/pull→冲突合并→重发；附件映射同步 + 字节按需下载）。
+- flutter_app：41 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
+  第二设备拉取）、`editor_format_image_test.dart`（格式模式图片渲染与尺寸手柄）、
   `editor_enhancement_test.dart` / `editor_enhancement_e2e_test.dart`（编辑器增强：编辑快捷键、
-  勾选框点选回写、`==高亮==` 三态渲染，以及「打开不编辑」跨三态逐字节保真）。
+  勾选框点选回写、`==高亮==` 三态渲染，以及「打开不编辑」跨三态逐字节保真）与
+  `desktop_shell_test.dart`（桌面外壳 12 项：折叠四态与上下文不丢、视图偏好持久化、恢复入口、
+  菜单命令与图标 / 快捷键等价、不可用命令置灰、快捷键提示、编辑模式跨重启、窄屏不渲染、
+  落盘失败不阻断刷新）。
 - 运行前确保 `libsqlite3` 可用（见[快速开始 §2.3](getting-started.md#23-sqlite3-native-库drift-依赖仅原生平台)）。
 
 ## 4. 同步协议与冲突解决
@@ -403,11 +409,12 @@ sui/
 - **服务端**：Go 构建通过、22/22 测试通过；`ping` / `register` / `login` / `push` / `pull` /
   `blobs`(HEAD/PUT/GET) / `revisions` / `clips` / `ws` 全部实测正常，鉴权 401、密码错误 401、
   已建号后重复注册 403、坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
-- **note_core**：113/113 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
-  缓存 LRU / 配置存取 / 落盘持久化 / 编辑器格式化 + e2e 同步等）。
-- **flutter_app**：27/27 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
+- **note_core**：116/116 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+  缓存 LRU / 配置存取 / 落盘持久化 / 笔记本排序 / 编辑器格式化 + e2e 同步等）。
+- **flutter_app**：41/41 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
   第二台设备拉取到；格式模式图片渲染与尺寸手柄；编辑器增强的快捷键 / 勾选框 / 高亮与
-  「打开不编辑」保真用例）。
+  「打开不编辑」保真用例；桌面外壳 12 项：折叠 / 展开与持久化、菜单命令等价与置灰、
+  编辑模式跨重启、窄屏不渲染、落盘失败不阻断刷新）。
 - **同步链路**：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
   同步触发点有三：编辑防抖 0.7s 推送、WS 通知拉取、**30s 周期兜底**（让「断网改动在恢复
   网络后自动补上」成立，而不必等用户再编辑一次）。
@@ -453,6 +460,14 @@ sui/
   失败 / 超限降级为**保留绝对外链**（不阻断整篇），数量经响应 `unlocalizedImages` 回带。
   Chrome 扩展新增「智能提取正文 / 全页快照」分段控件（默认 `article`、记住上次），采集时
   等待完整 DOM 并触发懒加载图片。幂等键仍为 `notes.source_url`，与 `mode` 无关。
+- **桌面端界面布局优化（M7）**：桌面端左栏（笔记本树）与中栏（笔记列表）可**分别**折叠 / 展开，
+  折叠后面板与其分隔线一并消失，得到纯编辑区沉浸写作；顶栏左上角新增**自绘菜单栏**
+  「文件 / 编辑 / 视图 / 帮助」，菜单项与顶栏图标按钮、编辑快捷键**同源**（`desktopCommands`
+  单一来源），不可用命令**置灰**、有状态命令显示勾选、快捷键以右侧提示呈现。折叠状态与
+  「格式 / 源码 / 预览」编辑模式为**本机视图偏好**（`ui.leftPanelCollapsed` /
+  `ui.noteListCollapsed` / `ui.editorMode`），**重启后保持**且**不进同步**；经菜单「退出」时
+  先 `flushPendingEdits` 落库、再尽力推送后退出。**窄屏 / 移动端 / Web 不渲染**菜单栏与折叠
+  开关，既有响应式导航**不回归**（FR-40 / FR-41）。
 
 ### 8.2 历史缺口（均已修复）
 

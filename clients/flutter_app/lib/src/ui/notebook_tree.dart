@@ -78,7 +78,7 @@ class NotebookTree extends StatelessWidget {
                   visualDensity: VisualDensity.compact,
                   color: _sidebarFgDim,
                   icon: const Icon(Icons.add, size: 18),
-                  onPressed: () => _promptCreateNotebook(context),
+                  onPressed: () => showCreateNotebookDialog(context, controller),
                 ),
               ],
             ),
@@ -115,7 +115,7 @@ class NotebookTree extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: TextButton.icon(
               style: TextButton.styleFrom(foregroundColor: _sidebarFg),
-              onPressed: () => _openTagOverview(context),
+              onPressed: () => openTagOverview(context, controller),
               icon: const Icon(Icons.label_outline, size: 18),
               label: const Text('全部标签'),
             ),
@@ -141,28 +141,6 @@ class NotebookTree extends StatelessWidget {
             },
           ),
         ],
-      ),
-    );
-  }
-
-  Future<void> _promptCreateNotebook(BuildContext context) async {
-    final name = await _askName(context, '新建笔记本');
-    if (name == null || name.trim().isEmpty) return;
-    await controller.createNotebook(name.trim());
-    if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已创建笔记本「$name」')),
-      );
-    }
-  }
-
-  /// 打开标签总览（FR-22）。窄屏用全屏页面，宽屏用对话框。
-  void _openTagOverview(BuildContext context) {
-    controller.refreshTagSummaries();
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => TagOverview(controller: controller),
-        fullscreenDialog: true,
       ),
     );
   }
@@ -350,6 +328,22 @@ class NoteTreeDrawer extends StatelessWidget {
     return Drawer(
       backgroundColor: _sidebarBg,
       child: NotebookTree(controller: controller),
+    );
+  }
+}
+
+/// 「新建笔记本」对话框（FR-41 / 详细设计 §4.3）。
+///
+/// 由左栏「笔记本」栏的「+」入口与「文件 → 新建笔记本」菜单**共用**同一实现，
+/// 使左栏折叠时仍可经菜单新建笔记本（BR-40.5 / AC-115），避免两处行为漂移。
+Future<void> showCreateNotebookDialog(
+    BuildContext context, AppController controller) async {
+  final name = await _askName(context, '新建笔记本');
+  if (name == null || name.trim().isEmpty) return;
+  await controller.createNotebook(name.trim());
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已创建笔记本「$name」')),
     );
   }
 }

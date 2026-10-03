@@ -1,7 +1,9 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'app_controller.dart';
+import 'app_menu_bar.dart';
 import 'note_editor.dart';
 import 'note_list.dart';
 import 'notebook_tree.dart';
@@ -21,7 +23,10 @@ class NoteShell extends StatelessWidget {
         final controller = context.watch<AppController>();
 
         if (wide) {
-          return _WideLayout(controller: controller);
+          return _WideLayout(
+            controller: controller,
+            showDesktopChrome: _isDesktopPlatform,
+          );
         }
         return _NarrowLayout(controller: controller);
       },
@@ -29,15 +34,42 @@ class NoteShell extends StatelessWidget {
   }
 }
 
+/// 是否桌面平台（详细设计 §6）：菜单栏与折叠切换仅在桌面三平台渲染。
+///
+/// 用 [defaultTargetPlatform] 而非 `dart:io` 的 `Platform`：Web 上后者不可用，
+/// 且能避免条件导入；[kIsWeb] 先行兜底，避免 Web 被误判为桌面。
+bool get _isDesktopPlatform {
+  if (kIsWeb) return false;
+  return defaultTargetPlatform == TargetPlatform.windows ||
+      defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.linux;
+}
+
 class _WideLayout extends StatelessWidget {
-  const _WideLayout({required this.controller});
+  const _WideLayout({required this.controller, required this.showDesktopChrome});
   final AppController controller;
+
+  /// 是否渲染桌面外壳（应用菜单栏 + 折叠切换，详细设计 §6）。
+  /// 宽屏但非桌面平台（如 Web）为 false：仍出宽屏三栏，但不含菜单栏与切换控件。
+  final bool showDesktopChrome;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('随手记 Sui'),
+        // 标题区顺序固定：菜单栏 → 折叠切换 → 标题（BR-41.5 / AC-117）。
+        titleSpacing: showDesktopChrome ? 8 : null,
+        title: showDesktopChrome
+            ? Row(
+                children: [
+                  AppMenuBar(controller: controller),
+                  const SizedBox(width: 4),
+                  PanelToggles(controller: controller),
+                  const SizedBox(width: 8),
+                  const Text('随手记 Sui'),
+                ],
+              )
+            : const Text('随手记 Sui'),
         actions: [
           _SyncActions(controller: controller),
           _newNoteAction(context),
@@ -45,13 +77,21 @@ class _WideLayout extends StatelessWidget {
       ),
       body: Row(
         children: [
-          SizedBox(width: 280, child: NotebookTree(controller: controller)),
-          const VerticalDivider(width: 1),
-          Expanded(
-            flex: 2,
-            child: NoteList(controller: controller),
-          ),
-          const VerticalDivider(width: 1),
+          // 左栏（笔记本树）可折叠（FR-40）：分隔线与其相邻面板同生共死，
+          // 折叠后不留悬空 VerticalDivider。
+          if (!controller.leftPanelCollapsed) ...[
+            SizedBox(width: 280, child: NotebookTree(controller: controller)),
+            const VerticalDivider(width: 1),
+          ],
+          // 中栏（笔记列表）可折叠（FR-40）。
+          if (!controller.noteListCollapsed) ...[
+            Expanded(
+              flex: 2,
+              child: NoteList(controller: controller),
+            ),
+            const VerticalDivider(width: 1),
+          ],
+          // 编辑区常驻：折叠只影响前两栏，flex:4 自动吃掉释放出的宽度。
           Expanded(
             flex: 4,
             child: Row(

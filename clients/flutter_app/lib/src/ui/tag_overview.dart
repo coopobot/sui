@@ -3,6 +3,20 @@ import 'package:note_core/note_core.dart';
 
 import 'app_controller.dart';
 
+/// 打开标签总览（FR-22）。
+///
+/// 「全部标签」入口在左栏内与「视图」菜单中各有一处（BR-40.5 / AC-115），
+/// 故把「刷新标签汇总 + 推入总览页」抽成公共函数，两处**同源同效**，避免实现分叉。
+void openTagOverview(BuildContext context, AppController controller) {
+  controller.refreshTagSummaries();
+  Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (_) => TagOverview(controller: controller),
+      fullscreenDialog: true,
+    ),
+  );
+}
+
 /// 标签总览面板（FR-22）：全部标签 + 关联数量 + 多选筛选 + 排序切换。
 ///
 /// 以对话框形式从笔记本树的「全部标签」入口打开；点击标签即在笔记列表中
