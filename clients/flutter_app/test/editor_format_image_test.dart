@@ -8,12 +8,14 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:note_core/note_core.dart';
 import 'package:provider/provider.dart';
 
 import 'package:sui_flutter_app/src/ui/app_controller.dart';
 import 'package:sui_flutter_app/src/ui/markdown_editing_controller.dart';
+import 'package:sui_flutter_app/src/ui/markdown_editor.dart';
 import 'package:sui_flutter_app/src/ui/note_editor.dart';
 import 'package:sui_flutter_app/src/ui/note_shell.dart';
 
@@ -24,8 +26,8 @@ void main() {
         text: '前 ![](http://x/a.png){width=320} 后',
       );
       controller.styled = true;
-      controller.formatImageBuilder =
-          (context, image) => const SizedBox(width: 40, height: 30);
+      controller.formatImageBuilder = (context, image, {bool? block}) =>
+          const SizedBox(width: 40, height: 30);
 
       late TextSpan span;
       await tester.pumpWidget(
@@ -77,8 +79,7 @@ void main() {
     // 根因是 WidgetSpan 采用中线对齐（middle），呈现单元远高于单行行高时，
     // 其顶部会被抬到字段之上。修法为行顶对齐（top），使行高**向下**扩展。
     // 见 editor-formatting.md §5.4「嵌入几何（垂直对齐）」。
-    testWidgets('格式模式高图不溢出到字段之上（WidgetSpan 行顶对齐）',
-        (tester) async {
+    testWidgets('格式模式高图不溢出到字段之上（WidgetSpan 行顶对齐）', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -87,11 +88,12 @@ void main() {
       controller.styled = true;
       // 呈现单元远高于单行行高，构成「高图」场景（默认尺寸随容器自适应，
       // 竖向可远超一行）。
-      controller.formatImageBuilder = (context, image) => const SizedBox(
-            key: ValueKey<String>('format-image'),
-            width: 240,
-            height: 360,
-          );
+      controller.formatImageBuilder =
+          (context, image, {bool? block}) => const SizedBox(
+                key: ValueKey<String>('format-image'),
+                width: 240,
+                height: 360,
+              );
 
       await tester.pumpWidget(
         MaterialApp(
@@ -123,6 +125,103 @@ void main() {
         greaterThanOrEqualTo(fieldRect.top),
         reason: '格式模式图片必须落在字段内（行顶对齐），'
             '不得因居中对齐把顶部溢出到整篇笔记之上（BUG2）',
+      );
+
+      // 偏移契约仍须成立（BR-27.1）。
+      final span = controller.buildTextSpan(
+        context: tester.element(find.byType(TextField)),
+        style: const TextStyle(),
+        withComposing: false,
+      );
+      expect(span.toPlainText().length, controller.text.length);
+    });
+
+    // 缺陷修复（§5.5 / AC-74 / AC-80）：独占块的图片引用按**块级呈现单元**布局。
+    // 判定依据：引用左侧是行首、右侧是行尾（文本首尾或换行）；历史行内引用仍在
+    // 同一行，保持行内呈现，正本逐字保真。
+    testWidgets('独占块引用向 UI 层传 block=true，行内引用传 false', (tester) async {
+      Future<bool?> blockFor(String text) async {
+        bool? seen;
+        final controller = MarkdownEditingController(text: text);
+        controller.styled = true;
+        controller.formatImageBuilder = (context, image, {bool? block}) {
+          seen = block;
+          return const SizedBox(width: 10, height: 10);
+        };
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Builder(builder: (context) {
+              controller.buildTextSpan(
+                context: context,
+                style: const TextStyle(),
+                withComposing: false,
+              );
+              return const SizedBox.shrink();
+            }),
+          ),
+        );
+        return seen;
+      }
+
+      // 独占块：引用前后即行边界（含文本首尾）。
+      expect(await blockFor('![a](http://x/a.png)'), isTrue);
+      expect(await blockFor('正文\n\n![a](http://x/a.png)\n\n后文'), isTrue);
+      // 行内引用：同一行内还有其它文字 → 不按块级布局。
+      expect(await blockFor('前 ![a](http://x/a.png) 后'), isFalse);
+      expect(await blockFor('前 ![a](http://x/a.png)'), isFalse);
+    });
+
+    // 块级呈现的几何效果（缺陷 B18）：块高向下扩展，后续文字整体下移、与图片不
+    // 重叠，光标可落到图片下沿之下。
+    //
+    // 根因：[EditableText] 未显式给定 `strutStyle` 时默认
+    // `StrutStyle.fromTextStyle(style, forceStrutHeight: true)`，会把**每一行**都
+    // 强制成固定行高，从而忽略行内 WidgetSpan 的实际高度 —— 块级图片溢出自己那
+    // 一行、压住下方文字，光标也落不到图片下面。生产代码在 markdown_editor.dart
+    // 显式传 `forceStrutHeight: false`，本用例走**真实编辑器**验证该修复。
+    testWidgets('块级呈现的图片下方留出文字行高（文字整体下移）', (tester) async {
+      final controller = MarkdownEditingController(
+        text: '![a](sui://deadbeef)\n\n下方文字',
+      );
+      controller.formatImageBuilder =
+          (context, image, {bool? block}) => SizedBox(
+                key: const ValueKey<String>('format-image'),
+                width: block == true ? double.infinity : 240,
+                height: 360,
+              );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 400,
+              height: 600,
+              child: MarkdownEditor(
+                controller: controller,
+                mode: EditorMode.formatted,
+                onChanged: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final imageRect =
+          tester.getRect(find.byKey(const ValueKey<String>('format-image')));
+      final editable =
+          tester.allRenderObjects.whereType<RenderEditable>().first;
+      // 正本文末光标（offset = text.length）——即「下方文字」之后。
+      final caret = editable.getLocalRectForCaret(
+        TextPosition(offset: controller.text.length),
+      );
+      final caretTop = editable.localToGlobal(caret.topLeft).dy;
+
+      expect(
+        caretTop,
+        greaterThanOrEqualTo(imageRect.bottom - 2),
+        reason: '文末光标须落在图片下沿之下，说明后续文字整体下移而非被图片遮盖'
+            '（光标 y=$caretTop，图片下沿 y=${imageRect.bottom}）',
       );
 
       // 偏移契约仍须成立（BR-27.1）。
@@ -179,8 +278,7 @@ void main() {
         )
         .last;
 
-    testWidgets('点按内联图片即选中并弹出尺寸条，点「中」写回 {width=50%}',
-        (tester) async {
+    testWidgets('点按内联图片即选中并弹出尺寸条，点「中」写回 {width=50%}', (tester) async {
       await pumpEditor(tester, '前 ![封面](sui://deadbeef) 后');
 
       // 初始化：引用被渲染为图片呈现单元（附件缺失 → 占位），此时未选中，
@@ -220,6 +318,30 @@ void main() {
       await tester.pump();
 
       expect(find.text('图片尺寸'), findsOneWidget);
+
+      await db.close();
+    });
+
+    // 缺陷修复（§5.5 / AC-80）：独占块的图片引用在真实编辑器里按块级呈现单元
+    // 布局 —— 呈现单元占满段落宽（左对齐），块高向下扩展，下方文字整体后移。
+    testWidgets('独占块图片在编辑器中占满段落宽', (tester) async {
+      await pumpEditor(tester, '![封面](sui://deadbeef)\n\n后文');
+
+      final icon = find.descendant(
+        of: find.byType(NoteEditor),
+        matching: find.byIcon(Icons.broken_image_outlined),
+      );
+      expect(icon, findsOneWidget, reason: '附件缺失时显示占位，不阻断编辑');
+
+      // 块级呈现：图片被 Align 左对齐并撑满段落宽。
+      final unit = find.ancestor(of: icon, matching: find.byType(Align)).first;
+      final unitWidth = tester.getSize(unit).width;
+      final fieldWidth = tester.getSize(contentField()).width;
+      expect(
+        unitWidth,
+        greaterThan(fieldWidth * 0.8),
+        reason: '块级呈现单元应占满段落宽（$unitWidth vs 段落宽 $fieldWidth）',
+      );
 
       await db.close();
     });

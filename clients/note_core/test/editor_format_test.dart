@@ -146,13 +146,16 @@ void main() {
     test('生成 ![文件名](sui://<sha256>)', () {
       final r = EditorFormat.insertImage('', 0, 0,
           filename: '图.png', sha256: 'abc123');
-      expect(r.text, '![图.png](sui://abc123)');
+      expect(r.text, '![图.png](sui://abc123)\n',
+          reason: '文末插入时补一个换行，使图片下方仍存在可落点的行（§5.5）');
+      expect(r.selectionStart, r.text.length, reason: '光标落在图片下方的新行行首');
+      expect(r.selectionEnd, r.selectionStart);
     });
 
     test('带预设尺寸写入属性块', () {
       final r = EditorFormat.insertImage('', 0, 0,
           filename: 'a.png', sha256: 's', size: EditorFormat.presetMedium);
-      expect(r.text, '![a.png](sui://s){width=50%}');
+      expect(r.text, '![a.png](sui://s){width=50%}\n');
     });
 
     test('renderSizeAttribute：宽高 / 自适应', () {
@@ -163,6 +166,56 @@ void main() {
             height: ImageDimension(200, SizeUnit.pixel),
           )),
           '{width=320 height=200}');
+    });
+  });
+
+  group('ImageBlockInsertion（图片独占块插入，§5.5 / AC-74 / AC-80）', () {
+    const md = '![p.png](sui://abc)';
+
+    test('行中插入：所在行一分为二，图片自占一段（前后空行）', () {
+      final r = EditorFormat.insertImage('前文后文', 2, 2,
+          filename: 'p.png', sha256: 'abc');
+      expect(r.text, '前文\n\n$md\n\n后文');
+      expect(r.selectionStart, '前文\n\n$md\n\n'.length,
+          reason: '光标置于图片引用之后（下一块起始处）');
+    });
+
+    test('行首插入且已有后续段落：前不补、后补空行', () {
+      final r = EditorFormat.insertImage('正文\n\n下一段', 0, 0,
+          filename: 'p.png', sha256: 'abc');
+      expect(r.text, '$md\n\n正文\n\n下一段');
+      expect(r.selectionStart, '$md\n\n'.length);
+    });
+
+    test('文末插入：补一个换行，使图片下方仍可落点', () {
+      final r = EditorFormat.insertImage('正文', 2, 2,
+          filename: 'p.png', sha256: 'abc');
+      expect(r.text, '正文\n\n$md\n');
+      expect(r.selectionStart, r.text.length);
+    });
+
+    test('替换选区为图片引用，且不吞掉相邻内容', () {
+      final r = EditorFormat.insertImage('前[选中]后', 1, 5,
+          filename: 'p.png', sha256: 'abc');
+      expect(r.text, '前\n\n$md\n\n后');
+    });
+
+    test('已在空行插入：复用现有空行，不产生多余空行', () {
+      final r = EditorFormat.insertImage('上段\n\n下段', 3, 3,
+          filename: 'p.png', sha256: 'abc');
+      expect(r.text, '上段\n\n$md\n\n下段');
+    });
+
+    test('带尺寸属性同样独占块', () {
+      final r = EditorFormat.insertImage('前文', 2, 2,
+          filename: 'p.png', sha256: 'abc', size: EditorFormat.presetMedium);
+      expect(r.text, '前文\n\n$md{width=50%}\n');
+    });
+
+    test('保真：除插入点外其余字节逐字不变', () {
+      final r = EditorFormat.insertImage('AAA\nBBB', 3, 3,
+          filename: 'p.png', sha256: 'abc');
+      expect(r.text, 'AAA\n\n$md\n\nBBB');
     });
   });
 

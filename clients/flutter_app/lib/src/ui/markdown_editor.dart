@@ -105,6 +105,13 @@ class _SourceEditorState extends State<_SourceEditor> {
 
   FocusNode get _focus => widget.focusNode ?? _internalFocus!;
 
+  /// 正文基础样式：源码模式用等宽字体，格式模式用正文字体；两者都取 1.6 倍行距。
+  /// 抽成 getter 是为了让 [TextField.style] 与 [TextField.strutStyle] 共用同一份
+  /// 样式定义（见 [_buildField] 中关于 B18 的说明）。
+  TextStyle get _textStyle => widget.monospace
+      ? const TextStyle(fontFamily: 'monospace', fontSize: 14, height: 1.6)
+      : const TextStyle(fontSize: 15, height: 1.6);
+
   @override
   void dispose() {
     _debounce?.cancel();
@@ -145,13 +152,14 @@ class _SourceEditorState extends State<_SourceEditor> {
         expands: true,
         maxLines: null,
         keyboardType: TextInputType.multiline,
-        style: widget.monospace
-            ? const TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 14,
-                height: 1.6,
-              )
-            : const TextStyle(fontSize: 15, height: 1.6),
+        style: _textStyle,
+        // [EditableText] 的默认 strutStyle 是
+        // `StrutStyle.fromTextStyle(style, forceStrutHeight: true)`，会把**每一行**都强制
+        // 成固定行高，从而忽略行内 [WidgetSpan] 的实际高度：块级图片会溢出自己那一行、
+        // 压住下方文字，光标也落不到图片下面（B18）。显式关闭 forceStrutHeight，含图片
+        // 的行即可按图片高度撑开，后续文字整体下移（§5.5 / AC-74）。
+        // 普通文字行高仍由 1.6 倍行距的 strut 决定，观感不变。
+        strutStyle: StrutStyle.fromTextStyle(_textStyle, forceStrutHeight: false),
         decoration: InputDecoration(
           border: InputBorder.none,
           hintText: widget.monospace

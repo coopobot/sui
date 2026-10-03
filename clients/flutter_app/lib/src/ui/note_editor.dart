@@ -34,6 +34,15 @@ class _NoteEditorState extends State<NoteEditor>
   List<String> _tags = [];
   List<Attachment> _attachments = [];
 
+  /// 模式行「窄屏紧凑排布」的宽度阈值（逻辑像素，ui-spec §4.1 / B17）。
+  ///
+  /// 编辑区自身宽度小于该值时，三态切换只留图标、模式行与「历史 / 导出」压成一行，
+  /// 把高度尽量让给正文编辑区。取 520 的依据：桌面壳层 1200x800 下编辑区约 612px
+  /// （左栏 280 + 中栏 306 + 右栏 612）、1280x900 下约 665px，均高于阈值 —— 桌面与 e2e
+  /// 用例仍能按文本找到「格式 / 源码 / 预览」；而手机竖屏（约 360~430px）低于阈值，
+  /// 走紧凑排布，正是本次要修的窄屏场景。
+  static const double _compactWidth = 520;
+
   /// 三态编辑模式：格式（默认）/ 源码 / 预览。正本始终是 Markdown。
   /// （M7-T06 上提为 [AppController] 的本地视图偏好，见下方 `_mode` getter。）
   bool _loaded = false;
@@ -102,9 +111,8 @@ class _NoteEditorState extends State<NoteEditor>
     if (note != null) {
       _title.text = note.title;
       _content.text = note.contentMarkdown;
-      final s = _controller.notes
-          .where((s) => s.note.id == note.id)
-          .firstOrNull;
+      final s =
+          _controller.notes.where((s) => s.note.id == note.id).firstOrNull;
       _tags = s?.tags ?? [];
       _loaded = true;
       _boundTitle = note.title;
@@ -214,6 +222,13 @@ class _NoteEditorState extends State<NoteEditor>
               tooltip: '插入图片',
               icon: const Icon(Icons.image_outlined),
               onPressed: _pickAndAttach,
+            ),
+            // 附件入口（ui-spec §4）：以弹窗「附件面板」列出 / 增删附件。
+            // 原先常驻底部的附件条已移除，为窄屏编辑腾出高度（B17，AC-135）。
+            IconButton(
+              tooltip: '附件',
+              icon: const Icon(Icons.attach_file),
+              onPressed: _openAttachmentPanel,
             ),
             _fmtIcon(Icons.horizontal_rule, '分割线', FormatCommand.divider),
             const _ToolbarDivider(),
@@ -397,7 +412,15 @@ class _NoteEditorState extends State<NoteEditor>
 
   /// 格式模式下把图片引用渲染为图片呈现单元：点按即选中（把光标落到引用内），
   /// 尺寸条随光标出现；`sui://` 走附件缓存，字节未就绪时显示占位（BR-27.1/27.3）。
-  Widget _buildFormatImage(BuildContext context, ParsedImage image) {
+  ///
+  /// [block] 为 true 表示该引用独占一块（§5.5），按**块级呈现单元**布局：
+  /// 块宽即段落宽、块高向下扩展，后续文字整体下移；为 false 表示历史行内引用，
+  /// 保持既有行内呈现（§5.5「行内引用兼容」）。
+  Widget _buildFormatImage(
+    BuildContext context,
+    ParsedImage image, {
+    bool? block,
+  }) {
     final sel = _content.value.selection;
     final spanEnd = image.attributeEnd > 0 ? image.attributeEnd : image.end;
     final selected = sel.isValid &&
@@ -407,6 +430,7 @@ class _NoteEditorState extends State<NoteEditor>
     return _FormatImageUnit(
       image: image,
       selected: selected,
+      block: block ?? false,
       onSelect: () => _selectImage(image),
     );
   }
@@ -508,67 +532,23 @@ class _NoteEditorState extends State<NoteEditor>
           ),
         ),
         const Divider(height: 1),
-        Padding(
-          padding: const EdgeInsets.all(8),
-          // 窄屏下「三态分段控件 + 右侧动作图标」一行放不下：用 Wrap 自适应换行，
-          // 避免横向溢出把最右侧的「导出」图标裁掉（B14）。同时不再提供
-          // 「删除笔记」图标 —— 它与其它按钮同处一排、极易误碰（B15）。
-          child: Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            runSpacing: 4,
-            spacing: 12,
-            children: [
-              SegmentedButton<EditorMode>(
-                segments: const [
-                  ButtonSegment(
-                    value: EditorMode.formatted,
-                    label: Text('格式'),
-                    icon: Icon(Icons.text_fields),
-                  ),
-                  ButtonSegment(
-                    value: EditorMode.source,
-                    label: Text('源码'),
-                    icon: Icon(Icons.code),
-                  ),
-                  ButtonSegment(
-                    value: EditorMode.preview,
-                    label: Text('预览'),
-                    icon: Icon(Icons.visibility_outlined),
-                  ),
-                ],
-                selected: {_mode},
-                onSelectionChanged: (sel) {
-                  // 三态只切换「怎么画 / 能不能改」，正本不变，故无需保存。
-                  // 写入 AppController 单一状态源（M7-T06 上提）：与「视图」菜单同源。
-                  _controller.setEditorMode(sel.first);
-                },
-                showSelectedIcon: false,
+        // 窄屏 / 宽屏两套排布（ui-spec §4.1，B17）：
+        //   窄屏——三态切换只留图标，与「历史 / 导出」入口压成一行、上下留白收紧，
+        //         把高度尽量让给正文编辑区（键盘弹出后空间尤其紧张）；
+        //   宽屏——沿用原来的 Wrap 自适应（B14），三态保留文本标签，入口不缩水。
+        // 判据是编辑区自身宽度，而非平台：桌面端把两栏折叠后编辑区可能很窄，
+        // 而平板宽屏仍应有完整按钮。
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < _compactWidth;
+            return Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: compact ? 2 : 8,
               ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    tooltip: '添加附件',
-                    icon: const Icon(Icons.attach_file),
-                    onPressed: _pickAndAttach,
-                  ),
-                  IconButton(
-                    tooltip: '版本历史',
-                    icon: const Icon(Icons.history),
-                    isSelected:
-                        context.watch<AppController>().showRevisionPanel,
-                    onPressed: () => _controller.toggleRevisionPanel(),
-                  ),
-                  IconButton(
-                    tooltip: '导出 Markdown',
-                    icon: const Icon(Icons.file_download_outlined),
-                    onPressed: () => _showExportDialog(),
-                  ),
-                ],
-              ),
-            ],
-          ),
+              child: compact ? _buildCompactModeBar() : _buildModeBar(),
+            );
+          },
         ),
         // 格式工具栏只在可编辑的两态（格式 / 源码）下出现；预览态是只读渲染，
         // 不给排版入口，避免「点了没反应」的困惑。
@@ -611,9 +591,84 @@ class _NoteEditorState extends State<NoteEditor>
             ),
           ),
         ),
-        if (_attachments.isNotEmpty) _buildAttachmentBar(context),
       ],
     );
+  }
+
+  /// 窄屏紧凑模式行：三态切换（图标态）+ 历史 / 导出，压成一行（ui-spec §4.1，B17）。
+  ///
+  /// 三态按钮在窄屏只留图标：三个带文本标签的分段在手机上会挤出屏幕，
+  /// 一旦换行就吃掉一整行编辑高度——这正是本次要修的问题。
+  Widget _buildCompactModeBar() {
+    return Row(
+      children: [
+        _buildModeSelector(compact: true),
+        const Spacer(),
+        ..._buildActionIcons(),
+      ],
+    );
+  }
+
+  /// 宽屏模式行：沿用原有 Wrap 自适应（B14），三态保留文本标签。
+  Widget _buildModeBar() {
+    return Wrap(
+      alignment: WrapAlignment.spaceBetween,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      runSpacing: 4,
+      spacing: 12,
+      children: [
+        _buildModeSelector(compact: false),
+        Row(mainAxisSize: MainAxisSize.min, children: _buildActionIcons()),
+      ],
+    );
+  }
+
+  /// 三态切换控件。三态只切换「怎么画 / 能不能改」，正本不变，故切换不保存
+  /// （守 BR-23.1）；状态写入 [AppController] 单一状态源（M7-T06 上提），
+  /// 与桌面「视图」菜单同源同效。
+  Widget _buildModeSelector({required bool compact}) {
+    return SegmentedButton<EditorMode>(
+      segments: [
+        ButtonSegment(
+          value: EditorMode.formatted,
+          label: compact ? null : const Text('格式'),
+          icon: const Icon(Icons.text_fields),
+        ),
+        ButtonSegment(
+          value: EditorMode.source,
+          label: compact ? null : const Text('源码'),
+          icon: const Icon(Icons.code),
+        ),
+        ButtonSegment(
+          value: EditorMode.preview,
+          label: compact ? null : const Text('预览'),
+          icon: const Icon(Icons.visibility_outlined),
+        ),
+      ],
+      selected: {_mode},
+      onSelectionChanged: (sel) => _controller.setEditorMode(sel.first),
+      showSelectedIcon: false,
+    );
+  }
+
+  /// 模式行右侧的两个动作入口：版本历史 / 导出 Markdown。
+  ///
+  /// 「附件」入口不在此处——它落在格式工具栏（见 [EditorFormat] 上一个回形针按钮），
+  /// 免得同一能力在编辑区出现两个入口（ui-spec §4 / §4.1）。
+  List<Widget> _buildActionIcons() {
+    return [
+      IconButton(
+        tooltip: '版本历史',
+        icon: const Icon(Icons.history),
+        isSelected: context.watch<AppController>().showRevisionPanel,
+        onPressed: () => _controller.toggleRevisionPanel(),
+      ),
+      IconButton(
+        tooltip: '导出 Markdown',
+        icon: const Icon(Icons.file_download_outlined),
+        onPressed: () => _showExportDialog(),
+      ),
+    ];
   }
 
   /// 预览里的图片：`sui://<sha256>` 走附件缓存（本地命中或按需下载），
@@ -711,20 +766,77 @@ class _NoteEditorState extends State<NoteEditor>
     );
   }
 
-  Widget _buildAttachmentBar(BuildContext context) {
-    return SizedBox(
-      height: 64,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        itemCount: _attachments.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (context, i) => _AttachmentCard(
-          key: ValueKey(_attachments[i].id),
-          attachment: _attachments[i],
-          onOpen: () => _openAttachment(_attachments[i]),
-          onDelete: () => _removeAttachment(_attachments[i]),
-        ),
+  /// 附件面板（ui-spec §4 / §5，B17 / AC-135）：把原先常驻编辑区底部的附件条
+  /// 改为按需弹出的弹窗，为窄屏编辑腾出高度。
+  ///
+  /// 面板内容用 [StatefulBuilder] 局部重建：附件增删只影响面板自身，
+  /// 无需把整棵编辑区连带刷新。图片附件在添加时仍会由 [_pickAndAttach]
+  /// 把 `![](sui://<sha256>)` 引用插进正文（canonical 正本只有 Markdown）。
+  Future<void> _openAttachmentPanel() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final attachments = _attachments;
+          final theme = Theme.of(context);
+          return AlertDialog(
+            title: Row(
+              children: [
+                const Expanded(child: Text('附件')),
+                Text(
+                  '${attachments.length} 个',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 420,
+              child: attachments.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 20),
+                      child: Text(
+                        '暂无附件。点「添加附件」选择文件；'
+                        '图片会自动插入正文。',
+                        style: theme.textTheme.bodyMedium,
+                      ),
+                    )
+                  : ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 320),
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: attachments.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 8),
+                        itemBuilder: (context, i) => SizedBox(
+                          width: double.infinity,
+                          child: _AttachmentCard(
+                            key: ValueKey(attachments[i].id),
+                            attachment: attachments[i],
+                            onOpen: () => _openAttachment(attachments[i]),
+                            onDelete: () async {
+                              await _removeAttachment(attachments[i]);
+                              if (dialogContext.mounted) setDialogState(() {});
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
+            actions: [
+              TextButton.icon(
+                icon: const Icon(Icons.add),
+                label: const Text('添加附件'),
+                onPressed: () async {
+                  await _pickAndAttach();
+                  if (dialogContext.mounted) setDialogState(() {});
+                },
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('关闭'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -771,8 +883,7 @@ class _NoteEditorState extends State<NoteEditor>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('标题：$title',
-                  style: Theme.of(context).textTheme.bodySmall),
+              Text('标题：$title', style: Theme.of(context).textTheme.bodySmall),
               const SizedBox(height: 8),
               Container(
                 height: 200,
@@ -785,8 +896,8 @@ class _NoteEditorState extends State<NoteEditor>
                 child: SingleChildScrollView(
                   child: SelectableText(
                     content,
-                    style: const TextStyle(
-                        fontFamily: 'monospace', fontSize: 12),
+                    style:
+                        const TextStyle(fontFamily: 'monospace', fontSize: 12),
                   ),
                 ),
               ),
@@ -805,8 +916,7 @@ class _NoteEditorState extends State<NoteEditor>
               Clipboard.setData(ClipboardData(text: content));
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                    content: Text('已复制到剪贴板'),
-                    duration: Duration(seconds: 1)),
+                    content: Text('已复制到剪贴板'), duration: Duration(seconds: 1)),
               );
               Navigator.pop(context);
             },
@@ -973,8 +1083,7 @@ class _ImageSizeBarState extends State<_ImageSizeBar> {
         padding: const EdgeInsets.symmetric(horizontal: 8),
         child: Row(
           children: [
-            Text('图片尺寸',
-                style: Theme.of(context).textTheme.labelSmall),
+            Text('图片尺寸', style: Theme.of(context).textTheme.labelSmall),
             const SizedBox(width: 4),
             _preset('原始', ImageSize.auto, current, scheme),
             _preset('小', EditorFormat.presetSmall, current, scheme),
@@ -1029,11 +1138,16 @@ class _FormatImageUnit extends StatelessWidget {
     required this.image,
     required this.selected,
     required this.onSelect,
+    this.block = false,
   });
 
   final ParsedImage image;
   final bool selected;
   final VoidCallback onSelect;
+
+  /// 是否按**块级呈现单元**布局（§5.5）：引用独占一块时为 true——块宽即段落宽、
+  /// 块高向下扩展，后续文字整体下移；历史行内引用为 false，保持行内呈现。
+  final bool block;
 
   @override
   Widget build(BuildContext context) {
@@ -1044,7 +1158,10 @@ class _FormatImageUnit extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onTap: onSelect,
       child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+        margin: EdgeInsets.symmetric(
+          horizontal: 2,
+          vertical: block ? 6 : 2,
+        ),
         padding: const EdgeInsets.all(2),
         decoration: BoxDecoration(
           border: Border.all(
@@ -1059,20 +1176,30 @@ class _FormatImageUnit extends StatelessWidget {
             final available =
                 constraints.maxWidth.isFinite ? constraints.maxWidth : 720.0;
             final dims = _resolveSize(available);
+            final Widget imageWidget;
             if (uri != null && uri.scheme == 'sui') {
-              return _SuiAttachmentImage(
+              imageWidget = _SuiAttachmentImage(
                 sha256: uri.host,
                 label: label,
                 width: dims.$1,
                 height: dims.$2,
               );
+            } else {
+              imageWidget = Image.network(
+                image.url,
+                width: dims.$1,
+                height: dims.$2,
+                errorBuilder: (_, __, ___) =>
+                    _AttachmentPlaceholder(label: label),
+              );
             }
-            return Image.network(
-              image.url,
-              width: dims.$1,
-              height: dims.$2,
-              errorBuilder: (_, __, ___) =>
-                  _AttachmentPlaceholder(label: label),
+            if (!block) return imageWidget;
+            // 块级呈现：块占满段落宽（图片左对齐），使该行只承载图片，
+            // 行高即块高、向下扩展，后续文字整体下移、与图片不重叠。
+            // 用 Align 而非定宽 SizedBox：宽度受限时撑满段落，无界时自动收缩。
+            return Align(
+              alignment: Alignment.centerLeft,
+              child: imageWidget,
             );
           },
         ),
@@ -1207,10 +1334,8 @@ class _AttachmentCardState extends State<_AttachmentCard> {
                   ),
                   Text(
                     '${_formatSize(a.byteSize)} · ${_statusText(downloading, availability)}',
-                    style: Theme.of(context)
-                        .textTheme
-                        .labelSmall
-                        ?.copyWith(color: Theme.of(context).colorScheme.outline),
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Theme.of(context).colorScheme.outline),
                   ),
                 ],
               ),
@@ -1354,7 +1479,8 @@ class _SuiAttachmentImageState extends State<_SuiAttachmentImage> {
         bytes,
         width: widget.width,
         height: widget.height,
-        errorBuilder: (_, __, ___) => _AttachmentPlaceholder(label: widget.label),
+        errorBuilder: (_, __, ___) =>
+            _AttachmentPlaceholder(label: widget.label),
       );
     }
     if (_failed) return _AttachmentPlaceholder(label: widget.label);

@@ -7,6 +7,29 @@
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-03
+
+M7 补丁：移动端编辑界面简化与图片块级插入修复。
+
+### 修复
+
+- **移动端笔记编辑可用高度过小（B17）** — 弹出键盘后编辑区被顶栏的「格式 / 源码 / 预览」
+  三态与「附件 / 历史 / 导出」按钮挤占。修复：窄屏（编辑列宽 < 520px）模式行改为**紧凑单行**——
+  三态只留图标、与「历史 / 导出」压成一行并收紧上下留白，**保留格式工具栏**；原先常驻底部的
+  附件条**移除**，改由格式工具栏「附件」按钮弹出**附件面板**（弹窗），为正文腾出编辑高度（AC-135）。
+- **图片未作为块级内容插入正文（B18）** — 段落中插入图片后，图片**遮挡下方文字**、光标难以越过。
+  根因：`EditableText` 未显式指定 `strutStyle` 时默认 `StrutStyle.fromTextStyle(style,
+  forceStrutHeight: true)`，强制每一行按 strut 高度排布、**忽略较高的行内 `WidgetSpan`**，使块级
+  图片溢出本行覆盖后续文字。修复：编辑器正文显式 `forceStrutHeight: false`，图片引用**独占块**
+  （前后 `\n\n`）插入，块高向下撑开、后续文字整体下移、光标可越过（AC-136）。
+
+### 测试
+
+- flutter_app **47/47** 全绿（`test/editor_layout_test.dart` 3 项：窄屏紧凑模式行、宽屏保留文本标签、
+  附件弹窗开合；`test/editor_format_image_test.dart` 新增块级图片下方留出行高断言）。
+- note_core **123/123** 全绿（`test/editor_format_test.dart` 新增 `ImageBlockInsertion` 组：
+  块级插入与前后空行规整）。
+
 ## [0.8.1] - 2026-10-03
 
 M7 补丁：桌面端顶栏呈现修复。
@@ -238,7 +261,9 @@ M1 里程碑：笔记本分组与标签的云端同步。
 - 编辑为源码 / 预览双轨，富文本 WYSIWYG 未实现。
 - 鉴权为演示级实现，公网部署前需加固（见 [SECURITY.md](SECURITY.md)）。
 
-[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.8.0...HEAD
+[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.8.2...HEAD
+[0.8.2]: https://gitee.com/evangubo/sui/releases/tag/v0.8.2
+[0.8.1]: https://gitee.com/evangubo/sui/releases/tag/v0.8.1
 [0.8.0]: https://gitee.com/evangubo/sui/releases/tag/v0.8.0
 [0.7.1]: https://gitee.com/evangubo/sui/releases/tag/v0.7.1
 [0.7.0]: https://gitee.com/evangubo/sui/releases/tag/v0.7.0

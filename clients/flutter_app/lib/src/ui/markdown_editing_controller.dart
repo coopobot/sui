@@ -6,10 +6,16 @@ import 'package:note_core/note_core.dart';
 /// 由 UI 层注入：控制器本身不依赖附件缓存，只负责在 [buildTextSpan] 里把
 /// `![alt](sui://<sha256>){尺寸}` 这一段从纯文本样式片段替换为图片 widget
 /// （BR-27.1）。未注入时图片引用退化为普通样式文本，不影响正本与偏移。
+///
+/// [block] 为 true 表示该引用**独占一块**（引用前后即行边界，由块级插入保证，
+/// 见 §5.5），UI 层据此按「块级呈现单元」布局：块宽即段落宽、块高向下扩展，
+/// 后续文字整体下移；为 false 表示历史**行内引用**，仍按 §5.4 行内呈现，
+/// 不强行改写正本（§5.5「行内引用兼容」）。
 typedef FormatImageSpanBuilder = Widget Function(
   BuildContext context,
-  ParsedImage image,
-);
+  ParsedImage image, {
+  bool? block,
+});
 
 /// 格式模式下把任务项勾选框 `[ ]` / `[x]` 渲染为可点选复选框的构建器（§10.1）。
 ///
@@ -25,8 +31,7 @@ typedef FormatTaskCheckboxBuilder = Widget Function(
 ///
 /// 组 1 = 列表前缀（含尾随空白），组 2 = 方括号内的勾选字符（空格 / `x` / `X`），
 /// 组 3 = 任务文本。非行首 / 无方括号的 `-[`、`[x]` 片段不匹配，按普通正文透传。
-final RegExp _taskLinePattern =
-    RegExp(r'^([ \t]*[-*+][ \t]+)\[([ xX])\](.*)$');
+final RegExp _taskLinePattern = RegExp(r'^([ \t]*[-*+][ \t]+)\[([ xX])\](.*)$');
 
 class MarkdownEditingController extends TextEditingController {
   MarkdownEditingController({super.text});
@@ -106,7 +111,13 @@ class MarkdownEditingController extends TextEditingController {
         if (image == null) break;
         final spanEnd = image.attributeEnd > 0 ? image.attributeEnd : image.end;
         regions.add(
-          _SpanRegion(image.start, spanEnd, _RegionKind.image, image: image),
+          _SpanRegion(
+            image.start,
+            spanEnd,
+            _RegionKind.image,
+            image: image,
+            block: _isStandaloneBlock(text, image.start, spanEnd),
+          ),
         );
         from = spanEnd;
       }
@@ -148,7 +159,13 @@ class MarkdownEditingController extends TextEditingController {
     Widget child;
     var alignment = PlaceholderAlignment.top;
     if (region.kind == _RegionKind.image) {
-      child = formatImageBuilder!(context, region.image!);
+      // 行内 / 块级一律 top 对齐：块级呈现单元（block == true）因此**向下扩展**，
+      // 保证后续文字整体下移、不被遮盖；行内引用保持既有 §5.4 行为不变。
+      child = formatImageBuilder!(
+        context,
+        region.image!,
+        block: region.block,
+      );
     } else {
       alignment = PlaceholderAlignment.middle;
       final lineStart = region.lineStart!;
@@ -168,6 +185,17 @@ class MarkdownEditingController extends TextEditingController {
       ));
     }
     return out;
+  }
+
+  /// 判断一个图片引用区间是否**独占一块**：区间左侧是行首（文本开头或 `\n`），
+  /// 右侧是行尾（文本结尾或 `\n`）。
+  ///
+  /// 只有满足该条件时才按块级呈现（§5.5）；历史行内引用（前后同一行还有文字）
+  /// 仍走行内呈现，正本逐字保真（§5.5「行内引用兼容」）。
+  static bool _isStandaloneBlock(String text, int start, int end) {
+    final leftOk = start == 0 || text[start - 1] == '\n';
+    final rightOk = end >= text.length || text[end] == '\n';
+    return leftOk && rightOk;
   }
 
   /// 扫描所有任务项行，返回勾选框 `[ ]` / `[x]`（固定 3 个码元）的区间。
@@ -208,6 +236,9 @@ class _SpanRegion {
   final bool? checked;
   final int? lineStart;
 
+  /// 仅图片区间有意义：true 表示该引用独占一块（§5.5），应按块级呈现单元布局。
+  final bool block;
+
   const _SpanRegion(
     this.start,
     this.end,
@@ -215,6 +246,7 @@ class _SpanRegion {
     this.image,
     this.checked,
     this.lineStart,
+    this.block = false,
   });
 }
 
@@ -341,7 +373,8 @@ class _MarkdownStyler {
   }
 
   /// 光标（选区活动端）是否落在 `[lineStart, lineEnd]` 行内。
-  static bool _lineFocused(TextSelection selection, int lineStart, int lineEnd) {
+  static bool _lineFocused(
+      TextSelection selection, int lineStart, int lineEnd) {
     if (!selection.isValid) return false;
     final p = selection.extentOffset;
     return p >= lineStart && p <= lineEnd;
@@ -365,7 +398,8 @@ class _MarkdownStyler {
     final heading = _headingLine.firstMatch(line);
     if (heading != null) {
       final level = heading.group(1)!.length;
-      final scale = _headingScale[(level - 1).clamp(0, _headingScale.length - 1)];
+      final scale =
+          _headingScale[(level - 1).clamp(0, _headingScale.length - 1)];
       final style = base.copyWith(
         fontSize: (base.fontSize ?? 15) * scale,
         fontWeight: FontWeight.w700,
@@ -501,7 +535,8 @@ class _MarkdownStyler {
   // 工具
   // ---------------------------------------------------------------------------
 
-  static void _fill(List<TextStyle> styles, int start, int end, TextStyle style) {
+  static void _fill(
+      List<TextStyle> styles, int start, int end, TextStyle style) {
     final s = start.clamp(0, styles.length);
     final e = end.clamp(0, styles.length);
     for (var i = s; i < e; i++) {

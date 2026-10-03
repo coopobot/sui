@@ -511,6 +511,17 @@ abstract final class EditorFormat {
   static final RegExp _imageRef = RegExp(r'!\[([^\]]*)\]\(([^)]*)\)');
 
   /// 插入图片引用 `![文件名](sui://<sha256>)[{尺寸}]`。
+  ///
+  /// 采用**独占块（block）**语义（editor-formatting.md §5.5）：
+  ///
+  /// - 图片引用前后各保证与相邻段落以空行（`\n\n`）分隔——光标若落在某行的
+  ///   行中，则该行被一分为二，图片引用自占一段（「另起新段」）；
+  /// - 若文档末尾没有可落点的下一行，则补一个换行（`\n`），使图片引用之后
+  ///   仍存在一行，光标可以在图片**下方**落点（避免「光标粘滞在图片上」）；
+  /// - 插入后光标置于图片引用**之后**（下一块起始处），便于继续输入而不会
+  ///   把正文粘进图片引用所在行（否则会退化为行内 `![...]文字`）。
+  ///
+  /// 本方法只做文本变换，不触碰文档其余字节（BR-32.1）。
   static FormatResult insertImage(
     String text,
     int start,
@@ -523,8 +534,30 @@ abstract final class EditorFormat {
     final e = end.clamp(0, text.length);
     final attr = size == null ? '' : renderSizeAttribute(size);
     final md = '![$filename](sui://$sha256)$attr';
-    final newText = text.substring(0, s) + md + text.substring(e);
-    final pos = s + md.length;
+
+    final before = text.substring(0, s);
+    final after = text.substring(e);
+
+    // 左侧：已在段首（空 / 已有一个空行）则不补；否则补到「一个空行」。
+    final String leading;
+    if (before.isEmpty || before.endsWith('\n\n')) {
+      leading = '';
+    } else {
+      leading = before.endsWith('\n') ? '\n' : '\n\n';
+    }
+
+    // 右侧：已有空行则不补；文末（无可落点的下一行）补一个换行。
+    final String trailing;
+    if (after.isEmpty) {
+      trailing = '\n';
+    } else if (after.startsWith('\n\n')) {
+      trailing = '';
+    } else {
+      trailing = after.startsWith('\n') ? '\n' : '\n\n';
+    }
+
+    final newText = '$before$leading$md$trailing$after';
+    final pos = before.length + leading.length + md.length + trailing.length;
     return FormatResult(newText, pos, pos);
   }
 
