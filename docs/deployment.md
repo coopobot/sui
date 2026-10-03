@@ -69,7 +69,31 @@ docker run -d \
 | `--restart unless-stopped` | 容器自动重启（崩溃 / 宿主机重启后自动恢复） |
 | `--name sui-server` | 容器名称，方便后续管理 |
 
-### 3.3 环境变量
+### 3.3 初始化账号（注册）
+
+服务端启动后，需要注册一个账号以获取访问 Token。
+**首次部署必做**，后续客户端和浏览器扩展都需要用这个 Token 连接服务端。
+
+在宿主机执行（容器已映射 8080 端口）：
+
+```bash
+curl -X POST http://localhost:8080/api/v1/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"me","password":"secret"}'
+```
+
+响应示例：
+
+```json
+{"ok":true,"token":"a1b2c3d4e5f6...","username":"me"}
+```
+
+> **记下返回的 `token`**，这是所有客户端访问服务端的凭证。
+> 忘记 Token 时可通过 `/api/v1/login` 重新获取（见 [第 4 节](#4-注册账号与-token)）。
+
+如果容器端口不是 8080，把上面的端口号改成你映射的端口即可。
+
+### 3.4 环境变量
 
 可通过 `-e` 覆盖默认配置：
 
@@ -87,7 +111,7 @@ docker run -d \
 | `SUI_ADDR` | `0.0.0.0:8080` | 监听地址（容器内建议保持 `0.0.0.0`） |
 | `SUI_DATA` | `/data` | 数据目录（对应 volume 挂载点） |
 
-### 3.4 健康检查
+### 3.5 健康检查
 
 镜像内置了健康检查，每 30 秒检测一次 `/healthz`：
 
@@ -96,7 +120,7 @@ docker inspect --format='{{.State.Health.Status}}' sui-server
 # → healthy
 ```
 
-### 3.5 常用操作
+### 3.6 常用操作
 
 ```bash
 # 查看日志
@@ -115,7 +139,7 @@ docker restart sui-server
 docker rm -f sui-server
 ```
 
-### 3.6 Docker Compose（可选）
+### 3.7 Docker Compose（可选）
 
 如需使用 Docker Compose，可在项目根目录创建 `docker-compose.yml`：
 
@@ -143,6 +167,67 @@ services:
 ```bash
 docker compose up -d
 ```
+
+### 3.8 带 Nginx 反代的 Docker Compose（推荐）
+
+生产部署建议在前面加一层 Nginx，负责：静态缓存、连接池、后续加 HTTPS 等。
+项目已提供 Nginx 配置：`server/configs/nginx.conf`。
+
+在项目根目录创建 `docker-compose.yml`：
+
+```yaml
+services:
+  sui-server:
+    build: ./server
+    image: sui-server:latest
+    container_name: sui-server
+    expose:
+      - "8080"          # 只对内暴露，不映射到宿主机
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  nginx:
+    image: nginx:alpine
+    container_name: sui-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./server/configs/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - sui-server
+    restart: unless-stopped
+```
+
+启动：
+
+```bash
+docker compose up -d
+```
+
+启动后服务端通过 Nginx 的 **80** 端口对外提供服务：
+
+```bash
+# 健康检查走 Nginx
+curl http://localhost/healthz
+
+# 注册账号
+curl -X POST http://localhost/api/v1/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"me","password":"secret"}'
+```
+
+> 💡 Nginx 配置要点：
+> - `/api/v1/ws` 单独配置了 WebSocket 升级头（`Upgrade` / `Connection`）和长超时
+> - `client_max_body_size 100m` 支持上传大附件，按需调整
+> - `proxy_set_header X-Forwarded-*` 透传真实客户端 IP
+> - 如需 HTTPS，建议在此基础上加上 Let's Encrypt / certbot
 
 ## 4. 注册账号与 Token
 
