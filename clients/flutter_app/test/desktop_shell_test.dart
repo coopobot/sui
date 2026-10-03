@@ -394,17 +394,25 @@ void main() {
       addTearDown(db.close);
       await _pumpShell(tester, db);
 
-      // 宽屏桌面：菜单栏 / 折叠切换 / 标题齐备，且顺序为「菜单栏 → 切换 → 标题」（BR-41.5）。
+      // 宽屏桌面：菜单栏 / 折叠切换齐备，顺序为「菜单栏 → 折叠切换」；
+      // 桌面端不重复呈现应用标题文本（标题由操作系统窗口标题承载，BR-41.5 / AC-117）。
       expect(find.byType(AppMenuBar), findsOneWidget);
       expect(find.byType(PanelToggles), findsOneWidget);
       for (final label in const ['文件', '编辑', '视图', '帮助']) {
         expect(find.text(label), findsOneWidget);
       }
+      expect(find.text('随手记 Sui'), findsNothing,
+          reason: '桌面端标题由操作系统窗口标题承载，顶栏不重复呈现');
       final menuX = tester.getTopLeft(find.byType(AppMenuBar)).dx;
       final toggleX = tester.getTopLeft(find.byType(PanelToggles)).dx;
-      final titleX = tester.getTopLeft(find.text('随手记 Sui')).dx;
       expect(menuX, lessThan(toggleX));
-      expect(toggleX, lessThan(titleX));
+
+      // 菜单栏透明叠加：底色透明，与 AppBar 底色一致，不产生分层色块（AC-117）。
+      final menuBar = tester.widget<MenuBar>(find.byType(MenuBar));
+      expect(
+        menuBar.style?.backgroundColor?.resolve(<WidgetState>{}),
+        Colors.transparent,
+      );
 
       // 非桌面平台（宽屏但仍降级）：不出菜单栏与切换控件（AC-122）。
       // 平台门控在 `LayoutBuilder` 回调内读取（note_shell.dart:20–31），只改覆盖值

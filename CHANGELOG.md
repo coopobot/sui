@@ -7,6 +7,25 @@
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-03
+
+M7 补丁：桌面端顶栏呈现修复。
+
+### 修复
+
+- **桌面端顶栏重复呈现应用标题** — 桌面端标题已由操作系统窗口标题承载（`windows/runner/main.cpp`
+  的 `window.Create`），顶栏再渲染 `Text('随手记 Sui')` 属重复。修复：桌面外壳顶栏不再渲染应用
+  标题文本；窄屏（`_NarrowLayout`）仍保留标题文本（AC-117）。
+- **菜单栏底色与顶栏不一致（分层色块）** — `MenuBar` 默认采用 M3 `surfaceContainer` 底色、
+  `elevation` 3、投影与圆角，与 AppBar 的 `colorScheme.surface` 不一致，顶栏出现分层色块。
+  修复：菜单栏改为**透明叠加**——`backgroundColor` / `shadowColor` / `surfaceTintColor` 置
+  `transparent`、`elevation` 置 `0`、`shape` 置直角，与顶栏底色一致（AC-117）。
+
+### 测试
+
+- flutter_app 41/41 全绿（`test/desktop_shell_test.dart` 12 项：新增「桌面端不呈现标题」
+  与「菜单栏底色透明」断言）。
+
 ## [0.8.0] - 2026-10-03
 
 M7 里程碑：桌面端界面布局优化。

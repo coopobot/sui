@@ -23,6 +23,15 @@ class AppMenuBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MenuBar(
+      // 透明叠加：清除 `MenuBar` 默认的 surfaceContainer 底色、投影、圆角与高度，
+      // 使菜单栏与 AppBar 底色（colorScheme.surface）一致，顶栏不出现分层色块（AC-117）。
+      style: const MenuStyle(
+        backgroundColor: WidgetStatePropertyAll<Color?>(Colors.transparent),
+        shadowColor: WidgetStatePropertyAll<Color?>(Colors.transparent),
+        surfaceTintColor: WidgetStatePropertyAll<Color?>(Colors.transparent),
+        elevation: WidgetStatePropertyAll<double?>(0),
+        shape: WidgetStatePropertyAll<OutlinedBorder>(RoundedRectangleBorder()),
+      ),
       children: <Widget>[
         _submenu(
           context,

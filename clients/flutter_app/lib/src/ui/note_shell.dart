@@ -57,7 +57,8 @@ class _WideLayout extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        // 标题区顺序固定：菜单栏 → 折叠切换 → 标题（BR-41.5 / AC-117）。
+        // 桌面外壳：菜单栏 → 折叠切换（BR-41.5 / AC-117）。
+        // 桌面端不再重复呈现应用标题文本（标题由操作系统窗口标题承载）。
         titleSpacing: showDesktopChrome ? 8 : null,
         title: showDesktopChrome
             ? Row(
@@ -65,8 +66,6 @@ class _WideLayout extends StatelessWidget {
                   AppMenuBar(controller: controller),
                   const SizedBox(width: 4),
                   PanelToggles(controller: controller),
-                  const SizedBox(width: 8),
-                  const Text('随手记 Sui'),
                 ],
               )
             : const Text('随手记 Sui'),
