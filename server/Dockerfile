@@ -1,13 +1,35 @@
 # syntax=docker/dockerfile:1
 
 # ── 构建阶段 ──────────────────────────────────────────────────────────
-FROM golang:1.22-alpine AS builder
+# 支持通过 --build-arg 替换镜像源和 Go 代理，国内网络环境下构建更顺畅
+# 示例：
+#   docker build --build-arg DOCKER_MIRROR=docker.m.daocloud.io \
+#                --build-arg GOPROXY=https://goproxy.cn,direct \
+#                --build-arg ALPINE_MIRROR=mirrors.aliyun.com \
+#                -t sui-server:latest .
+
+ARG DOCKER_MIRROR=
+ARG GO_IMAGE=golang:1.22-alpine
+ARG ALPINE_IMAGE=alpine:latest
+
+FROM ${DOCKER_MIRROR}${GO_IMAGE} AS builder
+
+ARG ALPINE_MIRROR=
+ARG GOPROXY=
+
+# 可选：替换 apk 源为国内镜像
+RUN if [ -n "$ALPINE_MIRROR" ]; then \
+      sed -i "s/dl-cdn.alpinelinux.org/${ALPINE_MIRROR}/g" /etc/apk/repositories; \
+    fi
 
 # 安装必要工具（git 用于 go mod 下载，ca-certificates 用于 HTTPS）
 RUN apk add --no-cache git ca-certificates tzdata
 
 # 设置工作目录
 WORKDIR /src
+
+# 可选：设置 Go 模块代理（国内推荐 goproxy.cn）
+ENV GOPROXY=${GOPROXY:-https://proxy.golang.org,direct}
 
 # 复制 go.mod / go.sum 并下载依赖（利用 Docker 缓存）
 COPY go.mod go.sum ./
@@ -26,7 +48,14 @@ RUN CGO_ENABLED=0 GOTOOLCHAIN=auto go build \
     ./cmd/sui-server
 
 # ── 运行阶段 ──────────────────────────────────────────────────────────
-FROM alpine:latest
+FROM ${DOCKER_MIRROR}${ALPINE_IMAGE}
+
+ARG ALPINE_MIRROR=
+
+# 可选：替换 apk 源为国内镜像
+RUN if [ -n "$ALPINE_MIRROR" ]; then \
+      sed -i "s/dl-cdn.alpinelinux.org/${ALPINE_MIRROR}/g" /etc/apk/repositories; \
+    fi
 
 # 安装运行时依赖：
 # - ca-certificates：HTTPS 客户端证书
