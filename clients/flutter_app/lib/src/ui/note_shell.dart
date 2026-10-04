@@ -130,31 +130,63 @@ class _NarrowLayout extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final editorOpen = controller.selectedNoteId != null;
+    // 窄屏修订历史：无右侧栏可切换，改为**整页推入**（BR-12.3 / AC-137 / ui-spec §4.1 / §6）。
+    final showRevisions = editorOpen && controller.showRevisionPanel;
     // 手机：选中笔记后进入全屏编辑页；平板中等宽度时可用双栏。
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(editorOpen ? '笔记' : '随手记 Sui'),
-        leading: editorOpen
-            ? BackButton(
-                onPressed: () => controller.selectNote(null),
+    return PopScope(
+      // 系统返回键（Android）：优先关修订面板回编辑页，其次退出编辑回列表。
+      // 两级都不可弹时才交还系统（否则「点了历史 → 按返回」会直接退出应用）。
+      canPop: !showRevisions && !editorOpen,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (showRevisions) {
+          controller.setRevisionPanelVisible(false);
+        } else if (editorOpen) {
+          controller.selectNote(null);
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(
+            showRevisions ? '版本历史' : (editorOpen ? '笔记' : '随手记 Sui'),
+          ),
+          leading: showRevisions
+              // 返回先关闭修订面板，回到编辑页（不是退回列表）。
+              ? BackButton(
+                  onPressed: () => controller.setRevisionPanelVisible(false),
+                )
+              : editorOpen
+                  ? BackButton(
+                      onPressed: () {
+                        controller.setRevisionPanelVisible(false);
+                        controller.selectNote(null);
+                      },
+                    )
+                  : null,
+          actions: [
+            _SyncActions(controller: controller),
+            // 编辑态不再提供「删除笔记」图标：它与同步/设置同处顶栏、极易误碰（B15）。
+            // 删除入口保留在笔记列表的行尾菜单里（需二次确认）。
+            if (!editorOpen)
+              IconButton(
+                tooltip: '新建笔记',
+                icon: const Icon(Icons.note_add_outlined),
+                onPressed: () => controller.createNote(),
+              ),
+          ],
+        ),
+        drawer: editorOpen ? null : NoteTreeDrawer(controller: controller),
+        // 修订面板整页推入：复用宽屏右侧栏的同一 `RevisionPanel`，能力（列表 / 详情 /
+        // 恢复）完全一致；返回后回到编辑页。
+        body: showRevisions
+            ? RevisionPanel(
+                key: ValueKey(controller.selectedNoteId),
+                noteId: controller.selectedNoteId!,
               )
-            : null,
-        actions: [
-          _SyncActions(controller: controller),
-          // 编辑态不再提供「删除笔记」图标：它与同步/设置同处顶栏、极易误碰（B15）。
-          // 删除入口保留在笔记列表的行尾菜单里（需二次确认）。
-          if (!editorOpen)
-            IconButton(
-              tooltip: '新建笔记',
-              icon: const Icon(Icons.note_add_outlined),
-              onPressed: () => controller.createNote(),
-            ),
-        ],
+            : editorOpen
+                ? NoteEditor(key: ValueKey(controller.selectedNoteId))
+                : NoteList(controller: controller),
       ),
-      drawer: editorOpen ? null : NoteTreeDrawer(controller: controller),
-      body: editorOpen
-          ? NoteEditor(key: ValueKey(controller.selectedNoteId))
-          : NoteList(controller: controller),
     );
   }
 }
