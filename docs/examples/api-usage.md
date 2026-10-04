@@ -13,10 +13,10 @@ export SUI=http://127.0.0.1:8080
 
 ```bash
 curl -s $SUI/healthz
-# → {"ok":true,"service":"sui-server","version":"0.9.0","time":"..."}
+# → {"ok":true,"service":"sui-server","version":"0.9.1","time":"..."}
 
 curl -s $SUI/api/v1/ping
-# → {"ok":true,"service":"sui-server","version":"0.9.0","time":"...","msg":"pong"}
+# → {"ok":true,"service":"sui-server","version":"0.9.1","time":"...","msg":"pong"}
 ```
 
 ## 2. 注册账号

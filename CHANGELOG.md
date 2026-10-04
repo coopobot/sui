@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-04
+
+M8 补丁：应用图标替换为品牌熊猫形象。
+
+### 变更
+
+- **全平台应用图标统一为品牌熊猫** — Android（自适应图标）/ iOS / macOS / Windows / Web 的应用图标
+  统一替换为此前上线的品牌熊猫形象（绿色圆角底片 `#2DBE60` + 熊猫面部：耳朵 / 头 / 眼斑 / 眼 / 鼻 / 嘴），
+  替换旧的「卷轴 + 墨池」图标；品牌母版与全平台导出流水线同步重建。
+
 ## [0.9.0] - 2026-10-04
 
 M8：桌面端独立笔记窗口。
@@ -313,7 +323,8 @@ M1 里程碑：笔记本分组与标签的云端同步。
 - 编辑为源码 / 预览双轨，富文本 WYSIWYG 未实现。
 - 鉴权为演示级实现，公网部署前需加固（见 [SECURITY.md](SECURITY.md)）。
 
-[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.9.0...HEAD
+[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.9.1...HEAD
+[0.9.1]: https://gitee.com/evangubo/sui/releases/tag/v0.9.1
 [0.9.0]: https://gitee.com/evangubo/sui/releases/tag/v0.9.0
 [0.8.3]: https://gitee.com/evangubo/sui/releases/tag/v0.8.3
 [0.8.2]: https://gitee.com/evangubo/sui/releases/tag/v0.8.2
