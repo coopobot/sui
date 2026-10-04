@@ -8,6 +8,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../platform/app_lifecycle.dart';
 import 'desktop_commands.dart';
 import 'markdown_editor.dart';
+import 'note_window_manager.dart';
 
 /// 同步连接状态（供 UI 展示）。
 enum SyncState {
@@ -146,15 +147,41 @@ class AppController extends ChangeNotifier {
     required NoteRepository repository,
     required AppDatabase database,
     String? dataDir,
+    NoteWindowManager? windowManager,
+    WindowEventHub? windowEventHub,
   })  : _repository = repository,
         _db = database,
-        _dataDir = dataDir;
+        _dataDir = dataDir,
+        _windowManager = windowManager {
+    // 订阅窗口事件枢纽（M8 · 详细设计 §4 / §5.1）。
+    //
+    // `runMultiApp` 的观察者由 `MultiAppConfig` 先于 `globalScope` 构造，此刻本控制器
+    // 尚未创建，观察者无法直接持有它；故观察者只转发到平台无关的 [WindowEventHub]，
+    // 本控制器在此登记为接收方（见 `ui/note_window_manager.dart`）。
+    _windowEventHub = windowEventHub;
+    windowEventHub?.bind(
+      onWindowOpened: onWindowOpened,
+      onWindowClosed: onWindowClosed,
+      onViewFocused: setActiveViewKey,
+    );
+  }
 
   final NoteRepository _repository;
   final AppDatabase _db;
 
   /// 原生平台的数据目录（用于附件缓存落盘）；Web 为 null。
   final String? _dataDir;
+
+  /// 独立笔记窗口管理器（M8 · 详细设计 §4）。
+  ///
+  /// 桌面端入口注入真实实现；Web / 移动端 / 单测为 `null`——此时
+  /// [openNoteInWindow] **优雅降级**为在主窗口内选中该笔记（BR-42.5 / AC-128）。
+  final NoteWindowManager? _windowManager;
+
+  /// 窗口事件枢纽（M8 · 详细设计 §4）：订阅后接收窗口开 / 关 / 聚焦事件。
+  ///
+  /// 由桌面端入口经 [SharedAppScope] 注入；Web / 移动端 / 单测为 `null`（无窗口事件）。
+  WindowEventHub? _windowEventHub;
 
   NoteRepository get repository => _repository;
 
@@ -222,6 +249,12 @@ class AppController extends ChangeNotifier {
 
   /// 本机偏好键：编辑器三态（M7-T06，FR-41 / 详细设计 §5.1）。值见 [EditorModeName.persistentName]。
   static const _kEditorMode = 'ui.editorMode';
+
+  /// 本机偏好键：**独立笔记窗口**的编辑三态（M8 · 详细设计 §5.2 / §8）。
+  ///
+  /// 窗口局部状态：与主窗口的 [_kEditorMode] **各自独立**、互不联动（独立窗口默认
+  /// `formatted`），且不参与同步。
+  static const _kWindowNoteEditorMode = 'ui.window.note.editorMode';
 
   List<Notebook> _notebooks = [];
   List<NoteSummary> _notes = [];
@@ -576,6 +609,11 @@ class AppController extends ChangeNotifier {
       contentMarkdown: content,
       tags: tags,
     );
+    // 独立窗口承载的笔记：刷新其摘要缓存，让窗口标题随编辑更新（AC-125）。
+    if (_windowNoteSummaries.containsKey(id)) {
+      final summary = await _repository.getNoteSummary(id);
+      if (summary != null) _windowNoteSummaries[id] = summary;
+    }
     await refreshNotes();
     await refreshTagSummaries();
     await _enqueueAndSchedule(note);
@@ -584,6 +622,8 @@ class AppController extends ChangeNotifier {
   Future<void> deleteNote(String id) async {
     await _repository.markNoteDeleted(id);
     if (_selectedNoteId == id) _selectedNoteId = null;
+    // 异常自愈（BR-43.6）：笔记被删除时关闭其独立窗口，避免悬空窗口。
+    if (_openNotes.containsKey(id)) await closeNoteWindow(id);
     await refreshNotes();
     await refreshTagSummaries();
     notifyListeners();
@@ -619,6 +659,10 @@ class AppController extends ChangeNotifier {
     if (_selectedNoteId == id && note.archived == false) {
       // 当前选中的笔记被归档后不再可见，清空选中以避免编辑区悬空。
       _selectedNoteId = null;
+    }
+    // 异常自愈（BR-43.6）：笔记转为归档后不再出现在默认列表，关闭其独立窗口。
+    if (note.archived == false && _openNotes.containsKey(id)) {
+      await closeNoteWindow(id);
     }
     await refreshNotes();
     final updated = await _repository.getNote(id);
@@ -1038,39 +1082,220 @@ class AppController extends ChangeNotifier {
     await _persistPref(_kEditorMode, mode.persistentName);
   }
 
-  // ---- 桌面壳层：编辑器命令桥与退出（M7-T08 / M7-T10，FR-41 / 详细设计 §4.2 §7） ----
+  /// 读取**独立笔记窗口**的编辑三态偏好（M8 · 详细设计 §5.2 / §8）。
+  ///
+  /// 窗口局部状态，与主窗口三态各自独立；缺省 [EditorMode.formatted]。由
+  /// `SuiNoteWindow` 在首帧读取。
+  Future<EditorMode> loadWindowNoteEditorMode() async =>
+      editorModeFromName(await _settings.get(_kWindowNoteEditorMode));
 
-  /// 活动编辑器的命令桥（详细设计 §4.2）。
+  /// 持久化**独立笔记窗口**的编辑三态偏好（尽力落盘，失败只记录不抛出）。
+  Future<void> saveWindowNoteEditorMode(EditorMode mode) =>
+      _persistPref(_kWindowNoteEditorMode, mode.persistentName);
+
+  // ---- 桌面壳层：编辑器命令桥与退出（M7-T08 / M7-T10，FR-41 / 详细设计 §4.2 §5.1 §7） ----
+
+  /// 各视图的编辑器命令桥注册表（M8 收敛点，详细设计 §5.1）。
   ///
   /// 撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选 / 导出 / 回写刷新的真实实现都在
   /// 编辑器内部（`_NoteEditorState`），壳层触达不到，故由编辑器在 `initState`
-  /// 注册自身、`dispose` 注销。
-  EditorCommandTarget? _editorTarget;
+  /// 按**视图键**注册自身、`dispose` 注销。
+  ///
+  /// M7 曾用单一可空 target（当时主窗口只有一个编辑器）；引入多窗口后（ADR-012）
+  /// 改为按视图键索引，避免多个独立笔记窗口抢同一 target：`viewKey` 主窗口固定
+  /// [kMainViewKey]，独立窗口取窗口句柄（详细设计 §5.1）。
+  final Map<Object, EditorCommandTarget> _editorTargets = {};
 
-  /// 已注册的编辑器命令桥；未挂载编辑器时为 `null`。
-  EditorCommandTarget? get editorTarget => _editorTarget;
+  /// 当前活动（焦点）视图的键（详细设计 §5.1）：菜单 / 快捷键命令派发到**当前活动
+  /// 窗口**对应的 target。默认主窗口，由窗口焦点事件（`SuiWindowObserver`）更新。
+  Object _activeViewKey = kMainViewKey;
+
+  /// 当前活动视图键：供命令置灰谓词与执行体取**本视图自己的**目标（§5.1）。
+  Object get activeViewKey => _activeViewKey;
+
+  /// 更新活动视图键（由窗口焦点事件回调；不通知——命令可用性在菜单展开时现算）。
+  void setActiveViewKey(Object viewKey) {
+    _activeViewKey = viewKey;
+  }
+
+  /// 取 [viewKey] 视图自己的编辑器命令桥；该视图未挂载编辑器时为 `null`（§5.1）。
+  EditorCommandTarget? targetFor(Object viewKey) => _editorTargets[viewKey];
 
   /// 正文编辑类命令是否可用（BR-41.4 / AC-119）。
   ///
-  /// 未选笔记 / 预览模式（只读呈现）/ 编辑器未挂载时一律不可用，对应菜单项置灰。
+  /// 未选笔记 / 预览模式（只读呈现）/ 当前活动视图未挂载编辑器时一律不可用，
+  /// 对应菜单项置灰。
   bool get canEditContent =>
       _selectedNoteId != null &&
       _editorMode != EditorMode.preview &&
-      _editorTarget != null;
+      targetFor(_activeViewKey) != null;
 
-  /// 登记活动的编辑器命令桥（由 `_NoteEditorState.initState` 调用）。
+  /// 登记某视图的编辑器命令桥（由 `_NoteEditorState.initState` 调用）。
   ///
   /// 刻意不 `notifyListeners()`：注册发生在构建阶段，通知会触发祖先 `markNeedsBuild`
   /// 而撞上「构建期重建」断言；菜单项可用性由 `isEnabled` 在菜单展开时现算，无需通知。
-  void registerEditorTarget(EditorCommandTarget target) {
-    if (identical(_editorTarget, target)) return;
-    _editorTarget = target;
+  void registerEditorTarget(Object viewKey, EditorCommandTarget target) {
+    if (identical(_editorTargets[viewKey], target)) return;
+    _editorTargets[viewKey] = target;
   }
 
-  /// 注销编辑器命令桥（由 `_NoteEditorState.dispose` 调用）。同样不作通知，理由同上。
-  void unregisterEditorTarget(EditorCommandTarget target) {
-    if (!identical(_editorTarget, target)) return;
-    _editorTarget = null;
+  /// 注销某视图的编辑器命令桥（由 `_NoteEditorState.dispose` 调用）。同样不作通知，理由同
+  /// [registerEditorTarget]。
+  ///
+  /// **必须带身份校验**：同一视图键下编辑器会交替替换——`NoteEditor(key: ValueKey(noteId))`
+  /// 让「无笔记 → 选中笔记」时旧元素被替换，Flutter 在同一帧内**先** `initState` 新实例（注册）
+  /// **后**才 `dispose` 旧实例（注销）。若只按键移除，旧实例会把新实例刚登记的 target 一并删掉。
+  void unregisterEditorTarget(Object viewKey, EditorCommandTarget target) {
+    if (identical(_editorTargets[viewKey], target)) {
+      _editorTargets.remove(viewKey);
+    }
+  }
+
+  // ---- 独立笔记窗口注册表（M8 · 详细设计 §4 / §5.3 / §7） ----
+
+  /// 已打开的笔记窗口：`noteId → 窗口句柄`（主 isolate 单一事实来源，§4.1）。
+  ///
+  /// 键为 `noteId`（BR-43.3 天然唯一，与「一笔记一窗口」一一对应）；句柄即独立窗口
+  /// 的视图键，用于取该窗口自己的编辑器命令桥（[targetFor]）。注册表是**内存态**，
+  /// 重启不恢复（§4.1）。
+  final Map<String, Object> _openNotes = {};
+
+  /// 独立笔记窗口承载的笔记摘要缓存（`noteId → NoteSummary`）。
+  ///
+  /// 中栏列表 [_notes] 始终是**筛选后**结果（受笔记本 / 标签 / 搜索 / 视图影响），
+  /// 独立窗口的笔记可能不在其中。为使独立窗口的标题与编辑器解析不受主窗口中栏筛选
+  /// 影响（BR-42.2 / AC-125），打开窗口时按 id 取一次摘要缓存于此，笔记保存时刷新、
+  /// 窗口关闭时清理。
+  final Map<String, NoteSummary> _windowNoteSummaries = {};
+
+  /// 按 id 取笔记，**不受中栏筛选 / 排序影响**（供独立窗口与编辑器解析，AC-125）。
+  ///
+  /// 先查当前中栏列表 [_notes]，再回落到独立窗口缓存 [_windowNoteSummaries]。
+  Note? noteById(String? id) {
+    if (id == null) return null;
+    for (final s in _notes) {
+      if (s.note.id == id) return s.note;
+    }
+    return _windowNoteSummaries[id]?.note;
+  }
+
+  /// 按 id 取笔记标签，**不受中栏筛选影响**（供编辑器解析，AC-125）。
+  List<String> tagsById(String? id) {
+    if (id == null) return const [];
+    for (final s in _notes) {
+      if (s.note.id == id) return s.tags;
+    }
+    return _windowNoteSummaries[id]?.tags ?? const [];
+  }
+
+  /// 活动窗口句柄集合（含主窗口）；集合清空即退出（§7「无窗口即退出」，防驻留）。
+  ///
+  /// **预置主窗口** [kMainViewKey]：主窗口是应用入口视图，`multiview_desktop` 的
+  /// `registerInitialWindow` 刻意**不**触发 `onWindowOpened`（仅次级窗口触发），
+  /// 故必须在此预置；否则关掉第一个独立窗口时集合会误判为空而提前退出进程。
+  /// 主窗口的关闭仍会经 `onWindowClosed` 送达（其公开视图 id 恒为 `1`，由
+  /// `SuiWindowObserver` 折算为 [kMainViewKey]）。
+  final Set<Object> _activeWindows = {kMainViewKey};
+
+  /// 是否已进入退出流程（防止关闭回调重入重复退出）。
+  bool _quitting = false;
+
+  /// 占用态变化信号：已打开的笔记集合变化时自增，供笔记列表刷新占用态标识（BR-43.5）。
+  final ValueNotifier<int> _openNotesChanged = ValueNotifier<int>(0);
+
+  /// 供列表监听的占用态变化信号（BR-43.5）。
+  ValueListenable<int> get openNotesChanged => _openNotesChanged;
+
+  /// 当前活动窗口数（含主窗口）。
+  int get activeWindowCount => _activeWindows.length;
+
+  /// [noteId] 是否已在独立窗口打开（BR-43.5，供列表渲染占用态标识）。
+  bool isNoteOpen(String noteId) => _openNotes.containsKey(noteId);
+
+  /// 已打开的笔记窗口句柄（只读快照，供测试与调试）。
+  Map<String, Object> get openNoteHandles => Map.unmodifiable(_openNotes);
+
+  /// 打开（或聚焦）承载 [noteId] 的独立笔记窗口（§4.3 去重聚焦）。
+  ///
+  /// - 已打开且句柄仍有效 → 仅聚焦（BR-43.1 / BR-43.2），不新开；
+  /// - 句柄失效（系统已关但回调未及）→ 清理后按「未打开」处理（BR-43.6 异常自愈）；
+  /// - 未注入窗口管理器（Web / 移动端 / 单测）→ **优雅降级**为主窗口内选中该笔记
+  ///   （BR-42.5 / AC-128）。
+  ///
+  /// **不改动主窗口选中**（BR-42.2 两面并行）：独立窗口打开后主窗口照常呈现并可编辑该笔记，
+  /// 两窗口共享同一 `AppController` 与同一 Markdown 正本、编辑实时互相同步。
+  Future<void> openNoteInWindow(String noteId) async {
+    final manager = _windowManager;
+    if (manager == null) {
+      selectNote(noteId);
+      return;
+    }
+    final existing = _openNotes[noteId];
+    if (existing != null) {
+      if (manager.isNoteWindowValid(existing)) {
+        await focusWindow(noteId);
+        return;
+      }
+      _openNotes.remove(noteId); // 自愈：清理失效句柄（BR-43.6）
+      _windowNoteSummaries.remove(noteId);
+    }
+    // 先缓存摘要，使独立窗口首帧即可解析标题与内容（不受中栏筛选影响）。
+    final summary = await _repository.getNoteSummary(noteId);
+    if (summary == null) return; // 笔记已不存在 → 异常自愈，不新开窗口（BR-43.6）
+    _windowNoteSummaries[noteId] = summary;
+    final handle = await manager.openNoteWindow(noteId);
+    if (handle == null) {
+      _windowNoteSummaries.remove(noteId);
+      return;
+    }
+    _openNotes[noteId] = handle;
+    setActiveViewKey(handle);
+    _openNotesChanged.value++;
+  }
+
+  /// 置前并聚焦 [noteId] 对应的独立窗口（BR-43.2；若最小化则先还原）。
+  Future<void> focusWindow(String noteId) async {
+    final handle = _openNotes[noteId];
+    if (handle == null) return;
+    setActiveViewKey(handle);
+    _windowManager?.focusNoteWindow(handle);
+  }
+
+  /// 关闭 [noteId] 的独立窗口（供「关闭窗口」入口调用）。
+  Future<void> closeNoteWindow(String noteId) async {
+    final handle = _openNotes[noteId];
+    if (handle == null) return;
+    await _windowManager?.closeNoteWindow(handle);
+    // 真实关闭回调会经 [onWindowClosed] 释放占用；此处兜底，避免句柄悬挂。
+    onWindowClosed(handle);
+  }
+
+  /// 窗口打开回调（由 `SuiWindowObserver` 转发，§7）：登记活动窗口。
+  void onWindowOpened(Object handle) {
+    _activeWindows.add(handle);
+  }
+
+  /// 窗口关闭回调（由 `SuiWindowObserver` 转发，§4.1 / §7）。
+  ///
+  /// 移出注册表并释放该 `noteId` 占用（BR-43.4），同步维护活动窗口集合；
+  /// 集合清空则退出进程（§7「无窗口即退出」，防驻留）。
+  void onWindowClosed(Object handle) {
+    // 幂等：兜底路径与真实关闭回调可能各来一次，第二次直接忽略。
+    final tracked = _activeWindows.remove(handle);
+    final knownNote = _openNotes.containsValue(handle);
+    if (!tracked && !knownNote) return;
+    final closedNoteIds =
+        _openNotes.entries.where((e) => e.value == handle).map((e) => e.key).toList();
+    _openNotes.removeWhere((_, value) => value == handle);
+    for (final id in closedNoteIds) {
+      _windowNoteSummaries.remove(id);
+    }
+    _editorTargets.remove(handle);
+    if (_activeViewKey == handle) _activeViewKey = kMainViewKey;
+    _openNotesChanged.value++;
+    if (_activeWindows.isEmpty) {
+      exitApp();
+    }
   }
 
   /// 「查找笔记」请求信号（详细设计 §4.3）。
@@ -1102,14 +1327,30 @@ class AppController extends ChangeNotifier {
     return true;
   }
 
-  /// 「文件 → 退出应用」（详细设计 §7）：先结束编辑器防抖落库，再尽力推送，最后退出。
+  /// 「文件 → 退出应用」（详细设计 §7）：先结束**所有**窗口编辑器的防抖落库，再尽力推送
+  /// 一次，最后关闭全部独立窗口并退出进程。
   ///
   /// 本地写入本身不防抖，落库随编辑即时发生；但推送到服务端受 `_syncDebounce`
   /// （700ms）与 30s 周期器节制——进程一结束周期器不再触发，故退出前必须补一次
   /// 尽力推送，否则本次改动可能停在本地。
+  ///
+  /// M8 起是多窗口：需对**每个**视图各自的编辑器命令桥补一次回写（§7 第 1 步），
+  /// 否则独立笔记窗口里尚未落库的 400ms 防抖内容会随窗口销毁而丢失。
   Future<void> quitApplication() async {
-    await _editorTarget?.flushPendingEdits();
+    if (_quitting) return;
+    _quitting = true;
+    // 1. 结束所有窗口编辑器的 400ms 防抖，写回本地库。
+    await Future.wait(
+      _editorTargets.values.map((t) => t.flushPendingEdits()),
+    );
+    // 2. 尽力推送一次（超时 / 失败都不阻塞退出）。
     await _flushPendingSync();
+    // 3. 关闭全部独立窗口，随后退出进程（主窗口随进程退出结束）。
+    try {
+      await _windowManager?.closeAllNoteWindows();
+    } catch (_) {
+      // 忽略：退出优先。
+    }
     exitApp();
   }
 
@@ -1168,9 +1409,16 @@ class AppController extends ChangeNotifier {
   List<Attachment> _attachments = [];
   List<Attachment> get attachments => _attachments;
 
-  Future<void> refreshAttachments(String noteId) async {
-    _attachments = await _repository.listAttachments(noteId: noteId);
+  /// 刷新并**返回** [noteId] 的附件列表。
+  ///
+  /// 多窗口下多个编辑器可能并发刷新**不同**笔记，共享的 [attachments] 字段会被
+  /// 「后到者」覆盖，故调用方必须以本方法的**返回值**为准，不得回读 [attachments]
+  /// （详细设计 §5.2 · 避免窗口间串扰）。
+  Future<List<Attachment>> refreshAttachments(String noteId) async {
+    final list = await _repository.listAttachments(noteId: noteId);
+    _attachments = list;
     notifyListeners();
+    return list;
   }
 
   /// 把选中的文件挂到笔记上：落本地字节 → 建映射（引用计数 +1）→
@@ -1212,14 +1460,17 @@ class AppController extends ChangeNotifier {
   }
 
   /// 摘除附件（墓碑 + 释放引用），并入队同步让对端收敛。
-  Future<void> removeAttachment(Attachment a) async {
+  ///
+  /// 返回该笔记**刷新后**的附件列表（无 `noteId` 时为 `null`），供调用方直接采用，
+  /// 避免回读共享字段（详细设计 §5.2）。
+  Future<List<Attachment>?> removeAttachment(Attachment a) async {
     await _repository.removeAttachment(a.id);
     final noteId = a.noteId;
-    if (noteId != null) {
-      await refreshAttachments(noteId);
-      final note = await _repository.getNote(noteId);
-      if (note != null) await _enqueueAndSchedule(note);
-    }
+    if (noteId == null) return null;
+    final list = await refreshAttachments(noteId);
+    final note = await _repository.getNote(noteId);
+    if (note != null) await _enqueueAndSchedule(note);
+    return list;
   }
 
   /// 附件在「本地 / 服务端」两侧的可用状态（卡片展示用）。
@@ -1280,7 +1531,11 @@ class AppController extends ChangeNotifier {
     _syncClient?.close();
     _blobStore?.dispose();
     _auth?.close();
-    _editorTarget = null;
+    _windowEventHub?.unbind();
+    _editorTargets.clear();
+    _openNotes.clear();
+    _activeWindows.clear();
+    _openNotesChanged.dispose();
     _findNotesRequests.dispose();
     super.dispose();
   }

@@ -40,6 +40,7 @@ class AppMenuBar extends StatelessWidget {
             DesktopCommandId.newNote,
             DesktopCommandId.createNotebook,
             DesktopCommandId.exportNote,
+            DesktopCommandId.openNoteInWindow,
             null, // 分组分隔符
             DesktopCommandId.quit,
           ],

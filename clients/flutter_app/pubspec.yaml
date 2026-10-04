@@ -25,6 +25,9 @@ dependencies:
   # 因此客户端无需 `dart:io`，Web 构建不受影响）。
   file_picker: ^8.1.0
   sqlite3_flutter_libs: ^0.5.0
+  # 桌面端多窗口（单引擎多视图）：笔记独立窗口（M8 · FR-42/FR-43 · ADR-012）。
+  # 版本由 Spike-002 在 Flutter 3.47.5 / Dart 3.13.4 上实测后锁定。
+  multiview_desktop: ^2.0.0
 
 dev_dependencies:
   flutter_test:

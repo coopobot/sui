@@ -9,11 +9,49 @@ import 'app_controller.dart';
 import 'desktop_commands.dart';
 import 'markdown_editing_controller.dart';
 import 'markdown_editor.dart';
+import 'note_window_manager.dart';
 
 /// 笔记编辑页：标题 + 格式工具栏 + Markdown 编辑器（格式 / 源码 / 预览三态） + 标签。
 /// 编辑变更实时保存到仓储并追加一条修订。
 class NoteEditor extends StatefulWidget {
-  const NoteEditor({super.key});
+  const NoteEditor({
+    super.key,
+    this.viewKey = kMainViewKey,
+    this.noteId,
+    this.mode,
+    this.onModeChanged,
+    this.showRevisions = false,
+    this.onToggleRevisions,
+  });
+
+  /// 本编辑器所属**视图**的键（M8 · 详细设计 §5.1）。
+  ///
+  /// 主窗口固定 [kMainViewKey]；独立笔记窗口取窗口句柄（M8-T10 注入）。
+  /// 用于向 [AppController] 按视图注册命令桥，使菜单 / 快捷键命令派发到正确的窗口。
+  final Object viewKey;
+
+  /// 本编辑器呈现的笔记 id（M8-T10 · 详细设计 §4.2 / §5.2）。
+  ///
+  /// `null`（默认）= 跟随 [AppController.selectedNoteId]，即**主窗口**口径；独立笔记
+  /// 窗口传入固定 `noteId`，使窗口**始终呈现**该笔记、不随主窗口选中变化（主窗口与
+  /// 独立窗口两面并行，各自独立导航）。
+  final String? noteId;
+
+  /// 三态编辑模式的**显式来源**（M8-T10 · 详细设计 §5.2）。
+  ///
+  /// `null`（默认）= 跟随全局 [AppController.editorMode]（主窗口口径）；独立笔记窗口
+  /// 传入**窗口局部**模式，避免与主窗口联动。
+  final EditorMode? mode;
+
+  /// 模式切换回调；`null` 时回落到 [AppController.setEditorMode]（主窗口口径）。
+  final ValueChanged<EditorMode>? onModeChanged;
+
+  /// 修订面板是否可见（M8-T10）。仅当 [onToggleRevisions] 非空时生效（独立窗口口径）；
+  /// 主窗口保持默认，改用全局 [AppController.showRevisionPanel]。
+  final bool showRevisions;
+
+  /// 修订面板显隐切换回调；`null` 时回落到 [AppController.toggleRevisionPanel]。
+  final VoidCallback? onToggleRevisions;
 
   @override
   State<NoteEditor> createState() => _NoteEditorState();
@@ -58,6 +96,11 @@ class _NoteEditorState extends State<NoteEditor>
   /// （元素已失活），因此在此留存注册时的实例，供注销复用。
   AppController? _registeredController;
 
+  /// 注册命令桥时所用的**视图键**，供 `dispose` 注销复用（M8 · 详细设计 §5.1）。
+  ///
+  /// 与 [_registeredController] 同生共死；同样是因为 `dispose` 内不能读 `widget`。
+  Object? _registeredViewKey;
+
   @override
   void initState() {
     super.initState();
@@ -70,13 +113,20 @@ class _NoteEditorState extends State<NoteEditor>
     // 此处刻意不触发 notifyListeners——注册发生在构建阶段，通知会撞上「构建期重建」断言；
     // 菜单项的可用性是在菜单展开时按 `isEnabled` 现算的，无需依赖通知。
     _registeredController = _controller;
-    _registeredController!.registerEditorTarget(this);
+    _registeredViewKey = widget.viewKey;
+    _registeredController!.registerEditorTarget(_registeredViewKey!, this);
   }
 
   @override
   void dispose() {
-    _registeredController?.unregisterEditorTarget(this);
+    final controller = _registeredController;
+    final viewKey = _registeredViewKey;
+    if (controller != null && viewKey != null) {
+      // 带身份校验注销：同视图键下新旧编辑器交替时，旧实例不得删掉新实例的登记。
+      controller.unregisterEditorTarget(viewKey, this);
+    }
     _registeredController = null;
+    _registeredViewKey = null;
     _title.dispose();
     _content.dispose();
     _tagInput.dispose();
@@ -87,16 +137,32 @@ class _NoteEditorState extends State<NoteEditor>
 
   AppController get _controller => context.read<AppController>();
 
-  /// 三态编辑模式（M7-T06 上提，详细设计 §5.1）：取自 [AppController] 的本地视图偏好。
+  /// 三态编辑模式（M7-T06 上提，详细设计 §5.1）：优先取**显式**模式（独立窗口的
+  /// 窗口局部状态），否则取 [AppController] 的本地视图偏好（主窗口）。
   ///
   /// 不再随切换笔记重置（`NoteEditor(key: ValueKey(noteId))` 重建 State 与否都稳定）；
   /// 三态共享同一 Markdown 正本，切换只改呈现，不保存、不入修订（守 BR-23.1）。
-  EditorMode get _mode => _controller.editorMode;
+  EditorMode get _mode => widget.mode ?? _controller.editorMode;
 
-  Note? get _note => _controller.notes
-      .where((s) => s.note.id == _controller.selectedNoteId)
-      .map((s) => s.note)
-      .firstOrNull;
+  /// 切换三态：显式回调优先（独立窗口写窗口局部状态），否则回落到控制器（主窗口）。
+  void _setMode(EditorMode mode) {
+    final onChanged = widget.onModeChanged;
+    if (onChanged != null) {
+      onChanged(mode);
+    } else {
+      _controller.setEditorMode(mode);
+    }
+  }
+
+  /// 本编辑器绑定的笔记 id：显式 [NoteEditor.noteId] 优先，否则跟随主窗口选中项
+  /// （M8-T10 · 详细设计 §5.2）。
+  String? get _noteId => widget.noteId ?? _controller.selectedNoteId;
+
+  /// 当前笔记，**不受中栏筛选影响**（M8-T10 · AC-125）。
+  ///
+  /// 走 `AppController.noteById`：先查中栏列表，再回落独立窗口摘要缓存——独立窗口
+  /// 承载的笔记可能不在主窗口中栏的筛选结果里，直接读 `controller.notes` 会取不到。
+  Note? get _note => _controller.noteById(_noteId);
 
   @override
   void didChangeDependencies() {
@@ -113,7 +179,7 @@ class _NoteEditorState extends State<NoteEditor>
       _content.text = note.contentMarkdown;
       final s =
           _controller.notes.where((s) => s.note.id == note.id).firstOrNull;
-      _tags = s?.tags ?? [];
+      _tags = s?.tags ?? _controller.tagsById(note.id);
       _loaded = true;
       _boundTitle = note.title;
       _boundContent = note.contentMarkdown;
@@ -121,8 +187,8 @@ class _NoteEditorState extends State<NoteEditor>
     if (note?.id != _loadedNoteId) {
       _loadedNoteId = note?.id;
       if (note != null) {
-        _controller.refreshAttachments(note.id).then((_) {
-          _attachments = _controller.attachments;
+        _controller.refreshAttachments(note.id).then((list) {
+          _attachments = list;
           if (mounted) setState(() {});
         });
       } else {
@@ -145,7 +211,7 @@ class _NoteEditorState extends State<NoteEditor>
       note.contentMarkdown != _boundContent;
 
   Future<void> _save() async {
-    final id = _controller.selectedNoteId;
+    final id = _noteId;
     if (id == null) return;
     _pendingSaves++;
     try {
@@ -466,7 +532,11 @@ class _NoteEditorState extends State<NoteEditor>
 
   @override
   Widget build(BuildContext context) {
-    final id = context.watch<AppController>().selectedNoteId;
+    // 订阅 [AppController]：编辑器须随其重建（首次载入依赖解析、内容被同步改写、
+    // 主窗口选中项切换）。独立窗口的 noteId 固定，但同样需要内容变化后重绘，
+    // 故此处保留 watch 只作依赖登记，实际取值走 [_noteId]（M8-T10 · §5.2）。
+    context.watch<AppController>();
+    final id = _noteId;
     // 仅在「首次载入 / 切换到另一篇笔记 / 内容被外部改写（恢复修订、同步拉取）」
     // 时重绑输入框。判定依据是标题 / 正文内容是否真的变了，而非 version：
     // `updateNoteContent` 不改 `Notes.version`，而 push 成功后 `setNoteServerVersion`
@@ -646,7 +716,7 @@ class _NoteEditorState extends State<NoteEditor>
         ),
       ],
       selected: {_mode},
-      onSelectionChanged: (sel) => _controller.setEditorMode(sel.first),
+      onSelectionChanged: (sel) => _setMode(sel.first),
       showSelectedIcon: false,
     );
   }
@@ -660,8 +730,11 @@ class _NoteEditorState extends State<NoteEditor>
       IconButton(
         tooltip: '版本历史',
         icon: const Icon(Icons.history),
-        isSelected: context.watch<AppController>().showRevisionPanel,
-        onPressed: () => _controller.toggleRevisionPanel(),
+        // 独立窗口传入 onToggleRevisions → 用窗口局部可见性；主窗口沿用全局状态。
+        isSelected: widget.onToggleRevisions != null
+            ? widget.showRevisions
+            : context.watch<AppController>().showRevisionPanel,
+        onPressed: widget.onToggleRevisions ?? _controller.toggleRevisionPanel,
       ),
       IconButton(
         tooltip: '导出 Markdown',
@@ -700,7 +773,7 @@ class _NoteEditorState extends State<NoteEditor>
   /// 图片在光标处插入（`EditorFormat.insertImage`），而非总是追加到文末——
   /// 这样用户在正文中间也能就地插图。
   Future<void> _pickAndAttach() async {
-    final id = _controller.selectedNoteId;
+    final id = _noteId;
     if (id == null) return;
 
     // 在打开文件选择器之前记下光标位置；选择器是异步的，回来时光标可能已移动。
@@ -741,8 +814,11 @@ class _NoteEditorState extends State<NoteEditor>
     }
     if (count == 0) return;
 
+    // 以「按本笔记刷新」的**返回值**为准，避免与其它窗口刷新的笔记互相覆盖（详细设计 §5.2）。
+    final freshAttachments = await _controller.refreshAttachments(id);
+    if (!mounted) return;
     setState(() {
-      _attachments = _controller.attachments;
+      _attachments = freshAttachments;
       _content.value = TextEditingValue(
         text: text,
         selection: TextSelection.collapsed(offset: insertAt),
@@ -753,9 +829,9 @@ class _NoteEditorState extends State<NoteEditor>
   }
 
   Future<void> _removeAttachment(Attachment a) async {
-    await _controller.removeAttachment(a);
+    final list = await _controller.removeAttachment(a);
     if (!mounted) return;
-    setState(() => _attachments = _controller.attachments);
+    if (list != null) setState(() => _attachments = list);
     _toast('已移除「${a.filename}」');
   }
 

@@ -1,7 +1,7 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../platform/desktop_platform.dart';
 import 'app_controller.dart';
 import 'app_menu_bar.dart';
 import 'note_editor.dart';
@@ -25,7 +25,7 @@ class NoteShell extends StatelessWidget {
         if (wide) {
           return _WideLayout(
             controller: controller,
-            showDesktopChrome: _isDesktopPlatform,
+            showDesktopChrome: isDesktopPlatform,
           );
         }
         return _NarrowLayout(controller: controller);
@@ -34,17 +34,11 @@ class NoteShell extends StatelessWidget {
   }
 }
 
-/// 是否桌面平台（详细设计 §6）：菜单栏与折叠切换仅在桌面三平台渲染。
+/// 宽屏三栏布局：笔记本树 / 笔记列表 / 编辑区并排。
 ///
-/// 用 [defaultTargetPlatform] 而非 `dart:io` 的 `Platform`：Web 上后者不可用，
-/// 且能避免条件导入；[kIsWeb] 先行兜底，避免 Web 被误判为桌面。
-bool get _isDesktopPlatform {
-  if (kIsWeb) return false;
-  return defaultTargetPlatform == TargetPlatform.windows ||
-      defaultTargetPlatform == TargetPlatform.macOS ||
-      defaultTargetPlatform == TargetPlatform.linux;
-}
-
+/// 桌面端判定口径统一收敛到 [`isDesktopPlatform`](../platform/desktop_platform.dart)
+/// （菜单栏与折叠切换仅在桌面三平台渲染，详细设计 §6），避免与命令入口 / 独立窗口
+/// 入口各写一份。
 class _WideLayout extends StatelessWidget {
   const _WideLayout({required this.controller, required this.showDesktopChrome});
   final AppController controller;
@@ -70,7 +64,7 @@ class _WideLayout extends StatelessWidget {
               )
             : const Text('随手记 Sui'),
         actions: [
-          _SyncActions(controller: controller),
+          SyncActions(controller: controller),
           _newNoteAction(context),
         ],
       ),
@@ -164,7 +158,7 @@ class _NarrowLayout extends StatelessWidget {
                     )
                   : null,
           actions: [
-            _SyncActions(controller: controller),
+            SyncActions(controller: controller),
             // 编辑态不再提供「删除笔记」图标：它与同步/设置同处顶栏、极易误碰（B15）。
             // 删除入口保留在笔记列表的行尾菜单里（需二次确认）。
             if (!editorOpen)
@@ -192,8 +186,10 @@ class _NarrowLayout extends StatelessWidget {
 }
 
 /// 顶栏同步状态与入口：未连接时点按打开设置，已连接时点按立即同步。
-class _SyncActions extends StatelessWidget {
-  const _SyncActions({required this.controller});
+///
+/// 主窗口顶栏与独立笔记窗口精简顶栏**共用**同一实现（M8 · 详细设计 §4.2）。
+class SyncActions extends StatelessWidget {
+  const SyncActions({super.key, required this.controller});
 
   final AppController controller;
 

@@ -28,10 +28,10 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 
 ```bash
 curl http://localhost:8080/healthz
-# → {"ok":true,"service":"sui-server","version":"0.8.0","time":"...","initialized":false}
+# → {"ok":true,"service":"sui-server","version":"0.9.0","time":"...","initialized":false}
 
 curl http://localhost:8080/api/v1/ping
-# → {"ok":true,"service":"sui-server","version":"0.8.0","time":"...","msg":"pong","initialized":false}
+# → {"ok":true,"service":"sui-server","version":"0.9.0","time":"...","msg":"pong","initialized":false}
 ```
 
 > `initialized` 表示服务端是否已存在账号（单用户模式：建号后自助注册关闭）。首启未建号时为

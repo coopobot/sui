@@ -159,12 +159,15 @@
 | `markdown_editing_controller.dart` | 「格式 / 源码 / 预览」三态编辑控制器（Markdown 为正本；格式态渲染行内样式、图片单元、任务勾选框与高亮，支持选中调尺寸） |
 | `markdown_editor.dart` | 源码编辑 + 预览切换（`sizedImageBuilder` 渲染 `sui://` 附件图；预览态渲染任务列表与 `==高亮==`） |
 | `revision_panel.dart` | 版本历史面板 + 一键恢复（宽屏为右侧栏、窄屏**整页推入**，能力一致；BR-12.3） |
-| `app_controller.dart` | 全局状态与业务编排（附件增删 / 上传 / 缓存状态）；桌面折叠状态 `leftPanelCollapsed` / `noteListCollapsed` 与编辑模式上提（本地视图偏好 `ui.*`，**不进同步**）；退出前落库 `flushPendingEdits`；同步调度：编辑防抖 0.7s 推送、WS 通知拉取、30s 周期兜底 |
-| `desktop_commands.dart` | 桌面命令**单一来源**（`DesktopCommandId` / `DesktopCommand` / `desktopCommands` 注册表）+ `EditorCommandTarget` 接口桥；菜单项 / 顶栏图标按钮 / 快捷键**同源** |
+| `app_controller.dart` | 全局状态与业务编排（附件增删 / 上传 / 缓存状态）；桌面折叠状态 `leftPanelCollapsed` / `noteListCollapsed` 与编辑模式上提（本地视图偏好 `ui.*`，**不进同步**）；退出前落库 `flushPendingEdits`；同步调度：编辑防抖 0.7s 推送、WS 通知拉取、30s 周期兜底；**多窗口**：编辑器命令目标按**视图键**索引（`_editorTargets` / `setActiveViewKey`）、窗口注册表与「一笔记一窗口」去重聚焦、`quitApplication` 关闭全部窗口后退出 |
+| `note_window_manager.dart` | 桌面多窗口**平台无关接缝**：`NoteWindowManager` 接口（开窗 / 聚焦 / 关闭 / 查询）+ `WindowEventHub` 事件枢纽（窗口打开 / 关闭 / 视图聚焦）—— 窗口注册表语义与「两面并行」流程可在**纯 Dart 单测**中驱动，无需真实窗口 |
+| `note_window.dart` | **独立笔记窗口**内容（复用 `NoteEditor`，按笔记 id 装载）；窗口内以视图键 `setActiveViewKey` 认领命令、关闭经 `closeCurrentWindow` 释放 |
+| `desktop_commands.dart` | 桌面命令**单一来源**（`DesktopCommandId` / `DesktopCommand` / `desktopCommands` 注册表）+ `EditorCommandTarget` 接口桥；菜单项 / 顶栏图标按钮 / 快捷键**同源**（多窗口下按当前**聚焦视图**路由命令） |
 | `app_menu_bar.dart` | 桌面端自绘菜单栏「文件 / 编辑 / 视图 / 帮助」+ 顶栏折叠切换控件 `PanelToggles`（窄屏 / 非桌面**不渲染**） |
 | `sync_settings_dialog.dart` | 同步设置对话框（服务端地址 / Token / 设备 ID 的录入与校验） |
 | `platform/attachment_picker.dart` | 跨端文件选择（`file_picker`，返回文件名 + 字节） |
 | `platform/app_lifecycle.dart`（+ `_io` / `_web`） | 桌面退出前落库接缝（条件导入）：桌面实现「`flushPendingEdits` → 尽力推送 → 退出」，其他平台降级为空实现 |
+| `platform/multi_window.dart`（+ `_io` / `_stub`） | 多窗口平台接缝（条件导入）：桌面经 `multiview_desktop` 开**真 OS 窗口**（单引擎多视图），其他平台降级为 no-op（Web / 移动端不构建该依赖） |
 
 **服务端地址**：不写死在代码里，由用户在「同步设置」对话框录入，经
 `SyncConfig.normalizeBaseUrl` 规整后存入本地 SQLite `settings` 表；未填写时输入框以
@@ -176,15 +179,19 @@
   缓存 LRU / 配置存取 / 落盘持久化 / 笔记本排序（同级 `sortOrder` 递增、子笔记本权重独立、
   重排归一化）/ 编辑器格式化（快捷键映射同源、勾选框往返、`==高亮==` 往返、块级行为），另含
   e2e（首批注册后双端 push/pull→冲突合并→重发；附件映射同步 + 字节按需下载）。
-- flutter_app：50 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
+- flutter_app：62 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
   第二设备拉取）、`editor_format_image_test.dart`（格式模式图片渲染与尺寸手柄）、
   `editor_enhancement_test.dart` / `editor_enhancement_e2e_test.dart`（编辑器增强：编辑快捷键、
   勾选框点选回写、`==高亮==` 三态渲染，以及「打开不编辑」跨三态逐字节保真）、
   `note_shell_narrow_test.dart`（窄屏历史入口 3 项：点历史整页推入修订面板、顶栏返回 / 系统返回
-  先关面板回编辑页再退出编辑）与
+  先关面板回编辑页再退出编辑）、
   `desktop_shell_test.dart`（桌面外壳 12 项：折叠四态与上下文不丢、视图偏好持久化、恢复入口、
   菜单命令与图标 / 快捷键等价、不可用命令置灰、快捷键提示、编辑模式跨重启、窄屏不渲染、
-  落盘失败不阻断刷新）。
+  落盘失败不阻断刷新）与
+  `note_window_manager_test.dart` / `attachment_window_isolation_test.dart`（桌面多窗口 12 项：
+  开窗 / 去重聚焦（含最小化先还原）、两面并行（主窗口照常保留编辑面、选中不变）、
+  关闭释放与「关闭全部窗口退出」、窗口局部 `ui.window.note.editorMode` 独立于主窗口、
+  附件列表按笔记取值**不回读**全局字段的跨窗口隔离）。
 - 运行前确保 `libsqlite3` 可用（见[快速开始 §2.3](getting-started.md#23-sqlite3-native-库drift-依赖仅原生平台)）。
 
 ## 4. 同步协议与冲突解决
@@ -391,12 +398,12 @@ sui/
     │   │   ├── repository/      # note_repository.dart
     │   │   ├── sync/            # sync_client.dart
     │   │   └── util/            # ids.dart / mime_kind.dart
-    │   └── test/                # 113 用例
+    │   └── test/                # 123 用例
     └── flutter_app/             # Flutter 客户端
         ├── lib/src/
         │   ├── app.dart / main.dart / bootstrap.dart
-        │   ├── platform/        # 数据目录条件导入 + attachment_picker
-        │   └── ui/              # 三栏外壳/编辑器/修订面板/附件卡片
+        │   ├── platform/        # 数据目录 / 附件选择 / 生命周期 / 多窗口接缝（均条件导入）
+        │   └── ui/              # 三栏外壳 / 编辑器 / 修订面板 / 附件卡片 / 独立笔记窗口
         ├── web/                 # index.html / sqlite3.wasm / drift_worker.dart(.js)
         ├── android/ ios/ linux/ windows/ macos/
         └── test/
@@ -413,11 +420,12 @@ sui/
   已建号后重复注册 403、坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
 - **note_core**：123/123 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
   缓存 LRU / 配置存取 / 落盘持久化 / 笔记本排序 / 编辑器格式化（含图片块级插入）+ e2e 同步等）。
-- **flutter_app**：50/50 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
+- **flutter_app**：62/62 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
   第二台设备拉取到；格式模式图片渲染与尺寸手柄、块级图片下方留出行高；编辑器增强的快捷键 /
   勾选框 / 高亮与「打开不编辑」保真用例；窄屏紧凑模式行与附件弹窗；窄屏历史入口（整页推入
   修订面板、返回两级）；桌面外壳 12 项：折叠 /
-  展开与持久化、菜单命令等价与置灰、编辑模式跨重启、窄屏不渲染、落盘失败不阻断刷新）。
+  展开与持久化、菜单命令等价与置灰、编辑模式跨重启、窄屏不渲染、落盘失败不阻断刷新；
+  桌面多窗口 12 项：开窗 / 去重聚焦 / 两面并行 / 关闭全部窗口退出与附件列表跨窗口隔离）。
 - **同步链路**：`SyncClient` 已实例化并注入 `CachedBlobStore`，push/pull + WS 通知已接线。
   同步触发点有三：编辑防抖 0.7s 推送、WS 通知拉取、**30s 周期兜底**（让「断网改动在恢复
   网络后自动补上」成立，而不必等用户再编辑一次）。
@@ -479,6 +487,19 @@ sui/
   `strutStyle: StrutStyle.fromTextStyle(style, forceStrutHeight: false)`——解除 `EditableText`
   默认按 strut 高度强制排行的约束（该默认会**忽略较高的行内 `WidgetSpan`**，导致图片溢出本行
   遮挡后续文字、光标无法越过），使块高向下撑开、后续文字整体下移（AC-135 / AC-136）。
+- **桌面端独立笔记窗口（M8）**：桌面端可将笔记在**独立 OS 窗口**中打开 —— 所有窗口共享
+  同一 Flutter 引擎 / isolate（**单引擎多视图**），因而共用同一 `AppController`、drift SQLite
+  连接、`SettingsStore` 与附件缓存，窗口间通信为**纯 Dart**、无 IPC / 序列化。同一笔记
+  **一笔记一窗口**：重复打开即**聚焦**（已最小化则先还原）；主窗口**照常保留**该笔记的编辑面
+  （两面并行、可同时编辑、实时互相同步），两窗口指向**同一条**笔记记录。窗口局部与全局状态**分治**：`selectedNotebookId` /
+  `selectedNoteId` / 搜索 / 标签筛选 / 排序为**全局**（独立窗口**不得**改写 —— BR-42.2 / AC-125），
+  而 `ui.window.note.editorMode`（编辑模式）与**当前编辑笔记的附件列表**为**窗口 / 编辑器局部**
+  （附件刷新以 `refreshAttachments` 返回值取自该笔记，**不回读**全局字段）。编辑器命令目标按
+  **视图键**索引（主窗口固定 `kMainViewKey = 'main'`、独立窗口取窗口句柄），由焦点事件驱动
+  `setActiveViewKey` 路由命令。生命周期：窗口注册表预置主窗口，关闭**全部**窗口即退出应用；菜单
+  「退出」= `flushPendingEdits` → 尽力推送 → 关闭全部窗口 → 退出（FR-42 / FR-43 / BR-42 / BR-43，
+  设计见 [ADR-012](adr/)）。接缝
+  `NoteWindowManager` / `WindowEventHub` 平台无关，窗口语义可在纯 Dart 单测中驱动（12 项）。
 
 ### 8.2 历史缺口（均已修复）
 

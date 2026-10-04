@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../platform/desktop_platform.dart';
 import 'app_controller.dart';
 import 'markdown_editor.dart';
 import 'notebook_tree.dart';
@@ -14,6 +15,7 @@ enum DesktopCommandId {
   newNote,
   createNotebook,
   exportNote,
+  openNoteInWindow,
   quit,
 
   // 编辑
@@ -46,12 +48,12 @@ enum DesktopCommandId {
 /// 撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选 / 导出 / 回写刷新的**真实实现**位于活动
 /// 编辑器内部（`_NoteEditorState`），壳层不可直接触达，故经此接口下发。
 ///
-/// 活动编辑器在 `initState` 向 [AppController] **注册**自身、`dispose` **注销**；
-/// [AppController.editorTarget] 为空（未选笔记 / 窄屏）时，相关命令一律置灰
-/// （BR-41.4 / AC-119）。
+/// 活动编辑器在 `initState` 向 [AppController] **按视图键注册**自身、`dispose` **注销**；
+/// 命令执行体经 `controller.targetFor(controller.activeViewKey)` 取**当前活动窗口**的
+/// 目标，取不到时相关命令一律置灰（BR-41.4 / AC-119）。
 ///
-/// **M8 预埋**：M7 主窗口只有一个编辑器，故用单一可空 target；引入多窗口后
-/// （ADR-012）须按窗口归属改为注册表，避免多文档窗口抢同一 target。
+/// **M8（ADR-012）**：主窗口 + 多个独立笔记窗口共存，故由 M7 的单一可空 target
+/// 收敛为**按视图键的注册表**（详细设计 §5.1），避免多窗口抢同一 target。
 abstract interface class EditorCommandTarget {
   /// 当前编辑器是否可撤销（供「编辑 → 撤销」置灰）。
   bool get canUndo;
@@ -118,9 +120,24 @@ final Map<DesktopCommandId, DesktopCommand> desktopCommands = {
   ),
   DesktopCommandId.exportNote: DesktopCommand(
     label: '导出笔记',
+    // M8（§5.1 收敛点）：命令派发到**当前活动窗口**自己的编辑器命令桥，
+    // 而非进程内唯一目标——否则独立笔记窗口会抢错 target。
     isEnabled: (controller) =>
-        controller.selectedNoteId != null && controller.editorTarget != null,
-    invoke: (context, controller) => controller.editorTarget?.exportNote(),
+        controller.selectedNoteId != null &&
+        controller.targetFor(controller.activeViewKey) != null,
+    invoke: (context, controller) =>
+        controller.targetFor(controller.activeViewKey)?.exportNote(),
+  ),
+  DesktopCommandId.openNoteInWindow: DesktopCommand(
+    label: '在独立窗口打开',
+    // 入口仅桌面端呈现（§6）；未选笔记置灰（§4.4）。命令只对**主窗口当前选中笔记**
+    // 生效，实际打开 / 去重聚焦由 [AppController.openNoteInWindow] 负责（§4.3）。
+    isEnabled: (controller) =>
+        isDesktopPlatform && controller.selectedNoteId != null,
+    invoke: (context, controller) {
+      final noteId = controller.selectedNoteId;
+      if (noteId != null) controller.openNoteInWindow(noteId);
+    },
   ),
   DesktopCommandId.quit: DesktopCommand(
     label: '退出应用',
@@ -133,39 +150,47 @@ final Map<DesktopCommandId, DesktopCommand> desktopCommands = {
     label: '撤销',
     shortcutLabel: 'Ctrl+Z',
     isEnabled: (controller) =>
-        controller.canEditContent && (controller.editorTarget?.canUndo ?? false),
-    invoke: (context, controller) => controller.editorTarget?.undo(),
+        controller.canEditContent &&
+        (controller.targetFor(controller.activeViewKey)?.canUndo ?? false),
+    invoke: (context, controller) =>
+        controller.targetFor(controller.activeViewKey)?.undo(),
   ),
   DesktopCommandId.redo: DesktopCommand(
     label: '重做',
     shortcutLabel: 'Ctrl+Shift+Z',
     isEnabled: (controller) =>
-        controller.canEditContent && (controller.editorTarget?.canRedo ?? false),
-    invoke: (context, controller) => controller.editorTarget?.redo(),
+        controller.canEditContent &&
+        (controller.targetFor(controller.activeViewKey)?.canRedo ?? false),
+    invoke: (context, controller) =>
+        controller.targetFor(controller.activeViewKey)?.redo(),
   ),
   DesktopCommandId.cut: DesktopCommand(
     label: '剪切',
     shortcutLabel: 'Ctrl+X',
     isEnabled: (controller) => controller.canEditContent,
-    invoke: (context, controller) => controller.editorTarget?.cut(),
+    invoke: (context, controller) =>
+        controller.targetFor(controller.activeViewKey)?.cut(),
   ),
   DesktopCommandId.copy: DesktopCommand(
     label: '复制',
     shortcutLabel: 'Ctrl+C',
     isEnabled: (controller) => controller.canEditContent,
-    invoke: (context, controller) => controller.editorTarget?.copy(),
+    invoke: (context, controller) =>
+        controller.targetFor(controller.activeViewKey)?.copy(),
   ),
   DesktopCommandId.paste: DesktopCommand(
     label: '粘贴',
     shortcutLabel: 'Ctrl+V',
     isEnabled: (controller) => controller.canEditContent,
-    invoke: (context, controller) => controller.editorTarget?.paste(),
+    invoke: (context, controller) =>
+        controller.targetFor(controller.activeViewKey)?.paste(),
   ),
   DesktopCommandId.selectAll: DesktopCommand(
     label: '全选',
     shortcutLabel: 'Ctrl+A',
     isEnabled: (controller) => controller.canEditContent,
-    invoke: (context, controller) => controller.editorTarget?.selectAll(),
+    invoke: (context, controller) =>
+        controller.targetFor(controller.activeViewKey)?.selectAll(),
   ),
   DesktopCommandId.findNotes: DesktopCommand(
     label: '查找',

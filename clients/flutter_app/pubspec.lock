@@ -392,6 +392,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.19.0"
+  multiview_desktop:
+    dependency: "direct main"
+    description:
+      name: multiview_desktop
+      sha256: "698ca86ab4262f1c38d47d3432715c3e51825de9f69314611bfd9cef29daf2a2"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.0.0"
   nested:
     dependency: transitive
     description:

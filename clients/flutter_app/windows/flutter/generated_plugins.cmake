@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  multiview_desktop
   sqlite3_flutter_libs
 )
 

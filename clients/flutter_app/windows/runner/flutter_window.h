@@ -2,13 +2,17 @@
 #define RUNNER_FLUTTER_WINDOW_H_
 
 #include <flutter/dart_project.h>
-#include <flutter/flutter_view_controller.h>
 
 #include <memory>
 
 #include "win32_window.h"
 
 // A window that does nothing but host a Flutter view.
+//
+// 多窗口（单引擎多视图）：引擎由 multiview_desktop 插件持有，本类只负责创建
+// 原生宿主窗口，并把主视图的 Flutter HWND 挂到窗口树里。flutter_controller_
+// 已整体移除（插件接管引擎）。
+// 详见 technology/adr/012、technology/design/low-level-design/multi-window.md。
 class FlutterWindow : public Win32Window {
  public:
   // Creates a new FlutterWindow hosting a Flutter view running |project|.
@@ -25,9 +29,6 @@ class FlutterWindow : public Win32Window {
  private:
   // The project to run.
   flutter::DartProject project_;
-
-  // The Flutter instance hosted by this window.
-  std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

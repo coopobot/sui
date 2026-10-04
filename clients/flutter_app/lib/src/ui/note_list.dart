@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:note_core/note_core.dart';
 
+import '../platform/desktop_platform.dart';
 import 'app_controller.dart';
 
 /// 笔记列表：展示所选笔记本/搜索下的笔记摘要 + 元信息（时间、所属笔记本）。
@@ -232,65 +233,105 @@ class _NoteTile extends StatelessWidget {
             ?.name
         : null;
 
-    return ListTile(
-      selected: controller.selectedNoteId == note.id,
-      title: Text(
-        note.title.isEmpty ? '（无标题）' : note.title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          fontWeight: controller.selectedNoteId == note.id
-              ? FontWeight.w600
-              : FontWeight.w400,
-        ),
-      ),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (s.tags.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 2, top: 2),
-              child: Wrap(
-                spacing: 4,
-                children: [
-                  for (final t in s.tags.take(3))
-                    Chip(
-                      label: Text('#$t'),
-                      labelStyle: const TextStyle(fontSize: 11),
-                      visualDensity: VisualDensity.compact,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                ],
-              ),
-            )
-          else
-            Text(
-              _excerpt(note.contentMarkdown),
+    // 占用态（BR-43.5）由独立信号驱动——`openNotesChanged` 变化**不**触发 AppController
+    // 的 `notifyListeners`（避免整树重建），故列表行须**单独监听**它来刷新标识。
+    return ValueListenableBuilder<int>(
+      valueListenable: controller.openNotesChanged,
+      builder: (context, _, __) {
+        final openInWindow = controller.isNoteOpen(note.id);
+        return GestureDetector(
+          // 行右击弹出与行尾菜单同一份「笔记操作」菜单（主入口，详细设计 §4.4，仅桌面端）。
+          onSecondaryTapDown: isDesktopPlatform
+              ? (details) => _showContextMenu(context, details.globalPosition)
+              : null,
+          child: ListTile(
+            selected: controller.selectedNoteId == note.id,
+            title: Text(
+              note.title.isEmpty ? '（无标题）' : note.title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                  fontSize: 12, color: Theme.of(context).colorScheme.outline),
+                fontWeight: controller.selectedNoteId == note.id
+                    ? FontWeight.w600
+                    : FontWeight.w400,
+              ),
             ),
-          _MetaLine(
-            relativeTime: _relativeTime(note.updatedAt),
-            notebookName: notebookName,
-            isClip: note.sourceDevice.startsWith('clip:'),
-            pinned: note.pinned,
-            archived: note.archived,
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (s.tags.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 2, top: 2),
+                    child: Wrap(
+                      spacing: 4,
+                      children: [
+                        for (final t in s.tags.take(3))
+                          Chip(
+                            label: Text('#$t'),
+                            labelStyle: const TextStyle(fontSize: 11),
+                            visualDensity: VisualDensity.compact,
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                          ),
+                      ],
+                    ),
+                  )
+                else
+                  Text(
+                    _excerpt(note.contentMarkdown),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.outline),
+                  ),
+                _MetaLine(
+                  relativeTime: _relativeTime(note.updatedAt),
+                  notebookName: notebookName,
+                  isClip: note.sourceDevice.startsWith('clip:'),
+                  pinned: note.pinned,
+                  archived: note.archived,
+                  openInWindow: openInWindow,
+                ),
+              ],
+            ),
+            isThreeLine: true,
+            trailing: controller.trashView
+                ? IconButton(
+                    icon: const Icon(Icons.restore, size: 20),
+                    tooltip: '还原',
+                    onPressed: () => controller.restoreNote(note.id),
+                  )
+                : _NoteTileMenu(controller: controller, note: note),
+            onTap: () => controller.selectNote(note.id),
           ),
-        ],
-      ),
-      isThreeLine: true,
-      trailing: controller.trashView
-          ? IconButton(
-              icon: const Icon(Icons.restore, size: 20),
-              tooltip: '还原',
-              onPressed: () => controller.restoreNote(note.id),
-            )
-          : _NoteTileMenu(controller: controller, note: note),
-      onTap: () => controller.selectNote(note.id),
+        );
+      },
     );
+  }
+
+  /// 行右击：在指针位置弹出「笔记操作」菜单（详细设计 §4.4 主入口，仅桌面端）。
+  ///
+  /// 与行尾 [_NoteTileMenu] **共用** [noteMenuItems] / [noteMenuAction]，
+  /// 避免两处入口的项与可用性分裂。
+  Future<void> _showContextMenu(
+    BuildContext context,
+    Offset globalPosition,
+  ) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        globalPosition & Size.zero,
+        Offset.zero & overlay.size,
+      ),
+      items: noteMenuItems(s.note),
+    );
+    if (selected == null || !context.mounted) return;
+    await noteMenuAction(context, controller, s.note, selected);
   }
 
   String _excerpt(String md) {
@@ -302,10 +343,133 @@ class _NoteTile extends StatelessWidget {
   }
 }
 
-/// 笔记项行尾菜单（FR-21 / BR-21.3）：置顶 / 归档 / 移动到… / 删除。
+/// 「笔记操作」菜单项取值（行尾菜单与行右击菜单共用，见 [noteMenuItems]）。
+const String _noteMenuOpenInWindow = 'openInWindow';
+const String _noteMenuPin = 'pin';
+const String _noteMenuArchive = 'archive';
+const String _noteMenuMove = 'move';
+const String _noteMenuDelete = 'delete';
+
+/// 构建「笔记操作」菜单项（详细设计 §4.4）：行尾菜单与行右击菜单**共用**同一份定义，
+/// 避免两处入口的项与可用性分裂。
 ///
-/// 所有操作沿用既有软删除 / 置顶 / 归档语义（不改 BR-01.2 / BR-05.2 / FR-05）。
-/// 删除需二次确认（FR-21）；移动到…打开 [_MoveToNotebookDialog]。
+/// 「在独立窗口打开」为 M8 主入口，**仅桌面端**呈现（§6；非桌面端不出现该项，即便被调用
+/// 也由控制器降级为主窗口选中）。其余项沿用既定语义（FR-21 / BR-21.3）：置顶 / 归档 /
+/// 移动到… / 删除（删除需二次确认）。
+List<PopupMenuEntry<String>> noteMenuItems(Note note) {
+  return <PopupMenuEntry<String>>[
+    if (isDesktopPlatform) ...[
+      const PopupMenuItem<String>(
+        value: _noteMenuOpenInWindow,
+        child: Row(children: [
+          Icon(Icons.open_in_new, size: 18),
+          SizedBox(width: 8),
+          Text('在独立窗口打开'),
+        ]),
+      ),
+      const PopupMenuDivider(),
+    ],
+    PopupMenuItem<String>(
+      value: _noteMenuPin,
+      child: Row(children: [
+        Icon(note.pinned ? Icons.push_pin : Icons.push_pin_outlined, size: 18),
+        const SizedBox(width: 8),
+        Text(note.pinned ? '取消置顶' : '置顶'),
+      ]),
+    ),
+    PopupMenuItem<String>(
+      value: _noteMenuArchive,
+      child: Row(children: [
+        Icon(note.archived ? Icons.unarchive_outlined : Icons.archive_outlined,
+            size: 18),
+        const SizedBox(width: 8),
+        Text(note.archived ? '取消归档' : '归档'),
+      ]),
+    ),
+    const PopupMenuItem<String>(
+      value: _noteMenuMove,
+      child: Row(children: [
+        Icon(Icons.drive_file_move_outline, size: 18),
+        SizedBox(width: 8),
+        Text('移动到…'),
+      ]),
+    ),
+    const PopupMenuItem<String>(
+      value: _noteMenuDelete,
+      child: Row(children: [
+        Icon(Icons.delete_outline, size: 18),
+        SizedBox(width: 8),
+        Text('删除'),
+      ]),
+    ),
+  ];
+}
+
+/// 执行「笔记操作」菜单项（[noteMenuItems] 的取值）。两处入口共用，行为一致。
+Future<void> noteMenuAction(
+  BuildContext context,
+  AppController controller,
+  Note note,
+  String value,
+) async {
+  switch (value) {
+    case _noteMenuOpenInWindow:
+      // 打开 / 去重聚焦 / 非桌面端降级，统一由控制器负责（§4.3 / §6）。
+      await controller.openNoteInWindow(note.id);
+      break;
+    case _noteMenuPin:
+      await controller.togglePinNote(note.id);
+      break;
+    case _noteMenuArchive:
+      await controller.toggleArchiveNote(note.id);
+      break;
+    case _noteMenuMove:
+      if (!context.mounted) return;
+      final target = await _showMoveToNotebookDialog(
+        context,
+        controller,
+        currentNotebookId: note.notebookId,
+      );
+      if (target == _MoveSentinel.canceled) return;
+      await controller.moveNoteToNotebook(note.id, target);
+      break;
+    case _noteMenuDelete:
+      if (!context.mounted) return;
+      final ok = await _confirmDeleteNote(context, note);
+      if (ok) await controller.deleteNote(note.id);
+      break;
+  }
+}
+
+/// 删除二次确认（FR-21）：确认后移到回收站，可在「回收站」还原。
+Future<bool> _confirmDeleteNote(BuildContext context, Note note) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('删除笔记'),
+      content: Text('「${note.title.isEmpty ? '无标题' : note.title}」'
+          '将被移到回收站，可在「回收站」中还原。'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('取消'),
+        ),
+        TextButton(
+          style: TextButton.styleFrom(
+            foregroundColor: Theme.of(context).colorScheme.error,
+          ),
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('删除'),
+        ),
+      ],
+    ),
+  );
+  return result ?? false;
+}
+
+/// 笔记项行尾菜单（FR-21 / BR-21.3）：置顶 / 归档 / 移动到… / 删除；桌面端另含
+/// 「在独立窗口打开」（M8 主入口）。项与行为统一来自 [noteMenuItems] / [noteMenuAction]，
+/// 与列表行右击菜单保持一致。
 class _NoteTileMenu extends StatelessWidget {
   const _NoteTileMenu({required this.controller, required this.note});
   final AppController controller;
@@ -316,95 +480,9 @@ class _NoteTileMenu extends StatelessWidget {
     return PopupMenuButton<String>(
       icon: const Icon(Icons.more_vert, size: 20),
       tooltip: '笔记操作',
-      onSelected: (v) => _onSelected(context, v),
-      itemBuilder: (_) => [
-        PopupMenuItem(
-          value: 'pin',
-          child: Row(children: [
-            Icon(note.pinned ? Icons.push_pin : Icons.push_pin_outlined,
-                size: 18),
-            const SizedBox(width: 8),
-            Text(note.pinned ? '取消置顶' : '置顶'),
-          ]),
-        ),
-        PopupMenuItem(
-          value: 'archive',
-          child: Row(children: [
-            Icon(note.archived ? Icons.unarchive_outlined : Icons.archive_outlined,
-                size: 18),
-            const SizedBox(width: 8),
-            Text(note.archived ? '取消归档' : '归档'),
-          ]),
-        ),
-        const PopupMenuItem(
-          value: 'move',
-          child: Row(children: [
-            Icon(Icons.drive_file_move_outline, size: 18),
-            SizedBox(width: 8),
-            Text('移动到…'),
-          ]),
-        ),
-        const PopupMenuItem(
-          value: 'delete',
-          child: Row(children: [
-            Icon(Icons.delete_outline, size: 18),
-            SizedBox(width: 8),
-            Text('删除'),
-          ]),
-        ),
-      ],
+      onSelected: (v) => noteMenuAction(context, controller, note, v),
+      itemBuilder: (_) => noteMenuItems(note),
     );
-  }
-
-  Future<void> _onSelected(BuildContext context, String v) async {
-    switch (v) {
-      case 'pin':
-        await controller.togglePinNote(note.id);
-        break;
-      case 'archive':
-        await controller.toggleArchiveNote(note.id);
-        break;
-      case 'move':
-        if (!context.mounted) return;
-        final target = await _showMoveToNotebookDialog(
-          context,
-          controller,
-          currentNotebookId: note.notebookId,
-        );
-        if (target == _MoveSentinel.canceled) return;
-        await controller.moveNoteToNotebook(note.id, target);
-        break;
-      case 'delete':
-        if (!context.mounted) return;
-        final ok = await _confirmDeleteNote(context, note);
-        if (ok) await controller.deleteNote(note.id);
-        break;
-    }
-  }
-
-  Future<bool> _confirmDeleteNote(BuildContext context, Note note) async {
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('删除笔记'),
-        content: Text('「${note.title.isEmpty ? '无标题' : note.title}」'
-            '将被移到回收站，可在「回收站」中还原。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-            ),
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    return result ?? false;
   }
 }
 
@@ -525,6 +603,7 @@ class _MetaLine extends StatelessWidget {
     required this.isClip,
     required this.pinned,
     required this.archived,
+    required this.openInWindow,
   });
 
   final String relativeTime;
@@ -532,6 +611,9 @@ class _MetaLine extends StatelessWidget {
   final bool isClip;
   final bool pinned;
   final bool archived;
+
+  /// 该笔记当前是否已在独立窗口打开（BR-43.5 / AC-132），由 `isNoteOpen` 驱动。
+  final bool openInWindow;
 
   @override
   Widget build(BuildContext context) {
@@ -565,6 +647,15 @@ class _MetaLine extends StatelessWidget {
       parts
         ..add(const SizedBox(width: 4))
         ..add(Icon(Icons.push_pin_outlined, size: 12, color: scheme.outline));
+    }
+    if (openInWindow) {
+      parts
+        ..add(const SizedBox(width: 6))
+        ..add(_MiniBadge(
+          text: '独立窗口',
+          color: scheme.primaryContainer,
+          onColor: scheme.onPrimaryContainer,
+        ));
     }
     return Padding(
       padding: const EdgeInsets.only(top: 2),

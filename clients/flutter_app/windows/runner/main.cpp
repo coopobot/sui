@@ -1,6 +1,7 @@
 #include <flutter/dart_project.h>
-#include <flutter/flutter_view_controller.h>
 #include <windows.h>
+
+#include <multiview_desktop/multi_view_desktop_plugin.h>
 
 #include "flutter_window.h"
 #include "utils.h"
@@ -17,6 +18,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  // 多窗口：初始化 shell 集成（任务栏跳转列表），并在此进程创建 Flutter 窗口
+  // 之前，把由跳转列表触发的 --mvd-taskbar-menu=<id> 激活转发给已在运行的实例。
+  MultiViewDesktopInitializeShellIntegration();
+
+  if (MultiViewDesktopTryForwardTaskbarMenuActivation()) {
+    ::CoUninitialize();
+    return EXIT_SUCCESS;
+  }
+
   flutter::DartProject project(L"data");
 
   std::vector<std::string> command_line_arguments =
@@ -30,7 +40,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   if (!window.Create(L"随手记 Sui", origin, size)) {
     return EXIT_FAILURE;
   }
-  window.SetQuitOnClose(true);
+  // 多窗口：关闭主窗口不退出进程，进程生命周期交由 multiview_desktop 的
+  // CloseMode 控制（关闭最后一个窗口才退出）。
+  window.SetQuitOnClose(false);
 
   ::MSG msg;
   while (::GetMessage(&msg, nullptr, 0, 0)) {

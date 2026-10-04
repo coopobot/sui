@@ -7,6 +7,40 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-04
+
+M8：桌面端独立笔记窗口。
+
+### 新增
+
+- **笔记在独立 OS 窗口打开（FR-42 / FR-43）** — 桌面端可从菜单「文件 → 在独立窗口打开」或笔记
+  列表项的右键菜单，把某篇笔记在**独立 OS 窗口**中打开。所有窗口共享**同一 Flutter 引擎 / isolate**
+  （**单引擎多视图**），因而共用同一 `AppController`、本地 SQLite 连接与附件缓存，窗口间通信为
+  纯 Dart、无 IPC / 序列化（ADR-012）。主窗口**照常保留**该笔记的编辑面，两窗口可**同时编辑**、
+  编辑**实时互相同步**。
+
+### 行为
+
+- **一笔记一窗口 / 去重聚焦** — 同一篇笔记只开一个窗口；再次打开即聚焦该窗口（若已最小化则先还原），
+  列表项上标出「独立窗口」标识（仅作状态提示）；两窗口指向**同一条**笔记、共享**同一份** Markdown 正本。
+- **窗口局部与全局状态分治** — 编辑模式（`ui.window.note.editorMode`）与当前编辑笔记的附件列表为
+  **窗口 / 编辑器局部**（各自记住、重启保持）；当前笔记本、搜索、标签筛选、排序仍为**全局**，独立
+  窗口不改写主窗口浏览位置（BR-42.2 / AC-125）。
+- **生命周期** — 关闭某个独立窗口即释放；关闭**全部**窗口（含主窗口）即退出应用；菜单「退出应用」
+  先 `flushPendingEdits` 落库、再尽力推送，随后关闭全部窗口退出（BR-42 / BR-43）。
+
+### 修复
+
+- **跨窗口附件列表串扰** — 笔记附件刷新改为**返回该笔记的列表**、调用方**不回读**全局附件字段，
+  避免独立窗口与主窗口刷新不同笔记时互相覆盖。
+
+### 测试
+
+- flutter_app **62/62** 全绿 —— 新增 `test/note_window_manager_test.dart`（8 项）与
+  `test/attachment_window_isolation_test.dart`（4 项），覆盖开窗 / 去重聚焦（含最小化先还原）/
+  两面并行（主窗口照常保留编辑面、选中不变）/ 关闭全部窗口退出 / 窗口局部编辑模式 / 附件列表跨窗口隔离。多窗口接缝
+  `NoteWindowManager` / `WindowEventHub` 平台无关，窗口语义可在**纯 Dart 单测**中驱动。
+
 ## [0.8.3] - 2026-10-04
 
 M7 补丁：移动端（窄屏）版本历史入口修复。
@@ -279,7 +313,9 @@ M1 里程碑：笔记本分组与标签的云端同步。
 - 编辑为源码 / 预览双轨，富文本 WYSIWYG 未实现。
 - 鉴权为演示级实现，公网部署前需加固（见 [SECURITY.md](SECURITY.md)）。
 
-[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.8.2...HEAD
+[Unreleased]: https://gitee.com/evangubo/sui/compare/v0.9.0...HEAD
+[0.9.0]: https://gitee.com/evangubo/sui/releases/tag/v0.9.0
+[0.8.3]: https://gitee.com/evangubo/sui/releases/tag/v0.8.3
 [0.8.2]: https://gitee.com/evangubo/sui/releases/tag/v0.8.2
 [0.8.1]: https://gitee.com/evangubo/sui/releases/tag/v0.8.1
 [0.8.0]: https://gitee.com/evangubo/sui/releases/tag/v0.8.0
