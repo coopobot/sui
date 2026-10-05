@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../platform/app_lifecycle.dart';
+import '../platform/attachment_opener.dart';
 import 'desktop_commands.dart';
 import 'markdown_editor.dart';
 import 'note_window_manager.dart';
@@ -1522,10 +1523,106 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  // ---- 外部打开与回写（FR-47 / 详细设计 §12.2 / §12.3） ----
+
+  /// 外部编辑变更监视：附件 id → 定时器（每 2s 重读一次临时文件）。
+  final Map<String, Timer> _externalWatchers = {};
+
+  /// 用系统默认应用打开附件（FR-47 / BR-47.2 / AC-149）。
+  ///
+  /// 字节先经 [openAttachment] 就绪（本地命中或按需下载），再落系统临时文件交系统
+  /// 壳层打开；成功返回 true，当前平台不支持（Web / 移动端在零依赖下无法唤起系统
+  /// 应用）返回 false，由 UI 降级为内置预览。打开后启动**变更监视**，外部应用一
+  /// 保存即回写（AC-150）。
+  Future<bool> openAttachmentExternally(Attachment a) async {
+    final bytes = await openAttachment(a);
+    if (bytes == null) return false;
+    final path = await openExternally(filename: a.filename, bytes: bytes);
+    if (path == null) return false;
+    _watchExternalEdit(a, path);
+    return true;
+  }
+
+  /// 监视外部编辑（§12.3 步骤①「检测」）：每 2s 重读临时文件，连续两次读到
+  /// 「不同于原内容且彼此一致」的字节，即视为外部应用已保存完成 → 回写。
+  void _watchExternalEdit(Attachment a, String path) {
+    _externalWatchers[a.id]?.cancel();
+    String? lastHash;
+    final timer = Timer.periodic(const Duration(seconds: 2), (t) async {
+      final current = await readExternalFile(path);
+      if (current == null) return;
+      final hash = sha256Hex(current);
+      if (hash == a.sha256 || lastHash != hash) {
+        lastHash = hash;
+        return;
+      }
+      // 连续两次读到相同、且不同于原始内容的新字节 → 判定保存完成。
+      t.cancel();
+      _externalWatchers.remove(a.id);
+      await replaceAttachmentBytes(a, current);
+      await cleanupExternalFile(path);
+    });
+    _externalWatchers[a.id] = timer;
+  }
+
+  /// 外部编辑回写（FR-47 / AC-150 / 详细设计 §12.3）：把新字节重新入库为当前附件。
+  ///
+  /// 内容寻址下回写 = 新区块 + 换引用：
+  /// ① 新字节落 BlobStore（新 sha256，天然去重、**绝不覆盖旧值**）；
+  /// ② 附件映射改指新 hash（旧引用 −1、新引用 +1，见
+  ///    [NoteRepository.updateAttachmentSha]）；
+  /// ③ **仅当引用语法本身变化时**改写本笔记正本里的 `sui://<旧>` → `sui://<新>`：
+  ///    不无谓触碰正本（§12.4），但 hash 变了就必须改写，否则渲染层解析不到新字节；
+  /// ④ 入队同步，让对端按需拉到新字节（BR-47.4）。
+  /// 字节与原内容一致（sha256 未变）时返回 false（无变更）。
+  Future<bool> replaceAttachmentBytes(Attachment a, Uint8List bytes) async {
+    final store = _blobStore;
+    if (store == null) return false;
+    final newSha = sha256Hex(bytes);
+    if (newSha == a.sha256) return false;
+    await store.put(sha256: newSha, bytes: bytes);
+    final updated = await _repository.updateAttachmentSha(
+      a.id,
+      newSha256: newSha,
+      newByteSize: bytes.length,
+    );
+    if (updated == null) return false;
+
+    final noteId = a.noteId;
+    if (noteId != null) {
+      final note = await _repository.getNote(noteId);
+      if (note != null) {
+        final oldRef = 'sui://${a.sha256}';
+        if (note.contentMarkdown.contains(oldRef)) {
+          await saveNote(
+            noteId,
+            content: note.contentMarkdown.replaceAll(oldRef, 'sui://$newSha'),
+          );
+        }
+      }
+      await refreshAttachments(noteId);
+    }
+
+    final client = _syncClient;
+    if (client != null) {
+      try {
+        await client.uploadBlob(newSha);
+      } on Exception {
+        // 断网：新字节已在本地（未标 uploadedAt），同步周期 backfill 补传。
+      }
+    }
+    notifyListeners();
+    return true;
+  }
+
   @override
   void dispose() {
     _syncDebounce?.cancel();
     _syncTicker?.cancel();
+    for (final t in _externalWatchers.values) {
+      t.cancel();
+    }
+    _externalWatchers.clear();
     _wsSub?.cancel();
     _ws?.sink.close();
     _syncClient?.close();

@@ -57,6 +57,8 @@ class AppMenuBar extends StatelessWidget {
             DesktopCommandId.paste,
             DesktopCommandId.selectAll,
             null,
+            DesktopCommandId.insertTable,
+            null,
             DesktopCommandId.findNotes,
           ],
         ),

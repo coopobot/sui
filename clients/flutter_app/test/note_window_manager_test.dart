@@ -75,6 +75,8 @@ class _FakeEditorTarget implements EditorCommandTarget {
   @override
   void selectAll() {}
   @override
+  void insertTable() {}
+  @override
   void exportNote() {}
   @override
   Future<void> flushPendingEdits() async {}

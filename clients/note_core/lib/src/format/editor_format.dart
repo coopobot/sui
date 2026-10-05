@@ -118,6 +118,87 @@ class ParsedImage {
   });
 }
 
+/// 表格列对齐：编码于 GFM 分隔行（§12.1）。
+///
+/// [none] 为缺省（渲染为左对齐 `---`）；[left] 显式写 `:---`。
+enum TableColumnAlign { none, left, center, right }
+
+/// 一个 GFM 管道表的解析结果（M9 / FR-44 / §12.1）。
+///
+/// [header] / [rows] 内单元格为**原始文本**（保留 `\|` 等转义原样），
+/// 以便结构编辑时未编辑单元格**逐字回写**（保 §4.1）。
+class ParsedTable {
+  /// 表格块在原文中的起止（按 `\n` 分隔的行区间，不含块外空白）。
+  final int start;
+  final int end;
+
+  /// 表头单元格。
+  final List<String> header;
+
+  /// 各列对齐（长度与 [header] 一致）。
+  final List<TableColumnAlign> aligns;
+
+  /// 数据行；残缺表时各行列数可能与 [header] 不一致。
+  final List<List<String>> rows;
+
+  /// 是否为合规管道表（表头行 + 分隔行且列数一致）。
+  final bool wellFormed;
+
+  const ParsedTable({
+    required this.start,
+    required this.end,
+    required this.header,
+    required this.aligns,
+    required this.rows,
+    required this.wellFormed,
+  });
+}
+
+/// 一个附件引用的解析结果（M9 / FR-46 / §12.4）。
+///
+/// 覆盖两种形态：图片 `![alt](sui://<sha256>)` 与附件链接 `[name](sui://<sha256>)`；
+/// 图片若紧随 §5 尺寸属性块 `{...}`，则 [end] 一并覆盖该属性块（删除 / 移动时整体处理）。
+///
+/// [corrupt] 标记为「残缺引用」（缺 `)`、`](` 不成对等）——仍按整块识别
+/// （§12.4「残缺自愈」），由视图层决定就地修复或整块处理。
+class AttachmentRef {
+  /// 引用起始（`!` 或 `[`）。
+  final int start;
+
+  /// 引用结束（含 `)`；图片含尺寸属性块）；残缺时为可识别的末端。
+  final int end;
+
+  /// `alt` / `name` 文本。
+  final String label;
+
+  /// 内容寻址的 sha256（`sui://` 之后）。
+  final String sha256;
+
+  /// 是否为图片引用（`![...]`）；false 为附件链接（`[...]`）。
+  final bool isImage;
+
+  /// 是否为残缺引用（缺少闭合 `)`）。
+  final bool corrupt;
+
+  const AttachmentRef({
+    required this.start,
+    required this.end,
+    required this.label,
+    required this.sha256,
+    required this.isImage,
+    this.corrupt = false,
+  });
+
+  /// 引用重写为规范文本时使用（去掉可选尺寸属性块，属性块由图片层单独管理）。
+  String get markdown =>
+      isImage ? '![$label](sui://$sha256)' : '[$label](sui://$sha256)';
+
+  @override
+  String toString() =>
+      'AttachmentRef(${isImage ? 'img' : 'link'}, [$start,$end), '
+      '$sha256${corrupt ? ', corrupt' : ''})';
+}
+
 /// 格式化工具栏的纯函数实现。
 abstract final class EditorFormat {
   /// 预设「小 / 中 / 大」；「原始」对应 [ImageSize.auto]。
@@ -161,7 +242,14 @@ abstract final class EditorFormat {
       case FormatCommand.divider:
         return _divider(text, selectionStart, selectionEnd);
       case FormatCommand.highlight:
-        return _inline(text, selectionStart, selectionEnd, '==');
+        // 高亮只作用于当前**选中文本**：无选区时不插入占位标记（BR-31.7）。
+        return _inline(
+          text,
+          selectionStart,
+          selectionEnd,
+          '==',
+          requireSelection: true,
+        );
       case FormatCommand.taskList:
         return _taskList(text, selectionStart, selectionEnd);
       case FormatCommand.indent:
@@ -177,17 +265,23 @@ abstract final class EditorFormat {
   // 行内指令
   // ---------------------------------------------------------------------------
 
+  /// [requireSelection] 为 true 时，无选区（纯光标）**不插入占位标记**，原样返回
+  /// （高亮等「只作用于选中文本」的指令，BR-31.7）；为 false 时在光标处插入一对标记。
   static FormatResult _inline(
     String text,
     int start,
     int end,
-    String marker,
-  ) {
+    String marker, {
+    bool requireSelection = false,
+  }) {
     final s = start.clamp(0, text.length);
     final e = end.clamp(0, text.length);
 
-    // 无选区：插入一对标记并把光标置于其中。
+    // 无选区：默认插入一对标记并把光标置于其中；要求选区时原样返回。
     if (s == e) {
+      if (requireSelection) {
+        return FormatResult(text, s, e);
+      }
       final newText = text.substring(0, s) + marker + marker + text.substring(e);
       final pos = s + marker.length;
       return FormatResult(newText, pos, pos);
@@ -265,13 +359,14 @@ abstract final class EditorFormat {
   }
 
   static FormatResult _orderedList(String text, int start, int end) {
-    var n = 0;
+    // M9 惰性编号（FR-48 / editor-formatting.md §12.5）：连续有序列表在正本中
+    // **统一写作 `1.`**，由渲染层按序编号（见 [orderedListNumbers]），
+    // 插入 / 删除项后天然重排、零正本改写；`orderedList` 指令不再写实序号。
     return _mapLines(text, start, end, (line, _) {
       if (RegExp(r'^\d+\.\s+').hasMatch(line)) {
         return line.replaceFirst(RegExp(r'^\d+\.\s+'), '');
       }
-      n++;
-      return '$n. $line';
+      return '1. $line';
     });
   }
 
@@ -712,6 +807,495 @@ abstract final class EditorFormat {
   }
 
   // ---------------------------------------------------------------------------
+  // 表格：GFM 管道表（M9 / FR-44 / §12.1）
+  // ---------------------------------------------------------------------------
+
+  /// 行数钳制下界（BR-44.1）。
+  static const int tableMinRows = 1;
+
+  /// 行数钳制上界（BR-44.1）。
+  static const int tableMaxRows = 20;
+
+  /// 列数钳制下界（BR-44.1）。
+  static const int tableMinColumns = 1;
+
+  /// 列数钳制上界（BR-44.1）。
+  static const int tableMaxColumns = 8;
+
+  /// 单元格文本转义：`|` → `\|`（§12.1 / BR-44.4）；已转义的不重复转义。
+  static String escapeTableCell(String raw) =>
+      raw.replaceAll(RegExp(r'(?<!\\)\|'), r'\|');
+
+  /// 插入管道表：表头行 + 分隔行 +（行−1）空数据行，独占块（§12.1）。
+  ///
+  /// [rows] / [columns] 为**正整数**，超限时取边界值（行 1~20、列 1~8，BR-44.1）。
+  /// 插入后光标落在**首个表头单元格**；表格前后以空行与相邻段落分隔（同 §5.5）。
+  static FormatResult insertTable(
+    String text,
+    int start,
+    int end, {
+    required int rows,
+    required int columns,
+  }) {
+    final r = rows.clamp(tableMinRows, tableMaxRows);
+    final c = columns.clamp(tableMinColumns, tableMaxColumns);
+    final block = _renderTableBlock(
+      header: List<String>.filled(c, ''),
+      aligns: List<TableColumnAlign>.filled(c, TableColumnAlign.none),
+      rows: List<List<String>>.generate(r - 1, (_) => List<String>.filled(c, '')),
+    );
+
+    final s = start.clamp(0, text.length);
+    final e = end.clamp(0, text.length);
+    final before = text.substring(0, s);
+    final after = text.substring(e);
+    final String leading;
+    if (before.isEmpty || before.endsWith('\n\n')) {
+      leading = '';
+    } else {
+      leading = before.endsWith('\n') ? '\n' : '\n\n';
+    }
+    final String trailing;
+    if (after.isEmpty) {
+      trailing = '\n';
+    } else if (after.startsWith('\n\n')) {
+      trailing = '';
+    } else {
+      trailing = after.startsWith('\n') ? '\n' : '\n\n';
+    }
+    final newText = '$before$leading$block$trailing$after';
+    // 光标落在首个表头单元格（表头行 `| ` 之后）。
+    final caret = before.length + leading.length + 2;
+    return FormatResult(newText, caret, caret);
+  }
+
+  /// 解析 [fromIndex] 所在行起的连续管道表块；无 `|` 时返回 null（降级为普通文本）。
+  ///
+  /// 残缺表（缺分隔行 / 列数不齐）仍返回结果，`wellFormed == false`，
+  /// 由调用方**尽力呈现、不丢内容、不报错**（BR-44.5）。
+  static ParsedTable? parseTable(String text, [int fromIndex = 0]) {
+    final from = fromIndex.clamp(0, text.length);
+    final lineStart = from == 0 ? 0 : text.lastIndexOf('\n', from - 1) + 1;
+
+    // 收集连续「含未转义 |」的行（表格块）。
+    final starts = <int>[];
+    final rowsRaw = <String>[];
+    var cursor = lineStart;
+    while (cursor <= text.length) {
+      final nl = text.indexOf('\n', cursor);
+      final lineEnd = nl == -1 ? text.length : nl;
+      final line = text.substring(cursor, lineEnd);
+      if (!_hasUnescapedPipe(line)) break;
+      starts.add(cursor);
+      rowsRaw.add(line);
+      if (nl == -1) break;
+      cursor = nl + 1;
+    }
+    if (rowsRaw.isEmpty) return null;
+
+    final blockStart = starts.first;
+    final last = starts.last + rowsRaw.last.length;
+    final header = _splitRow(rowsRaw.first);
+
+    final hasSeparator =
+        rowsRaw.length >= 2 && rowsRaw[1].trim().isNotEmpty && _isSeparatorRow(rowsRaw[1]);
+
+    List<TableColumnAlign> aligns;
+    List<List<String>> rows;
+    var wellFormed = false;
+    if (hasSeparator) {
+      aligns = _splitRow(rowsRaw[1]).map(_parseAlign).toList();
+      rows = rowsRaw.skip(2).map(_splitRow).toList();
+      wellFormed = true;
+      for (final row in rows) {
+        if (row.length != header.length) {
+          wellFormed = false;
+          break;
+        }
+      }
+      if (aligns.length != header.length) wellFormed = false;
+    } else {
+      aligns = List<TableColumnAlign>.filled(header.length, TableColumnAlign.none);
+      rows = rowsRaw.skip(1).map(_splitRow).toList();
+    }
+
+    return ParsedTable(
+      start: blockStart,
+      end: last,
+      header: header,
+      aligns: aligns,
+      rows: rows,
+      wellFormed: wellFormed,
+    );
+  }
+
+  /// 设置第 [column] 列对齐：**仅重写分隔行**对应单元格，其余逐字不动（§12.1）。
+  static String setTableAlignment(
+    String text,
+    ParsedTable table,
+    int column,
+    TableColumnAlign align,
+  ) {
+    final lines = _tableLines(text, table);
+    if (lines.length < 2) return text;
+    final sep = lines[1];
+    final cells = _splitRow(sep.text);
+    if (column < 0 || column >= cells.length) return text;
+    cells[column] = _alignMarker(align);
+    final newSep = _renderRow(cells);
+    return text.substring(0, sep.start) +
+        newSep +
+        text.substring(sep.start + sep.text.length);
+  }
+
+  /// 在第 [after] 列之后插入空列（[after] < 0 表示最前）。
+  ///
+  /// 同步补齐**表头行 / 分隔行 / 各数据行**，保持列数一致（§12.1）。
+  static String addTableColumn(String text, ParsedTable table, {int? after}) {
+    final insertAt =
+        ((after ?? table.header.length - 1) + 1).clamp(0, table.header.length);
+    final lines = _tableLines(text, table);
+    final out = <String>[];
+    for (var i = 0; i < lines.length; i++) {
+      final cells = _splitRow(lines[i].text);
+      final at = insertAt.clamp(0, cells.length);
+      cells.insert(at, i == 1 ? '---' : '');
+      out.add(_renderRow(cells));
+    }
+    final replaced = out.join('\n');
+    return text.substring(0, table.start) + replaced + text.substring(table.end);
+  }
+
+  /// 删除第 [column] 列（保留至少一列）；同步裁剪表头行 / 分隔行 / 各数据行。
+  static String removeTableColumn(String text, ParsedTable table, int column) {
+    if (table.header.length <= 1) return text;
+    final lines = _tableLines(text, table);
+    final out = <String>[];
+    for (final l in lines) {
+      final cells = _splitRow(l.text);
+      if (column >= 0 && column < cells.length) cells.removeAt(column);
+      out.add(_renderRow(cells));
+    }
+    final replaced = out.join('\n');
+    return text.substring(0, table.start) + replaced + text.substring(table.end);
+  }
+
+  /// 在表格块末尾追加一空数据行。
+  static String addTableRow(String text, ParsedTable table) {
+    final cols = table.header.length;
+    if (cols == 0) return text;
+    final newRow = _renderRow(List<String>.filled(cols, ''));
+    return '${text.substring(0, table.end)}\n$newRow${text.substring(table.end)}';
+  }
+
+  /// 删除第 [rowIndex] 个**数据行**（0-based，不含表头 / 分隔行）。
+  static String removeTableRow(String text, ParsedTable table, int rowIndex) {
+    final lines = _tableLines(text, table);
+    final target = 2 + rowIndex;
+    if (target < 2 || target >= lines.length) return text;
+    final l = lines[target];
+    var from = l.start;
+    var to = l.start + l.text.length;
+    if (to < text.length && text[to] == '\n') {
+      to++;
+    } else if (from > 0 && text[from - 1] == '\n') {
+      from--;
+    }
+    return text.substring(0, from) + text.substring(to);
+  }
+
+  /// 在第 [rowIndex] 个**数据行**的**上方 / 下方**插入一空行（§12.1 结构编辑）。
+  ///
+  /// [rowIndex] 为 0-based 数据行序号（不含表头 / 分隔行）；[after] 为 `true` 表示
+  /// 插入其**下方**，否则插入**上方**。越界时钳制到表格末尾（等价于追加）。
+  /// 新行单元格数与表头列数一致，均为空内容（BR-44.4 / §12.1）。
+  static String insertTableRow(
+    String text,
+    ParsedTable table,
+    int rowIndex, {
+    bool after = false,
+  }) {
+    final cols = table.header.length;
+    if (cols == 0) return text;
+    final lines = _tableLines(text, table);
+    final dataCount = lines.length > 2 ? lines.length - 2 : 0;
+    final at = (after ? rowIndex + 1 : rowIndex).clamp(0, dataCount);
+    final newRow = _renderRow(List<String>.filled(cols, ''));
+    final targetLine = at + 2; // 表头行 0 + 分隔行 1
+    if (targetLine >= lines.length) {
+      return '${text.substring(0, table.end)}\n$newRow${text.substring(table.end)}';
+    }
+    final l = lines[targetLine];
+    return '${text.substring(0, l.start)}$newRow\n${text.substring(l.start)}';
+  }
+
+  /// 就地改写某个单元格文本，其余单元格逐字不动（§12.1 / BR-44.4）。
+  ///
+  /// [rowIndex] `< 0` 表示**表头行**；否则为 0-based 数据行序号。[column] 为列序号。
+  /// 写入内容先做 `|` → `\|` 转义；行 / 列越界时原样返回。
+  static String setTableCell(
+    String text,
+    ParsedTable table,
+    int rowIndex,
+    int column,
+    String value,
+  ) {
+    final lines = _tableLines(text, table);
+    final lineIndex = rowIndex < 0 ? 0 : rowIndex + 2;
+    if (lineIndex < 0 || lineIndex >= lines.length) return text;
+    final l = lines[lineIndex];
+    final cells = _splitRow(l.text);
+    if (column < 0 || column >= cells.length) return text;
+    cells[column] = escapeTableCell(value);
+    final newLine = _renderRow(cells);
+    return text.substring(0, l.start) +
+        newLine +
+        text.substring(l.start + l.text.length);
+  }
+
+  /// 按 [table] 的行区间切出逐行（含每行起始偏移）。
+  static List<({int start, String text})> _tableLines(
+    String text,
+    ParsedTable table,
+  ) {
+    final out = <({int start, String text})>[];
+    var off = table.start;
+    for (final line in text.substring(table.start, table.end).split('\n')) {
+      out.add((start: off, text: line));
+      off += line.length + 1;
+    }
+    return out;
+  }
+
+  static String _renderTableBlock({
+    required List<String> header,
+    required List<TableColumnAlign> aligns,
+    required List<List<String>> rows,
+  }) {
+    final buf = StringBuffer(_renderRow(header))
+      ..write('\n')
+      ..write(_renderSeparator(aligns));
+    for (final row in rows) {
+      buf
+        ..write('\n')
+        ..write(_renderRow(row));
+    }
+    return buf.toString();
+  }
+
+  /// HTML 表格（`<table>` 内部内容）→ GFM 管道表（§12.2「表格」，尽力转换、不丢内容）。
+  ///
+  /// 首行作为**表头行**（含 `<th>` 与否皆然，GFM 要求表头 + 分隔行），其余为数据行；
+  /// 列对齐取自表头单元格 `align` 属性，缺省为 `---`（左）。单元格保留行内语义
+  /// （粗体 / 斜体 / 代码 / 链接），其余标签去除、实体反转义，文本内 `|` 转义为 `\|`。
+  static String _htmlTableToMarkdown(String tableInner) {
+    final trRe = RegExp(r'<\s*tr\b[^>]*>(.*?)<\s*/\s*tr>',
+        caseSensitive: false, dotAll: true);
+    final cellRe = RegExp(r'<\s*(td|th)\b([^>]*)>(.*?)<\s*/\s*\1>',
+        caseSensitive: false, dotAll: true);
+
+    final rows = <List<String>>[];
+    final aligns = <TableColumnAlign>[];
+
+    for (final tr in trRe.allMatches(tableInner)) {
+      final cells = <String>[];
+      for (final cell in cellRe.allMatches(tr.group(1)!)) {
+        cells.add(escapeTableCell(_htmlInline(cell.group(3)!)));
+        if (rows.isEmpty) aligns.add(_parseHtmlAlign(cell.group(2)!));
+      }
+      if (cells.isNotEmpty) rows.add(cells);
+    }
+    if (rows.isEmpty) return tableInner;
+
+    final cols = rows.fold<int>(0, (m, r) => r.length > m ? r.length : m);
+    for (final r in rows) {
+      while (r.length < cols) {
+        r.add('');
+      }
+    }
+    while (aligns.length < cols) {
+      aligns.add(TableColumnAlign.none);
+    }
+
+    final buf = StringBuffer();
+    buf.writeln('| ${rows.first.join(' | ')} |');
+    buf.writeln(
+        '| ${List<String>.generate(cols, (i) => _alignMarker(aligns[i])).join(' | ')} |');
+    for (final r in rows.skip(1)) {
+      buf.writeln('| ${r.join(' | ')} |');
+    }
+    return '\n${buf.toString().trimRight()}\n';
+  }
+
+  /// 解析表头单元格的 `align` 属性（缺省 `none`）。
+  static TableColumnAlign _parseHtmlAlign(String attrs) {
+    final m = RegExp(r'''align\s*=\s*["']?\s*(left|center|right)''',
+            caseSensitive: false)
+        .firstMatch(attrs);
+    switch (m?.group(1)?.toLowerCase()) {
+      case 'center':
+        return TableColumnAlign.center;
+      case 'right':
+        return TableColumnAlign.right;
+      case 'left':
+        return TableColumnAlign.left;
+      default:
+        return TableColumnAlign.none;
+    }
+  }
+
+  /// 表格单元格 / 行内片段：保留行内语义后去除标签、反转义实体。
+  static String _htmlInline(String raw) {
+    var out = raw;
+    out = out.replaceAllMapped(
+        RegExp(r'<\s*(strong|b)\b[^>]*>(.*?)<\s*/\s*\1>',
+            caseSensitive: false, dotAll: true),
+        (m) => '**${m.group(2)}**');
+    out = out.replaceAllMapped(
+        RegExp(r'<\s*(em|i)\b[^>]*>(.*?)<\s*/\s*\1>',
+            caseSensitive: false, dotAll: true),
+        (m) => '*${m.group(2)}*');
+    out = out.replaceAllMapped(
+        RegExp(r'<\s*(s|del|strike)\b[^>]*>(.*?)<\s*/\s*\1>',
+            caseSensitive: false, dotAll: true),
+        (m) => '~~${m.group(2)}~~');
+    out = out.replaceAllMapped(
+        RegExp(r'<\s*code\b[^>]*>(.*?)<\s*/\s*code>',
+            caseSensitive: false, dotAll: true),
+        (m) => '`${m.group(1)}`');
+    out = out.replaceAllMapped(
+        RegExp(
+            r'''<\s*a\b[^>]*href\s*=\s*["']([^"']*)["'][^>]*>(.*?)<\s*/\s*a>''',
+            caseSensitive: false,
+            dotAll: true),
+        (m) => '[${m.group(2)}](${m.group(1)})');
+    out = out.replaceAll(
+        RegExp(r'<\s*br\s*/?\s*>', caseSensitive: false), ' ');
+    out = out.replaceAll(RegExp(r'<[^>]+>'), '');
+    out = out
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"');
+    return out.trim();
+  }
+
+  /// 渲染一行：`| a | b |`；单元格**逐字写出**（不改写转义，保 §4.1）。
+  static String _renderRow(List<String> cells) {
+    final buf = StringBuffer('|');
+    for (final cell in cells) {
+      buf.write(' $cell |');
+    }
+    return buf.toString();
+  }
+
+  static String _renderSeparator(List<TableColumnAlign> aligns) =>
+      _renderRow(aligns.map(_alignMarker).toList());
+
+  static String _alignMarker(TableColumnAlign a) {
+    switch (a) {
+      case TableColumnAlign.none:
+        return '---';
+      case TableColumnAlign.left:
+        return ':---';
+      case TableColumnAlign.center:
+        return ':---:';
+      case TableColumnAlign.right:
+        return '---:';
+    }
+  }
+
+  static TableColumnAlign _parseAlign(String cell) {
+    final c = cell.trim();
+    final left = c.startsWith(':');
+    final right = c.endsWith(':');
+    if (left && right) return TableColumnAlign.center;
+    if (left) return TableColumnAlign.left;
+    if (right) return TableColumnAlign.right;
+    return TableColumnAlign.none;
+  }
+
+  /// 是否为分隔行（全部分隔单元格，至少一个）。
+  static bool _isSeparatorRow(String line) {
+    final cells = _splitRow(line);
+    if (cells.isEmpty) return false;
+    for (final c in cells) {
+      if (!RegExp(r'^:?-+:?$').hasMatch(c.trim())) return false;
+    }
+    return true;
+  }
+
+  static bool _hasUnescapedPipe(String line) {
+    for (var i = 0; i < line.length; i++) {
+      if (line[i] == '|' && (i == 0 || line[i - 1] != '\\')) return true;
+    }
+    return false;
+  }
+
+  /// 按未转义 `|` 拆分一行单元格，去除首尾竖线与两侧空白。
+  static List<String> _splitRow(String line) {
+    var s = line.trim();
+    if (s.startsWith('|')) s = s.substring(1);
+    if (s.endsWith('|') && !s.endsWith(r'\|')) {
+      s = s.substring(0, s.length - 1);
+    }
+    final cells = <String>[];
+    final buf = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      final ch = s[i];
+      if (ch == '\\' && i + 1 < s.length && s[i + 1] == '|') {
+        buf.write(r'\|');
+        i++;
+      } else if (ch == '|') {
+        cells.add(buf.toString().trim());
+        buf.clear();
+      } else {
+        buf.write(ch);
+      }
+    }
+    cells.add(buf.toString().trim());
+    return cells;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 有序列表惰性编号（M9 / FR-48 / §12.5）
+  // ---------------------------------------------------------------------------
+
+  /// 计算有序列表的**显示编号**（FR-48 惰性编号）。
+  ///
+  /// 返回与输入**行**一一对应的编号：有序列表行给出其显示编号，其余行为 null。
+  /// - 连续有序列表从 1 递增；
+  /// - 空行 / 非列表行隔断后重新从 1 开始；
+  /// - 行首显式写了非 `1` 的数字（用户指定起始）时以该值为准并按其递增（BR-48.4）。
+  ///
+  /// 本函数**只读**，不改写正本（BR-48.1 / 保 §4.1）。
+  static List<int?> orderedListNumbers(String text) {
+    final result = <int?>[];
+    int? current;
+    for (final line in text.split('\n')) {
+      final m = RegExp(r'^([ \t]*)(\d+)\.[ \t]+(.*)$').firstMatch(line);
+      if (m != null) {
+        final n = int.tryParse(m.group(2)!) ?? 1;
+        current = n != 1 ? n : (current ?? 1);
+        result.add(current);
+        current = current + 1;
+      } else {
+        result.add(null);
+        if (_breaksList(line)) current = null;
+      }
+    }
+    return result;
+  }
+
+  /// 该行是否隔断有序列表（空行 / 顶格非列表行；缩进续行不打断）。
+  static bool _breaksList(String line) {
+    if (line.trim().isEmpty) return true;
+    if (line.startsWith(' ') || line.startsWith('\t')) return false;
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
   // 粘贴（BR-23.4）
   // ---------------------------------------------------------------------------
 
@@ -735,6 +1319,12 @@ abstract final class EditorFormat {
   static String htmlToMarkdown(String html) {
     if (!html.contains('<')) return html;
     var out = html;
+
+    // 表格优先整体转换（否则后续「去标签」会抹平表格结构，§12.2「表格」）。
+    out = out.replaceAllMapped(
+        RegExp(r'<\s*table\b[^>]*>(.*?)<\s*/\s*table>',
+            caseSensitive: false, dotAll: true),
+        (m) => _htmlTableToMarkdown(m.group(1)!));
 
     // 块级元素先处理。
     out = out.replaceAllMapped(
@@ -795,5 +1385,150 @@ abstract final class EditorFormat {
     out = out.replaceAll(RegExp(r'&gt;'), '>');
     out = out.replaceAll(RegExp(r'\n{3,}'), '\n\n');
     return out.trim();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 附件引用的原子编辑单元（M9 / FR-46 / §12.4）
+  // ---------------------------------------------------------------------------
+
+  /// 附件引用匹配：图片 `![alt](sui://<sha>)` 或链接 `[name](sui://<sha>)`。
+  ///
+  /// 闭合 `)` 设为**可选**，以便残缺引用（缺 `)`）仍被整块识别（§12.4 残缺自愈）。
+  static final RegExp _attachmentRefPattern = RegExp(
+    r'(!?)\[([^\]]*)\]\(\s*sui://([0-9a-fA-F]+)\s*\)?',
+  );
+
+  /// 枚举 [source] 中全部附件引用（图片 + 链接），按出现顺序返回。
+  ///
+  /// 图片引用若紧随 §5 尺寸属性块 `{...}`（同行），[AttachmentRef.end] 一并覆盖该属性块。
+  /// 未识别为附件引用的文本原样透传（绝不删改，守往返保真）。
+  static List<AttachmentRef> attachmentRefs(String source) {
+    final result = <AttachmentRef>[];
+    for (final m in _attachmentRefPattern.allMatches(source)) {
+      final isImage = m.group(1) == '!';
+      var end = m.end;
+      final corrupt = !source.startsWith(')', m.end - 1) || m.end == m.start;
+      // 图片：紧随其后的尺寸属性块（同行、可含空格）并入原子块。
+      if (isImage) {
+        var cursor = m.end;
+        while (cursor < source.length &&
+            (source[cursor] == ' ' || source[cursor] == '\t')) {
+          cursor++;
+        }
+        if (cursor < source.length && source[cursor] == '{') {
+          final close = source.indexOf('}', cursor + 1);
+          final nl = source.indexOf('\n', cursor + 1);
+          if (close != -1 && (nl == -1 || close < nl)) {
+            if (parseSizeAttribute(source.substring(cursor, close + 1)) != null) {
+              end = close + 1;
+            }
+          }
+        }
+      }
+      result.add(AttachmentRef(
+        start: m.start,
+        end: end,
+        label: m.group(2) ?? '',
+        sha256: (m.group(3) ?? '').toLowerCase(),
+        isImage: isImage,
+        corrupt: corrupt,
+      ));
+    }
+    return result;
+  }
+
+  /// 返回**光标落在其内或边界**的附件引用；无则返回 null。
+  ///
+  /// [offset] 处于 `[start, end]` 闭区间即视为命中，供选中 / 复制 / 移动按整块处理。
+  static AttachmentRef? attachmentRefAt(String source, int offset) {
+    final pos = offset.clamp(0, source.length);
+    for (final ref in attachmentRefs(source)) {
+      if (pos >= ref.start && pos <= ref.end) return ref;
+    }
+    return null;
+  }
+
+  /// 判断一次删除键是否应触发**整块删除**附件引用（BR-46.1 / BR-46.2）。
+  ///
+  /// - `backspace == true`（退格）：`offset` 恰在引用末端（`ref.end`）或引用内部；
+  /// - `backspace == false`（Delete）：`offset` 恰在引用起点（`ref.start`）或引用内部。
+  ///
+  /// 命中时返回该引用，调用方应整块删除（不进入内部逐字符删除）；否则返回 null。
+  static AttachmentRef? attachmentRefForDeletion(
+    String source,
+    int offset, {
+    required bool backspace,
+  }) {
+    final pos = offset.clamp(0, source.length);
+    for (final ref in attachmentRefs(source)) {
+      if (pos > ref.start && pos < ref.end) return ref; // 光标在引用内部
+      if (backspace && pos == ref.end) return ref; // 退格落在引用末尾边界
+      if (!backspace && pos == ref.start) return ref; // Delete 落在引用起点边界
+    }
+    return null;
+  }
+
+  /// 整块删除附件引用，返回新正本与新光标位置（作为**一次**可撤销编辑，BR-46.5）。
+  ///
+  /// 若引用**独占整行**，连同该行换行一并移除，避免残留空行；行内引用仅删除引用本身，
+  /// 其余字符逐字不动（守 §4.1）。
+  static FormatResult deleteAttachmentRef(String text, AttachmentRef ref) {
+    var s = ref.start.clamp(0, text.length);
+    var e = ref.end.clamp(0, text.length);
+    final lineStart = s == 0 ? 0 : text.lastIndexOf('\n', s - 1) + 1;
+    final nl = text.indexOf('\n', e);
+    final lineEnd = nl == -1 ? text.length : nl;
+    if (s == lineStart && e == lineEnd) {
+      if (nl != -1) {
+        e = nl + 1; // 独占整行且非末行：连行尾换行一起删
+      } else if (s > 0 && text[s - 1] == '\n') {
+        s = s - 1; // 独占末行：删前导换行
+      }
+    }
+    final newText = text.substring(0, s) + text.substring(e);
+    final caret = s.clamp(0, newText.length);
+    return FormatResult(newText, caret, caret);
+  }
+
+  /// 就地修复**残缺引用**（缺 `)`）：补上闭合括号。
+  ///
+  /// 返回新文本与光标；[ref] 非残缺时原样返回（无操作）。供 §12.4「残缺自愈」。
+  static FormatResult repairAttachmentRef(String text, AttachmentRef ref) {
+    if (!ref.corrupt) {
+      final caret = ref.end.clamp(0, text.length);
+      return FormatResult(text, caret, caret);
+    }
+    final newText = '${text.substring(0, ref.end)})${text.substring(ref.end)}';
+    final caret = ref.end + 1;
+    return FormatResult(newText, caret, caret);
+  }
+
+  /// 内容寻址写回：把文本中所有指向 [oldSha256] 的 `sui://` 引用替换为 [newSha256]。
+  ///
+  /// 用于 M9-T09「附件外部编辑更新回写」（见 attachment-store.md §12）——新字节
+  /// 产生新 sha256，正本内旧引用整体改指新内容；其余字符逐字不动（守 §4.1）。
+  /// 返回 null 表示文本中不含旧引用（无须回写）。
+  static String? replaceAttachmentSha256(
+    String text,
+    String oldSha256,
+    String newSha256,
+  ) {
+    final old = oldSha256.toLowerCase();
+    final refs = attachmentRefs(text);
+    final hits = refs.where((r) => r.sha256 == old).toList();
+    if (hits.isEmpty) return null;
+    final buf = StringBuffer();
+    var cursor = 0;
+    for (final ref in refs) {
+      if (ref.sha256 != old) continue;
+      // 保留原前缀 / 属性块：只在 sha256 段内替换。
+      final shaStart = text.indexOf('sui://', ref.start) + 'sui://'.length;
+      final shaEnd = shaStart + old.length;
+      buf.write(text.substring(cursor, shaStart));
+      buf.write(newSha256);
+      cursor = shaEnd;
+    }
+    buf.write(text.substring(cursor));
+    return buf.toString();
   }
 }

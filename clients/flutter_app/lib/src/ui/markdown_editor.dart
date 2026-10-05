@@ -27,6 +27,7 @@ class MarkdownEditor extends StatelessWidget {
     this.undoController,
     this.focusNode,
     this.onBlockNewline,
+    this.onAttachmentDelete,
   });
 
   /// 正文控制器；其 `text` 是唯一的 Markdown 正本。
@@ -47,6 +48,11 @@ class MarkdownEditor extends StatelessWidget {
   /// §11.2 / BR-32.4），返回 false 表示交由默认换行；null 表示不拦截。
   final bool Function()? onBlockNewline;
 
+  /// 格式模式下退格 / 删除键的拦截钩子（FR-46 / §12.4）：返回 true 表示已就地
+  /// 整块删除附件引用或修复残缺引用，返回 false 表示交由默认逐字符删除；
+  /// null 表示不拦截。[backspace] 为 true 表示退格键，false 表示 Delete 键。
+  final bool Function({required bool backspace})? onAttachmentDelete;
+
   @override
   Widget build(BuildContext context) {
     if (mode == EditorMode.preview) {
@@ -63,6 +69,7 @@ class MarkdownEditor extends StatelessWidget {
       undoController: undoController,
       focusNode: focusNode,
       onBlockNewline: onBlockNewline,
+      onAttachmentDelete: onAttachmentDelete,
     );
   }
 }
@@ -76,6 +83,7 @@ class _SourceEditor extends StatefulWidget {
     this.undoController,
     this.focusNode,
     this.onBlockNewline,
+    this.onAttachmentDelete,
   });
 
   final MarkdownEditingController controller;
@@ -84,6 +92,7 @@ class _SourceEditor extends StatefulWidget {
   final UndoHistoryController? undoController;
   final FocusNode? focusNode;
   final bool Function()? onBlockNewline;
+  final bool Function({required bool backspace})? onAttachmentDelete;
 
   @override
   State<_SourceEditor> createState() => _SourceEditorState();
@@ -127,7 +136,7 @@ class _SourceEditorState extends State<_SourceEditor> {
       color: scheme.surfaceContainerHighest.withValues(alpha: 0.4),
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: _withBlockNewline(_buildField(scheme)),
+        child: _wrapKeys(_buildField(scheme)),
       ),
     );
   }
@@ -172,21 +181,35 @@ class _SourceEditorState extends State<_SourceEditor> {
     );
   }
 
-  /// 格式模式：回车（含小键盘回车）先经块级空块交互处理，未处理则交默认换行。
+  /// 格式模式下拦截若干「结构键」：回车先经块级空块交互；退格 / 删除落在附件引用
+  /// 边界时整块删除或就地修复残缺引用（§11.2 / §12.4）。未处理则交默认文本编辑。
   ///
   /// 用 [Focus]（而非 [KeyboardListener]）才能返回 [KeyEventResult.handled] 以
-  /// 抑制默认换行；`canRequestFocus: false` 使其只作为键事件冒泡的中间节点，不
-  /// 额外占用 Tab 焦点。仅在提供 [widget.onBlockNewline] 时启用（仅格式模式）。
-  Widget _withBlockNewline(Widget child) {
-    final handler = widget.onBlockNewline;
-    if (handler == null) return child;
+  /// 抑制默认行为；`canRequestFocus: false` 使其只作为键事件冒泡的中间节点，不
+  /// 额外占用 Tab 焦点。仅在提供任一钩子（仅格式模式）时启用。
+  Widget _wrapKeys(Widget child) {
+    final newline = widget.onBlockNewline;
+    final del = widget.onAttachmentDelete;
+    if (newline == null && del == null) return child;
     return Focus(
       canRequestFocus: false,
       onKeyEvent: (node, event) {
-        final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
-            event.logicalKey == LogicalKeyboardKey.numpadEnter;
-        if (event is KeyDownEvent && isEnter) {
-          return handler() ? KeyEventResult.handled : KeyEventResult.ignored;
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+        final key = event.logicalKey;
+        if (newline != null &&
+            (key == LogicalKeyboardKey.enter ||
+                key == LogicalKeyboardKey.numpadEnter)) {
+          return newline() ? KeyEventResult.handled : KeyEventResult.ignored;
+        }
+        if (del != null && key == LogicalKeyboardKey.backspace) {
+          return del(backspace: true)
+              ? KeyEventResult.handled
+              : KeyEventResult.ignored;
+        }
+        if (del != null && key == LogicalKeyboardKey.delete) {
+          return del(backspace: false)
+              ? KeyEventResult.handled
+              : KeyEventResult.ignored;
         }
         return KeyEventResult.ignored;
       },

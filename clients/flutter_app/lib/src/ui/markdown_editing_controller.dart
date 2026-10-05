@@ -27,6 +27,28 @@ typedef FormatTaskCheckboxBuilder = Widget Function(
   required VoidCallback onToggle,
 });
 
+/// 格式模式下把附件**链接**引用 `[name](sui://<sha256>)` 渲染为原子呈现单元的构建器。
+///
+/// 图片引用由 [FormatImageSpanBuilder] 承担；本钩子只负责链接型附件（FR-46 / §12.4）。
+/// 未注入时链接引用退化为普通文本，不影响正本与偏移。
+typedef FormatAttachmentLinkSpanBuilder = Widget Function(
+  BuildContext context,
+  AttachmentRef ref,
+);
+
+/// 格式模式下把一段 **GFM 管道表**渲染为可交互「表格呈现单元」的构建器（FR-44 / §12.1）。
+///
+/// 由 UI 层注入：控制器本身只负责把 `| 表头 | … |` 起至最后一行的**连续表格块**从纯文本
+/// 样式片段替换为表格 widget（承 §11.2 块级呈现单元），单元格增删 / 内容 / 对齐改动全部经
+/// 回调交由 UI 层用 [EditorFormat] 纯函数整体回写正本。
+///
+/// 未注入时表格退化为普通样式文本，不影响正本与偏移。残缺 / 非法表（`wellFormed == false`）
+/// 不经本钩子，按普通块级文本原样透传（BR-44.5）。
+typedef FormatTableSpanBuilder = Widget Function(
+  BuildContext context,
+  ParsedTable table,
+);
+
 /// 任务项行（GFM task list）：行首（可含缩进）`- [ ]` / `- [x]`，其后为任务文本。
 ///
 /// 组 1 = 列表前缀（含尾随空白），组 2 = 方括号内的勾选字符（空格 / `x` / `X`），
@@ -48,6 +70,18 @@ class MarkdownEditingController extends TextEditingController {
 
   /// 格式模式下的任务勾选框构建器；由 UI 层注入（见 [FormatTaskCheckboxBuilder]）。
   FormatTaskCheckboxBuilder? formatTaskCheckboxBuilder;
+
+  /// 格式模式下附件**链接**引用 `[name](sui://<sha256>)` 的呈现单元构建器。
+  ///
+  /// 由 UI 层注入（见 [FormatAttachmentLinkSpanBuilder]）。图片引用由
+  /// [formatImageBuilder] 承担，本钩子只负责链接型附件；未注入时链接引用退化为
+  /// 普通样式文本，不影响正本与偏移（FR-46 / §12.4）。
+  FormatAttachmentLinkSpanBuilder? formatAttachmentLinkBuilder;
+
+  /// 格式模式下 **GFM 管道表**的表格呈现单元构建器；由 UI 层注入（见 [FormatTableSpanBuilder]）。
+  ///
+  /// 未注入时表格退化为普通样式文本；残缺 / 非法表一律按普通文本透传（BR-44.5）。
+  FormatTableSpanBuilder? formatTableBuilder;
 
   /// 勾选框被点选时的回调，入参为**该任务项所在行的起始偏移**。
   ///
@@ -98,11 +132,11 @@ class MarkdownEditingController extends TextEditingController {
     );
     final imageBuilder = formatImageBuilder;
     final checkboxBuilder = formatTaskCheckboxBuilder;
-    if (imageBuilder == null && checkboxBuilder == null) {
-      return _MarkdownStyler.coalesce(text, styles, 0, text.length);
-    }
+    final linkBuilder = formatAttachmentLinkBuilder;
+    final tableBuilder = formatTableBuilder;
 
-    // 收集所有「呈现单元」区间（图片引用 / 任务勾选框），按起点排序后逐段替换。
+    // 收集所有「呈现单元」区间（图片引用 / 任务勾选框 / 附件链接 / 有序列表显示
+    // 编号），按起点排序后逐段替换。
     final regions = <_SpanRegion>[];
     if (imageBuilder != null) {
       var from = 0;
@@ -125,6 +159,15 @@ class MarkdownEditingController extends TextEditingController {
     if (checkboxBuilder != null) {
       regions.addAll(_taskCheckboxRegions(text));
     }
+    if (linkBuilder != null) {
+      regions.addAll(_attachmentLinkRegions(text));
+    }
+    // 表格呈现单元：整块 GFM 管道表替换为可交互表格 widget（FR-44 / §12.1）。
+    if (tableBuilder != null) {
+      regions.addAll(_tableRegions(text));
+    }
+    // 有序列表惰性编号：格式模式按序呈现「显示编号」（FR-48 / §12.5）。
+    regions.addAll(_orderedNumberRegions(text));
     if (regions.isEmpty) {
       return _MarkdownStyler.coalesce(text, styles, 0, text.length);
     }
@@ -166,13 +209,32 @@ class MarkdownEditingController extends TextEditingController {
         region.image!,
         block: region.block,
       );
-    } else {
+    } else if (region.kind == _RegionKind.checkbox) {
       alignment = PlaceholderAlignment.middle;
       final lineStart = region.lineStart!;
       child = formatTaskCheckboxBuilder!(
         context,
         checked: region.checked!,
         onToggle: () => onToggleTask?.call(lineStart),
+      );
+    } else if (region.kind == _RegionKind.attachmentLink) {
+      // 附件链接引用 `[name](sui://<sha256>)`：整块呈现为原子单元（FR-46 / §12.4）。
+      // 中部对齐，与任务勾选框一致；偏移由下方零宽透明文本补齐。
+      alignment = PlaceholderAlignment.middle;
+      child = formatAttachmentLinkBuilder!(context, region.attachment!);
+    } else if (region.kind == _RegionKind.table) {
+      // 表格呈现单元：整块 GFM 管道表（FR-44 / §12.1）。表格为**独占块**，
+      // 行顶对齐（top）使其自首行位置**向下扩展**，后续文字整体下移（承 §5.5 块级呈现）。
+      // 区间首字符由 WidgetSpan 占位，其余（含表内换行）以零宽透明文本补齐，偏移保真。
+      alignment = PlaceholderAlignment.top;
+      child = formatTableBuilder!(context, region.table!);
+    } else {
+      // 有序列表惰性编号：把正本的字面数字（通常为 `1`）呈现为**显示编号**。
+      // widget 占用 1 个码元，多位数时余下数字位由零宽透明文本补齐（偏移保真）。
+      alignment = PlaceholderAlignment.middle;
+      child = Text(
+        '${region.displayNumber}',
+        style: base.copyWith(color: Theme.of(context).colorScheme.primary),
       );
     }
     out.add(WidgetSpan(alignment: alignment, child: child));
@@ -222,10 +284,103 @@ class MarkdownEditingController extends TextEditingController {
     }
     return regions;
   }
+
+  /// 扫描所有附件**链接**引用 `[name](sui://<sha256>)`，返回其整块区间。
+  ///
+  /// 图片引用 `![alt](sui://<sha256>)` 由 [formatImageBuilder] 另行呈现，此处仅取
+  /// 链接型（`isImage == false`）。残缺引用（缺 `)`）同样按整块识别，交由 UI 层
+  /// 自愈（FR-46 / §12.4）。
+  static List<_SpanRegion> _attachmentLinkRegions(String text) {
+    final regions = <_SpanRegion>[];
+    for (final ref in EditorFormat.attachmentRefs(text)) {
+      if (ref.isImage) continue;
+      regions.add(_SpanRegion(
+        ref.start,
+        ref.end,
+        _RegionKind.attachmentLink,
+        attachment: ref,
+      ));
+    }
+    return regions;
+  }
+
+  /// 扫描所有**完整的 GFM 管道表**块，返回其整块区间（FR-44 / §12.1）。
+  ///
+  /// 仅当 [EditorFormat.parseTable] 解析成功且 `wellFormed == true` 时建立区间；
+  /// 残缺 / 非法表（列数不齐、缺分隔行等）**不建区间**，按普通块级文本原样透传
+  /// （BR-44.5）。表格为独占块，区间覆盖「表头行 + 分隔行 + 数据行」全部字符。
+  static List<_SpanRegion> _tableRegions(String text) {
+    final regions = <_SpanRegion>[];
+    var from = 0;
+    while (from < text.length) {
+      final table = EditorFormat.parseTable(text, from);
+      if (table == null) break;
+      if (table.wellFormed) {
+        regions.add(_SpanRegion(
+          table.start,
+          table.end,
+          _RegionKind.table,
+          table: table,
+        ));
+      }
+      // table.end 恒为「末行行尾换行符」下标或文本末尾：跳到下一行继续扫描，
+      // 避免在同一表格块上重复命中（防御：解析未推进时直接结束）。
+      if (table.end >= text.length) break;
+      from = table.end + 1;
+    }
+    return regions;
+  }
+
+  /// 有序列表行前缀：组 1 = 行首缩进，组 2 = 字面数字。与 [_MarkdownStyler._orderedLine] 同口径。
+  static final RegExp _orderedPrefixPattern =
+      RegExp(r'^([ \t]*)(\d+)\.[ \t]+(.*)$');
+
+  /// 扫描所有有序列表行，返回「显示编号」需替换的**数字段**区间（FR-48 / §12.5）。
+  ///
+  /// 正本统一写作 `1.`，由 [EditorFormat.orderedListNumbers] 计算每行的显示编号；
+  /// 仅当显示编号与字面数字**不同**时才建立区间（字面即显示时逐字透传，保 §4.1）。
+  /// 本方法只读，绝不改写正本（惰性编号「零正本改写」）。
+  static List<_SpanRegion> _orderedNumberRegions(String text) {
+    final regions = <_SpanRegion>[];
+    final numbers = EditorFormat.orderedListNumbers(text);
+    if (numbers.isEmpty) return regions;
+    final n = text.length;
+    var lineStart = 0;
+    var lineIndex = 0;
+    while (lineStart <= n && lineIndex < numbers.length) {
+      var lineEnd = text.indexOf('\n', lineStart);
+      if (lineEnd == -1) lineEnd = n;
+      final display = numbers[lineIndex];
+      if (display != null) {
+        final m =
+            _orderedPrefixPattern.firstMatch(text.substring(lineStart, lineEnd));
+        if (m != null) {
+          final lead = m.group(1)!.length;
+          final digits = m.group(2)!.length;
+          final literal = text.substring(
+            lineStart + lead,
+            lineStart + lead + digits,
+          );
+          if (literal != '$display') {
+            regions.add(_SpanRegion(
+              lineStart + lead,
+              lineStart + lead + digits,
+              _RegionKind.orderedNumber,
+              displayNumber: display,
+            ));
+          }
+        }
+      }
+      if (lineEnd >= n) break;
+      lineStart = lineEnd + 1;
+      lineIndex++;
+    }
+    return regions;
+  }
 }
 
 /// 呈现单元类型。
-enum _RegionKind { image, checkbox }
+enum _RegionKind { image, checkbox, attachmentLink, orderedNumber, table }
 
 /// 一个「呈现单元」在正本中的字符区间。
 class _SpanRegion {
@@ -233,8 +388,17 @@ class _SpanRegion {
   final int end;
   final _RegionKind kind;
   final ParsedImage? image;
+
+  /// 仅附件链接区间有意义：该链接型附件的解析结果（FR-46 / §12.4）。
+  final AttachmentRef? attachment;
+
+  /// 仅表格区间有意义：该 GFM 管道表块的解析结果（FR-44 / §12.1）。
+  final ParsedTable? table;
   final bool? checked;
   final int? lineStart;
+
+  /// 仅有序列表区间有意义：该行应呈现的**显示编号**（FR-48 惰性编号）。
+  final int? displayNumber;
 
   /// 仅图片区间有意义：true 表示该引用独占一块（§5.5），应按块级呈现单元布局。
   final bool block;
@@ -244,8 +408,11 @@ class _SpanRegion {
     this.end,
     this.kind, {
     this.image,
+    this.attachment,
+    this.table,
     this.checked,
     this.lineStart,
+    this.displayNumber,
     this.block = false,
   });
 }
@@ -433,13 +600,8 @@ class _MarkdownStyler {
       final boxEnd = (start + prefixLen + 3).clamp(0, end);
       _fill(styles, start + prefixLen, boxEnd, accent);
       if (checked) {
-        // 勾选态：任务文本变灰 + 删除线（§10.1）。
-        _fill(
-          styles,
-          boxEnd,
-          end,
-          faint.copyWith(decoration: TextDecoration.lineThrough),
-        );
+        // 勾选态：任务文本**仅视觉淡化 / 加灰**，不加删除线（BR-31.6）。
+        _fill(styles, boxEnd, end, faint);
       }
       return;
     }

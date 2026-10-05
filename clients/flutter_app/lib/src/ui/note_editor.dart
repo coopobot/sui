@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -7,6 +9,7 @@ import 'package:provider/provider.dart';
 import '../platform/attachment_picker.dart';
 import 'app_controller.dart';
 import 'desktop_commands.dart';
+import 'format_table.dart';
 import 'markdown_editing_controller.dart';
 import 'markdown_editor.dart';
 import 'note_window_manager.dart';
@@ -109,6 +112,10 @@ class _NoteEditorState extends State<NoteEditor>
     // 格式模式：把任务项 `- [ ]` / `- [x]` 的勾选框渲染为可点选复选框（§10.1）。
     _content.formatTaskCheckboxBuilder = _buildTaskCheckbox;
     _content.onToggleTask = _toggleTask;
+    // 格式模式：把附件链接引用 `[name](sui://<sha256>)` 渲染为原子呈现单元（FR-46）。
+    _content.formatAttachmentLinkBuilder = _buildAttachmentLink;
+    // 格式模式：把整块 GFM 管道表渲染为可交互「表格呈现单元」（FR-44 / §12.1）。
+    _content.formatTableBuilder = _buildFormatTable;
     // 向壳层登记命令桥（FR-41）：登记后「编辑 / 文件」菜单中作用于正文的命令才可用。
     // 此处刻意不触发 notifyListeners——注册发生在构建阶段，通知会撞上「构建期重建」断言；
     // 菜单项的可用性是在菜单展开时按 `isEnabled` 现算的，无需依赖通知。
@@ -236,6 +243,11 @@ class _NoteEditorState extends State<NoteEditor>
 
   /// 格式工具栏：一行可横向滚动的排版指令。每条指令都只在正本 Markdown 上做
   /// 纯文本改写（`EditorFormat`），不回写中间态，保证「格式 / 源码」所见一致。
+  ///
+  /// 按钮**自左向右按使用频度排布**（ui-spec §12 / BR-23.6）：
+  /// 高频（加粗、勾选框、撤销 / 重做、斜体、删除线、高亮）→ 中频（无序 / 有序列表、
+  /// 缩进、引用、代码块、表格、链接、图片、附件、分割线）→ 低频靠右（标题一~三级）。
+  /// 顺序调整**不改变**任一按钮的语义与产出。
   Widget _buildFormatToolbar() {
     return SizedBox(
       height: 44,
@@ -244,62 +256,9 @@ class _NoteEditorState extends State<NoteEditor>
         padding: const EdgeInsets.symmetric(horizontal: 8),
         child: Row(
           children: [
+            // —— 高频区 ——
             _fmtIcon(Icons.format_bold, '加粗', FormatCommand.bold),
-            _fmtIcon(Icons.format_italic, '斜体', FormatCommand.italic),
-            _fmtIcon(
-              Icons.format_strikethrough,
-              '删除线',
-              FormatCommand.strikethrough,
-            ),
-            _fmtIcon(Icons.format_color_fill, '高亮', FormatCommand.highlight),
-            const _ToolbarDivider(),
-            _fmtIcon(Icons.looks_one_outlined, '标题 1', FormatCommand.heading1),
-            _fmtIcon(Icons.looks_two_outlined, '标题 2', FormatCommand.heading2),
-            _fmtIcon(Icons.looks_3_outlined, '标题 3', FormatCommand.heading3),
-            const _ToolbarDivider(),
-            _fmtIcon(
-              Icons.format_list_bulleted,
-              '无序列表',
-              FormatCommand.bulletList,
-            ),
-            _fmtIcon(
-              Icons.format_list_numbered,
-              '有序列表',
-              FormatCommand.orderedList,
-            ),
             _fmtIcon(Icons.check_box_outlined, '勾选框', FormatCommand.taskList),
-            const _ToolbarDivider(),
-            _fmtIcon(
-              Icons.format_indent_increase,
-              '缩进',
-              FormatCommand.indent,
-            ),
-            _fmtIcon(
-              Icons.format_indent_decrease,
-              '反缩进',
-              FormatCommand.outdent,
-            ),
-            const _ToolbarDivider(),
-            _fmtIcon(Icons.format_quote, '引用', FormatCommand.blockquote),
-            _fmtIcon(Icons.data_object, '代码块', FormatCommand.codeBlock),
-            const _ToolbarDivider(),
-            _fmtIcon(Icons.link, '链接', FormatCommand.link),
-            IconButton(
-              tooltip: '插入图片',
-              icon: const Icon(Icons.image_outlined),
-              onPressed: _pickAndAttach,
-            ),
-            // 附件入口（ui-spec §4）：以弹窗「附件面板」列出 / 增删附件。
-            // 原先常驻底部的附件条已移除，为窄屏编辑腾出高度（B17，AC-135）。
-            IconButton(
-              tooltip: '附件',
-              icon: const Icon(Icons.attach_file),
-              onPressed: _openAttachmentPanel,
-            ),
-            _fmtIcon(Icons.horizontal_rule, '分割线', FormatCommand.divider),
-            const _ToolbarDivider(),
-            _fmtIcon(Icons.format_clear, '简化格式', FormatCommand.clearFormat),
-            const _ToolbarDivider(),
             // 撤销 / 重做：与正文输入共用同一个撤销栈，故按钮可用性随其变化重绘。
             ListenableBuilder(
               listenable: _undoHistory,
@@ -323,6 +282,67 @@ class _NoteEditorState extends State<NoteEditor>
                 ],
               ),
             ),
+            _fmtIcon(Icons.format_italic, '斜体', FormatCommand.italic),
+            _fmtIcon(
+              Icons.format_strikethrough,
+              '删除线',
+              FormatCommand.strikethrough,
+            ),
+            _fmtIcon(Icons.format_color_fill, '高亮', FormatCommand.highlight),
+            // —— 中频区 ——
+            const _ToolbarDivider(),
+            _fmtIcon(
+              Icons.format_list_bulleted,
+              '无序列表',
+              FormatCommand.bulletList,
+            ),
+            _fmtIcon(
+              Icons.format_list_numbered,
+              '有序列表',
+              FormatCommand.orderedList,
+            ),
+            _fmtIcon(
+              Icons.format_indent_increase,
+              '缩进',
+              FormatCommand.indent,
+            ),
+            _fmtIcon(
+              Icons.format_indent_decrease,
+              '反缩进',
+              FormatCommand.outdent,
+            ),
+            const _ToolbarDivider(),
+            _fmtIcon(Icons.format_quote, '引用', FormatCommand.blockquote),
+            _fmtIcon(Icons.data_object, '代码块', FormatCommand.codeBlock),
+            // 表格入口（ui-spec §18.1 / FR-44）：弹出「插入表格」面板，自定义行列数。
+            // 与「编辑」菜单的等价项同源（命令单一来源，承 §16.2）。
+            IconButton(
+              tooltip: '表格',
+              icon: const Icon(Icons.table_chart_outlined),
+              onPressed: _openTablePanel,
+            ),
+            const _ToolbarDivider(),
+            _fmtIcon(Icons.link, '链接', FormatCommand.link),
+            IconButton(
+              tooltip: '插入图片',
+              icon: const Icon(Icons.image_outlined),
+              onPressed: _pickAndAttach,
+            ),
+            // 附件入口（ui-spec §4）：以弹窗「附件面板」列出 / 增删附件。
+            // 原先常驻底部的附件条已移除，为窄屏编辑腾出高度（B17，AC-135）。
+            IconButton(
+              tooltip: '附件',
+              icon: const Icon(Icons.attach_file),
+              onPressed: _openAttachmentPanel,
+            ),
+            _fmtIcon(Icons.horizontal_rule, '分割线', FormatCommand.divider),
+            const _ToolbarDivider(),
+            _fmtIcon(Icons.format_clear, '简化格式', FormatCommand.clearFormat),
+            // —— 低频区（靠右） ——
+            const _ToolbarDivider(),
+            _fmtIcon(Icons.looks_one_outlined, '标题 1', FormatCommand.heading1),
+            _fmtIcon(Icons.looks_two_outlined, '标题 2', FormatCommand.heading2),
+            _fmtIcon(Icons.looks_3_outlined, '标题 3', FormatCommand.heading3),
           ],
         ),
       ),
@@ -376,6 +396,57 @@ class _NoteEditorState extends State<NoteEditor>
     return true;
   }
 
+  /// 格式模式下把附件链接引用 `[name](sui://<sha256>)` 渲染为原子呈现单元（FR-46）。
+  Widget _buildAttachmentLink(BuildContext context, AttachmentRef ref) {
+    final sel = _content.value.selection;
+    final selected = sel.isValid &&
+        sel.isCollapsed &&
+        sel.start >= ref.start &&
+        sel.start <= ref.end;
+    return _FormatAttachmentLinkUnit(
+      label: ref.label,
+      isImage: ref.isImage,
+      corrupt: ref.corrupt,
+      selected: selected,
+      onSelect: () => _selectAttachmentLink(ref),
+    );
+  }
+
+  /// 选中附件链接引用：把光标落到引用末尾，与图片选中口径一致（便于尺寸条 / 后续操作）。
+  void _selectAttachmentLink(AttachmentRef ref) {
+    final pos = ref.end.clamp(0, _content.text.length);
+    _content.value = TextEditingValue(
+      text: _content.text,
+      selection: TextSelection.collapsed(offset: pos),
+    );
+    if (_mode != EditorMode.preview) _contentFocus.requestFocus();
+  }
+
+  /// 格式模式下退格 / 删除键的附件引用处理（FR-46 / §12.4）。
+  ///
+  /// 优先级：残缺引用**就地修复**（补 `)`，AC-147）→ 引用边界**整块删除**
+  /// （AC-145 / AC-146）。命中返回 true 抑制默认逐字符删除；未命中返回 false。
+  /// 仅在格式模式 + 折叠光标时生效，源码模式保持原始文本语义（AC-147）。
+  bool _handleAttachmentDelete({required bool backspace}) {
+    if (_mode != EditorMode.formatted) return false;
+    final sel = _content.value.selection;
+    if (!sel.isValid || !sel.isCollapsed) return false;
+    final text = _content.text;
+    final at = EditorFormat.attachmentRefAt(text, sel.extentOffset);
+    if (at != null && at.corrupt) {
+      _writeBack(EditorFormat.repairAttachmentRef(text, at));
+      return true;
+    }
+    final ref = EditorFormat.attachmentRefForDeletion(
+      text,
+      sel.extentOffset,
+      backspace: backspace,
+    );
+    if (ref == null) return false;
+    _writeBack(EditorFormat.deleteAttachmentRef(text, ref));
+    return true;
+  }
+
   /// 快捷键映射（§9）：与工具栏指令**同源**，仅改写正本、不产生新保存语义。
   ///
   /// 只在「格式模式」下挂载，且位于正文编辑区子树内，故天然满足「正文编辑区聚焦 +
@@ -416,6 +487,12 @@ class _NoteEditorState extends State<NoteEditor>
         _FormatIntent(FormatCommand.outdent),
     SingleActivator(LogicalKeyboardKey.space, control: true):
         _FormatIntent(FormatCommand.clearFormat),
+    // `Ctrl+Shift+V`（纯文本粘贴）为编辑器自有的显式入口（FR-45 / §12.2）。
+    // 注意：`Ctrl+V`（富文本粘贴）**不在此声明**——它沿用系统默认的文本编辑快捷键，
+    // 以免抢占剪贴板级按键（BR-30.2 / AC-88）；格式模式通过覆写 `PasteTextIntent`
+    // 对应的 Action 来接管其行为（见 [_formatActions]）。
+    SingleActivator(LogicalKeyboardKey.keyV, control: true, shift: true):
+        _PasteIntent(rich: false),
   };
 
   /// 快捷键动作：统一落到 [_applyCommand]，保证与工具栏「同源同效」（BR-30.4）。
@@ -423,6 +500,21 @@ class _NoteEditorState extends State<NoteEditor>
         _FormatIntent: CallbackAction<_FormatIntent>(
           onInvoke: (intent) {
             _applyCommand(intent.command);
+            return null;
+          },
+        ),
+        _PasteIntent: CallbackAction<_PasteIntent>(
+          onInvoke: (intent) {
+            _pasteFromClipboard(rich: intent.rich);
+            return null;
+          },
+        ),
+        // 覆写系统默认粘贴：格式模式下 `Ctrl+V` 优先富文本（FR-45 / §12.2）。
+        // 采用 Action 覆写而非在 `Shortcuts` 中声明 `Ctrl+V`，以满足 BR-30.2「不抢占
+        // 剪贴板级按键」：键位仍归系统默认文本编辑快捷键，仅行为由本层接管。
+        PasteTextIntent: CallbackAction<PasteTextIntent>(
+          onInvoke: (intent) {
+            _pasteFromClipboard(rich: true);
             return null;
           },
         ),
@@ -452,6 +544,68 @@ class _NoteEditorState extends State<NoteEditor>
     // 点工具栏会让正文失焦；交还焦点，排版后可立即继续输入。
     if (_mode != EditorMode.preview) _contentFocus.requestFocus();
     _save();
+  }
+
+  /// 把「表格结构 / 内容」类编辑的产物写回正文并即时保存（FR-44 / §12.1）。
+  ///
+  /// `EditorFormat` 的表格族 API（`setTableCell` / `insertTableRow` / …）返回**改写后的
+  /// 正本字符串**而不携带选区，故此处不指定新选区：沿用编辑前的选区（就近钳制），
+  /// 从而**不抢占焦点**——用户可能正在某个单元格内输入，夺焦会中断连续编辑。
+  void _writeBackTable(String newText) {
+    final sel = _content.value.selection;
+    final base = (sel.isValid ? sel.start : newText.length).clamp(0, newText.length);
+    final extent = (sel.isValid ? sel.end : base).clamp(0, newText.length);
+    _content.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection(baseOffset: base, extentOffset: extent),
+    );
+    _save();
+  }
+
+  /// 粘贴：按 [rich] 选择来源，产物**直接写入正本**并即时保存（FR-45 / §12.2）。
+  ///
+  /// `Ctrl+V`（[rich] 为 true）**优先读取剪贴板 HTML 表示**，复用与剪藏同源的
+  /// [EditorFormat.htmlToMarkdown] 转成语义等价的 Markdown；无 HTML 表示时回退纯文本，
+  /// 并用 [EditorFormat.escapePlainText] 转义 Markdown 特殊字符。`Ctrl+Shift+V`
+  /// （[rich] 为 false）**仅取纯文本**。结果作为一次编辑落库，不产生中间态。
+  Future<void> _pasteFromClipboard({required bool rich}) async {
+    String? html;
+    if (rich) {
+      try {
+        html = (await Clipboard.getData('text/html'))?.text;
+      } catch (_) {
+        html = null; // 平台不提供 text/html 表示时静默回退纯文本。
+      }
+    }
+    final plain = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+
+    final String? payload;
+    if (rich && html != null && html.trim().isNotEmpty) {
+      payload = EditorFormat.htmlToMarkdown(html);
+    } else if (plain != null && plain.isNotEmpty) {
+      payload = EditorFormat.escapePlainText(plain);
+    } else {
+      payload = null;
+    }
+    if (payload == null || payload.isEmpty || !mounted) return;
+
+    final value = _content.value;
+    final text = value.text;
+    final sel = value.selection;
+    final start = (sel.isValid ? sel.start : text.length).clamp(0, text.length);
+    final end = (sel.isValid ? sel.end : start).clamp(0, text.length);
+    final caret = start + payload.length;
+    _writeBack(FormatResult(text.replaceRange(start, end, payload), caret, caret));
+  }
+
+  /// 用**当前正本**重新解析同一个表格块，得到与正本一致的最新结构。
+  ///
+  /// 表格族编辑（尤其单元格提交）可能在闭包捕获的 [fallback] 之后又发生了别的写入；
+  /// 以 [fallback] 的起点重新解析，能在结构未变时拿回新鲜数据，解析失败则退回 [fallback]。
+  ParsedTable _resolveTable(ParsedTable fallback) {
+    final parsed = EditorFormat.parseTable(_content.text, fallback.start);
+    if (parsed != null && parsed.start == fallback.start) return parsed;
+    return fallback;
   }
 
   // ---------------------------------------------------------------------------
@@ -530,6 +684,81 @@ class _NoteEditorState extends State<NoteEditor>
     _save();
   }
 
+  /// 格式模式下把整块 GFM 管道表渲染为可交互「表格呈现单元」（FR-44 / §12.1）。
+  ///
+  /// 表格为**独占块**，宽按可用段落宽计算（`LayoutBuilder`，无界时退回 720），列较多时
+  /// 以横向滚动兜底，避免溢出编辑区（BR-44.1）。单元格内容 / 增删行列 / 列对齐全部经
+  /// [EditorFormat] 纯函数**整体回写正本**，未编辑的单元格逐字保真（BR-44.2）；呈现为
+  /// 视图层行为，源码 / 预览两态内容不受影响。
+  Widget _buildFormatTable(BuildContext context, ParsedTable table) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 内联子组件受段落宽度约束；无界时退回一个稳妥的段落宽（同 [_FormatImageUnit]）。
+        final available =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 720.0;
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: FormatTableView(
+            table: table,
+            availableWidth: available,
+            onSetCell: (rowIndex, column, value) {
+              final t = _resolveTable(table);
+              _writeBackTable(
+                EditorFormat.setTableCell(
+                  _content.text,
+                  t,
+                  rowIndex,
+                  column,
+                  value,
+                ),
+              );
+            },
+            onInsertRow: (rowIndex, after) {
+              final t = _resolveTable(table);
+              _writeBackTable(
+                EditorFormat.insertTableRow(
+                  _content.text,
+                  t,
+                  rowIndex,
+                  after: after,
+                ),
+              );
+            },
+            onRemoveRow: (rowIndex) {
+              final t = _resolveTable(table);
+              _writeBackTable(
+                EditorFormat.removeTableRow(_content.text, t, rowIndex),
+              );
+            },
+            onInsertColumn: (column, after) {
+              final t = _resolveTable(table);
+              // `after < 0` 表示插到最前：某列「左侧插入」即在其**前一列之后**插入。
+              _writeBackTable(
+                EditorFormat.addTableColumn(
+                  _content.text,
+                  t,
+                  after: after ? column : column - 1,
+                ),
+              );
+            },
+            onRemoveColumn: (column) {
+              final t = _resolveTable(table);
+              _writeBackTable(
+                EditorFormat.removeTableColumn(_content.text, t, column),
+              );
+            },
+            onSetAlignment: (column, align) {
+              final t = _resolveTable(table);
+              _writeBackTable(
+                EditorFormat.setTableAlignment(_content.text, t, column, align),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // 订阅 [AppController]：编辑器须随其重建（首次载入依赖解析、内容被同步改写、
@@ -556,48 +785,27 @@ class _NoteEditorState extends State<NoteEditor>
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-          child: TextField(
-            controller: _title,
-            onChanged: (_) => _save(),
-            style: Theme.of(context)
-                .textTheme
-                .headlineSmall
-                ?.copyWith(fontWeight: FontWeight.w600),
-            decoration: const InputDecoration(
-              hintText: '标题',
-              border: InputBorder.none,
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Wrap(
-            spacing: 6,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            runSpacing: 6,
+          padding: const EdgeInsets.fromLTRB(16, 16, 8, 0),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              for (final t in _tags)
-                InputChip(
-                  label: Text('#$t'),
-                  onDeleted: () {
-                    setState(() => _tags = _tags.where((e) => e != t).toList());
-                    _save();
-                  },
-                  visualDensity: VisualDensity.compact,
-                ),
-              SizedBox(
-                width: 130,
+              Expanded(
                 child: TextField(
-                  controller: _tagInput,
-                  onSubmitted: (_) => _addTag(),
+                  controller: _title,
+                  onChanged: (_) => _save(),
+                  style: Theme.of(context)
+                      .textTheme
+                      .headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.w600),
                   decoration: const InputDecoration(
-                    hintText: '添加标签',
-                    isDense: true,
+                    hintText: '标题',
                     border: InputBorder.none,
                   ),
                 ),
               ),
+              // 标签入口（ui-spec §4 / BR-21.4）：标题行**右上角图标**、与标题同行，
+              // 点击弹出标签浮层；标签**不再单独占用一行**。
+              Padding(padding: const EdgeInsets.only(top: 4), child: _buildTagEntry()),
             ],
           ),
         ),
@@ -658,6 +866,8 @@ class _NoteEditorState extends State<NoteEditor>
               focusNode: _contentFocus,
               onBlockNewline:
                   _mode == EditorMode.formatted ? _handleBlockNewline : null,
+              onAttachmentDelete:
+                  _mode == EditorMode.formatted ? _handleAttachmentDelete : null,
             ),
           ),
         ),
@@ -917,6 +1127,57 @@ class _NoteEditorState extends State<NoteEditor>
     );
   }
 
+  /// 表格插入面板（ui-spec §18.1 / FR-44 / BR-44.1）：自定义行 / 列数后于光标处
+  /// 插入一张空表；超界（行 1~20、列 1~8）时提示并钳制到边界值。
+  Future<void> _openTablePanel() async {
+    final picked = await showDialog<({int rows, int columns})>(
+      context: context,
+      builder: (_) => const _TableSizeDialog(),
+    );
+    if (picked == null) return;
+    final rows = picked.rows;
+    final columns = picked.columns;
+    final clampedRows = rows.clamp(
+      EditorFormat.tableMinRows,
+      EditorFormat.tableMaxRows,
+    );
+    final clampedCols = columns.clamp(
+      EditorFormat.tableMinColumns,
+      EditorFormat.tableMaxColumns,
+    );
+    if (clampedRows != rows || clampedCols != columns) {
+      _toast(
+        '表格上限为 ${EditorFormat.tableMaxRows} 行 × '
+        '${EditorFormat.tableMaxColumns} 列、下限为 '
+        '${EditorFormat.tableMinRows} 行 × '
+        '${EditorFormat.tableMinColumns} 列，已按边界值插入',
+      );
+    }
+    _insertTableAtCursor(clampedRows, clampedCols);
+  }
+
+  /// 在光标 / 选区处插入一张 [rows] × [columns] 的空表（GFM 管道表，BR-44.2）。
+  void _insertTableAtCursor(int rows, int columns) {
+    final value = _content.value;
+    final sel = value.selection;
+    final start = sel.isValid ? sel.start : value.text.length;
+    final end = sel.isValid ? sel.end : value.text.length;
+    _writeBack(
+      EditorFormat.insertTable(
+        value.text,
+        start,
+        end,
+        rows: rows,
+        columns: columns,
+      ),
+    );
+  }
+
+  /// 打开附件 = **预览**（ui-spec §18.3 / FR-47 / AC-148 / BR-47.1）。
+  ///
+  /// 字节先按需就绪（本地命中或下载），随后按 [Attachment.mimeKind] 弹内置预览：
+  /// 文本（只读、截断）/ 图片（可缩放）/ PDF 与其它（元信息卡）；弹窗内统一提供
+  /// 「用系统默认应用打开」入口（BR-47.2，AC-149）。字节拿不到时降级为提示。
   Future<void> _openAttachment(Attachment a) async {
     Uint8List? bytes;
     try {
@@ -932,7 +1193,82 @@ class _NoteEditorState extends State<NoteEditor>
     if (!mounted) return;
     // 刷新卡片状态（未下载 → 已缓存/待上传）。
     setState(() {});
-    _toast('已下载「${a.filename}」（${bytes.length} 字节，已缓存）');
+    final data = bytes;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _AttachmentPreviewDialog(
+        attachment: a,
+        bytes: data,
+        onOpenExternally: () => _controller.openAttachmentExternally(a),
+      ),
+    );
+  }
+
+  /// 标签浮层入口（ui-spec §4 / BR-21.4）：标题行**右上角图标**，与标题同行。
+  ///
+  /// 点击弹出**标签浮层**（锚定图标下方），可就地增删标签；标签**不再单独占一行**，
+  /// 把纵向空间还给正文编辑区。标签数量以角标呈现，便于一眼看出是否已有标签。
+  Widget _buildTagEntry() {
+    return MenuAnchor(
+      menuChildren: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+          child: SizedBox(width: 240, child: _buildTagEditor()),
+        ),
+      ],
+      builder: (context, controller, child) => IconButton(
+        tooltip: '标签',
+        icon: Badge(
+          isLabelVisible: _tags.isNotEmpty,
+          label: Text('${_tags.length}'),
+          child: const Icon(Icons.label_outline),
+        ),
+        onPressed: () =>
+            controller.isOpen ? controller.close() : controller.open(),
+      ),
+    );
+  }
+
+  /// 标签浮层内容：已有标签（可就地删除）+ 添加输入框（回车添加）。
+  Widget _buildTagEditor() {
+    final theme = Theme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (_tags.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Text('暂无标签', style: theme.textTheme.bodySmall),
+          )
+        else
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final t in _tags)
+                InputChip(
+                  label: Text('#$t'),
+                  onDeleted: () {
+                    setState(() => _tags = _tags.where((e) => e != t).toList());
+                    _save();
+                  },
+                  visualDensity: VisualDensity.compact,
+                ),
+            ],
+          ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _tagInput,
+          onSubmitted: (_) => _addTag(),
+          decoration: const InputDecoration(
+            hintText: '输入标签后回车',
+            isDense: true,
+            border: InputBorder.none,
+          ),
+        ),
+      ],
+    );
   }
 
   void _addTag() {
@@ -1038,6 +1374,9 @@ class _NoteEditorState extends State<NoteEditor>
       );
 
   @override
+  void insertTable() => _openTablePanel();
+
+  @override
   void exportNote() => _showExportDialog();
 
   @override
@@ -1059,6 +1398,96 @@ class _NoteEditorState extends State<NoteEditor>
   }
 }
 
+/// 表格尺寸输入对话框（FR-44）。
+///
+/// `showDialog` 返回的 Future 在路由 pop 时即完成，而对话框子树在退场动画期间仍会
+/// 重建；若在其返回后立即 `dispose()` 输入控制器，会触发
+/// 「A TextEditingController was used after being disposed」。故控制器由对话框自身
+/// 持有，并随子树一并释放，行 / 列数经 `pop` 结果回传。
+class _TableSizeDialog extends StatefulWidget {
+  const _TableSizeDialog();
+
+  @override
+  State<_TableSizeDialog> createState() => _TableSizeDialogState();
+}
+
+class _TableSizeDialogState extends State<_TableSizeDialog> {
+  final TextEditingController _rowCtrl = TextEditingController(text: '3');
+  final TextEditingController _colCtrl = TextEditingController(text: '3');
+
+  @override
+  void dispose() {
+    _rowCtrl.dispose();
+    _colCtrl.dispose();
+    super.dispose();
+  }
+
+  int _parse(TextEditingController ctl) => int.tryParse(ctl.text.trim()) ?? 3;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: const Text('插入表格'),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '行 ${EditorFormat.tableMinRows}~${EditorFormat.tableMaxRows}，'
+              '列 ${EditorFormat.tableMinColumns}~'
+              '${EditorFormat.tableMaxColumns}。',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _rowCtrl,
+                    autofocus: true,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '行数',
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _colCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '列数',
+                      isDense: true,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('sui-table-insert-confirm'),
+          onPressed: () => Navigator.of(context).pop(
+            (rows: _parse(_rowCtrl), columns: _parse(_colCtrl)),
+          ),
+          child: const Text('插入'),
+        ),
+      ],
+    );
+  }
+}
+
 /// 携带 [FormatCommand] 的快捷键意图（§9）。
 ///
 /// 与工具栏按钮落到同一套 [EditorFormat] 指令实现，确保「同源同效」（BR-30.4）。
@@ -1066,6 +1495,16 @@ class _FormatIntent extends Intent {
   const _FormatIntent(this.command);
 
   final FormatCommand command;
+}
+
+/// 携带「粘贴模式」的快捷键意图（FR-45 / §12.2）。
+///
+/// [rich] 为 true（`Ctrl+V`）时优先读取剪贴板 HTML 表示并转 Markdown；
+/// 为 false（`Ctrl+Shift+V`）时仅取纯文本并转义 Markdown 特殊字符。
+class _PasteIntent extends Intent {
+  const _PasteIntent({required this.rich});
+
+  final bool rich;
 }
 
 /// 格式模式内联的任务勾选框：点按即切换 `[ ]` ↔ `[x]`（§10.1 / BR-31.2）。
@@ -1302,6 +1741,68 @@ class _FormatImageUnit extends StatelessWidget {
   }
 }
 
+/// 格式模式内联的附件**链接**呈现单元：把 `[name](sui://<sha256>)` 呈现为可点选的
+/// 整块「附件胶囊」（FR-46 / §12.4）。仅格式模式启用；点按即选中（光标落入引用）。
+/// 残缺引用（缺 `)`）显式标红，提示可退格自愈（AC-147）。
+class _FormatAttachmentLinkUnit extends StatelessWidget {
+  const _FormatAttachmentLinkUnit({
+    required this.label,
+    required this.isImage,
+    required this.corrupt,
+    required this.selected,
+    required this.onSelect,
+  });
+
+  final String label;
+  final bool isImage;
+  final bool corrupt;
+  final bool selected;
+  final VoidCallback onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final borderColor = corrupt
+        ? scheme.error
+        : (selected ? scheme.primary : scheme.outlineVariant);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onSelect,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: scheme.secondaryContainer,
+          border: Border.all(color: borderColor, width: selected ? 2 : 1),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              isImage ? Icons.image_outlined : Icons.attach_file,
+              size: 14,
+              color: scheme.onSecondaryContainer,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label.isEmpty ? '附件' : label,
+              style: TextStyle(
+                fontSize: 13,
+                color: scheme.onSecondaryContainer,
+              ),
+            ),
+            if (corrupt) ...[
+              const SizedBox(width: 4),
+              Icon(Icons.error_outline, size: 14, color: scheme.error),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _EmptyEditor extends StatelessWidget {
   const _EmptyEditor();
 
@@ -1464,25 +1965,217 @@ class _AttachmentCardState extends State<_AttachmentCard> {
     }
   }
 
-  IconData _iconFor(String mimeKind) {
-    switch (mimeKind) {
+  IconData _iconFor(String mimeKind) => _attachmentIcon(mimeKind);
+
+  String _formatSize(int bytes) => _formatBytes(bytes);
+}
+
+/// 附件内的图标（按 [Attachment.mimeKind] 取），卡片与预览弹窗共用。
+IconData _attachmentIcon(String mimeKind) {
+  switch (mimeKind) {
+    case 'image':
+      return Icons.image_outlined;
+    case 'pdf':
+      return Icons.picture_as_pdf_outlined;
+    case 'video':
+      return Icons.videocam_outlined;
+    case 'audio':
+      return Icons.music_note_outlined;
+    default:
+      return Icons.attach_file_outlined;
+  }
+}
+
+/// 人类可读的字节大小，卡片与预览弹窗共用。
+String _formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+/// 附件内置预览弹窗（ui-spec §18.3 / FR-47 / AC-148 / BR-47.1）。
+///
+/// 按 [Attachment.mimeKind] 分支：
+/// * `text` —— 只读文本视图（UTF-8 容错解码，超长截断并提示）；
+/// * `image` —— 可缩放的图片视图（[InteractiveViewer]）；
+/// * `pdf` / 其它 —— 元信息卡（零新增依赖，PDF 不做内置渲染）。
+/// 三类都提供「用系统默认应用打开」入口（BR-47.2 / AC-149）；Web / 移动端该入口
+/// 不可用时提示降级（BR-47.5 / AC-151）。
+class _AttachmentPreviewDialog extends StatelessWidget {
+  const _AttachmentPreviewDialog({
+    required this.attachment,
+    required this.bytes,
+    required this.onOpenExternally,
+  });
+
+  final Attachment attachment;
+  final Uint8List bytes;
+  final Future<bool> Function() onOpenExternally;
+
+  /// 文本预览字符上限：超过则截断，避免超长文件卡住渲染。
+  static const int _maxTextChars = 20000;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: Row(
+        children: [
+          Icon(_attachmentIcon(attachment.mimeKind), size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(attachment.filename, overflow: TextOverflow.ellipsis),
+          ),
+        ],
+      ),
+      content: SizedBox(width: 560, child: _buildBody(context, theme)),
+      actions: [
+        TextButton.icon(
+          icon: const Icon(Icons.open_in_new),
+          label: const Text('用系统默认应用打开'),
+          onPressed: () async {
+            final ok = await onOpenExternally();
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  ok
+                      ? '已用系统默认应用打开；编辑保存后将自动回写'
+                      : '当前平台不支持调用系统应用，可先用内置预览查看',
+                ),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          },
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('关闭'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildBody(BuildContext context, ThemeData theme) {
+    switch (attachment.mimeKind) {
       case 'image':
-        return Icons.image_outlined;
-      case 'pdf':
-        return Icons.picture_as_pdf_outlined;
-      case 'video':
-        return Icons.videocam_outlined;
-      case 'audio':
-        return Icons.music_note_outlined;
+        return _buildImage();
+      case 'text':
+        return _buildText(theme);
       default:
-        return Icons.attach_file_outlined;
+        return _buildMeta(theme);
     }
   }
 
-  String _formatSize(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  Widget _buildImage() {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 420),
+      child: InteractiveViewer(
+        minScale: 0.5,
+        maxScale: 5,
+        child: Image.memory(
+          bytes,
+          fit: BoxFit.contain,
+          errorBuilder: (_, __, ___) =>
+              _AttachmentPlaceholder(label: attachment.filename),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildText(ThemeData theme) {
+    var text = utf8.decode(bytes, allowMalformed: true);
+    final truncated = text.length > _maxTextChars;
+    if (truncated) text = text.substring(0, _maxTextChars);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: double.infinity,
+          constraints: const BoxConstraints(maxHeight: 420),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: SingleChildScrollView(
+            child: SelectableText(
+              text,
+              style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+            ),
+          ),
+        ),
+        if (truncated)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              '内容较长，仅预览前 $_maxTextChars 个字符。',
+              style: theme.textTheme.labelSmall
+                  ?.copyWith(color: theme.colorScheme.outline),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildMeta(ThemeData theme) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(_attachmentIcon(attachment.mimeKind), size: 40),
+              const SizedBox(height: 12),
+              Text(
+                '类型：${_kindLabel(attachment.mimeKind)}',
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '大小：${_formatBytes(attachment.byteSize)}',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '此类型暂不支持内置预览，可点击下方「用系统默认应用打开」。',
+          style: theme.textTheme.labelSmall
+              ?.copyWith(color: theme.colorScheme.outline),
+        ),
+      ],
+    );
+  }
+
+  String _kindLabel(String mimeKind) {
+    switch (mimeKind) {
+      case 'image':
+        return '图片';
+      case 'pdf':
+        return 'PDF';
+      case 'video':
+        return '视频';
+      case 'audio':
+        return '音频';
+      case 'text':
+        return '文本';
+      case 'archive':
+        return '压缩包';
+      default:
+        return '文件';
+    }
   }
 }
 

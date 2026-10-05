@@ -25,6 +25,7 @@ enum DesktopCommandId {
   copy,
   paste,
   selectAll,
+  insertTable,
   findNotes,
 
   // 视图
@@ -68,6 +69,11 @@ abstract interface class EditorCommandTarget {
   void copy();
   void paste();
   void selectAll();
+
+  /// 打开「插入表格」面板（M9 / FR-44 / ui-spec §18.1）。
+  ///
+  /// 与格式工具栏的「表格」图标**同源同效**（命令单一来源，ADR-011 决策 5）。
+  void insertTable();
 
   /// 导出当前笔记（复用既有导出对话框）。
   void exportNote();
@@ -191,6 +197,16 @@ final Map<DesktopCommandId, DesktopCommand> desktopCommands = {
     isEnabled: (controller) => controller.canEditContent,
     invoke: (context, controller) =>
         controller.targetFor(controller.activeViewKey)?.selectAll(),
+  ),
+  DesktopCommandId.insertTable: DesktopCommand(
+    label: '插入表格',
+    // 与格式工具栏的「表格」图标同源（M9 / FR-44 / ui-spec §18.1）；预览态只读，
+    // 不给排版入口，故与其他排版命令一样受 canEditContent 约束。
+    isEnabled: (controller) =>
+        controller.canEditContent &&
+        controller.targetFor(controller.activeViewKey) != null,
+    invoke: (context, controller) =>
+        controller.targetFor(controller.activeViewKey)?.insertTable(),
   ),
   DesktopCommandId.findNotes: DesktopCommand(
     label: '查找',

@@ -941,6 +941,39 @@ class NoteRepository {
     });
   }
 
+  /// 外部编辑回写（FR-47 / §12.3）：把附件 [id] 的映射换到新内容地址 [newSha256]。
+  ///
+  /// 内容寻址下「同一 sha256 绝不就地覆盖」（BR-47.3 / ADR-013 决策5），故回写的
+  /// 本质是**换引用**：新字节已由调用方经 BlobStore 落盘（天然去重），此处只做
+  /// ① 改 `attachments.sha256`（连带 `byte_size`、`storage_ref`）；
+  /// ② 引用计数迁移——旧 sha −1、新 sha +1（旧值归零后由 LRU / GC 回收）。
+  /// 新旧一致或无该行时视为无变更，返回 `null`。
+  Future<Attachment?> updateAttachmentSha(
+    String id, {
+    required String newSha256,
+    required int newByteSize,
+  }) async {
+    final changed = await db.transaction(() async {
+      final prev = await (db.select(db.attachments)
+            ..where((t) => t.id.equals(id)))
+          .getSingleOrNull();
+      if (prev == null || prev.isDeleted || prev.sha256 == newSha256) {
+        return false;
+      }
+      await (db.update(db.attachments)..where((t) => t.id.equals(id)))
+          .write(AttachmentsCompanion(
+        sha256: Value(newSha256),
+        byteSize: Value(newByteSize),
+        storageRef: Value(newSha256),
+      ));
+      await _adjustBlobRef(prev.sha256, -1);
+      await _adjustBlobRef(newSha256, 1, byteSize: newByteSize);
+      return true;
+    });
+    if (!changed) return null;
+    return _attachmentById(id);
+  }
+
   Future<Attachment?> _attachmentById(String id) async {
     final row = await (db.select(db.attachments)..where((t) => t.id.equals(id)))
         .getSingleOrNull();
