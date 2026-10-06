@@ -1,7 +1,7 @@
 # 系统架构
 
 本文描述随手记 Sui 的整体架构、分层、数据模型、同步协议与关键设计决策。
-决策的**背景与权衡**见 [ADR](adr/)；接口细节见 [API 参考](api-reference.md)。
+决策的**背景与权衡**见架构决策记录（ADR）；接口细节见 [API 参考](api-reference.md)。
 
 ## 1. 总体架构
 
@@ -62,7 +62,7 @@
 ### 2.2 数据模型（SQLite，服务端）
 
 服务端库只承载**同步汇聚**所需的最小元数据，实际建表语句见
-[`server/internal/store/store.go`](../server/internal/store/store.go) 的 `migrate()`。
+[`server/internal/store/store.go`](https://gitee.com/evangubo/sui/blob/main/server/internal/store/store.go) 的 `migrate()`。
 
 | 表 | 用途 |
 |----|------|
@@ -129,7 +129,7 @@
 | `DeviceId` | 设备标识（冲突合并 / 来源标记用） |
 
 **本机数据表（drift，`schemaVersion = 6`）**：定义见
-[`clients/note_core/lib/src/db/app_database.dart`](../clients/note_core/lib/src/db/app_database.dart)。
+[`clients/note_core/lib/src/db/app_database.dart`](https://gitee.com/evangubo/sui/blob/main/clients/note_core/lib/src/db/app_database.dart)。
 
 | 表 | 用途 | 随同步上行 |
 |----|------|------------|
@@ -237,7 +237,7 @@
 ## 5. 附件存储策略（客户端侧）
 
 > 决策来源：M5 后讨论「客户端附件存储压力」。结论：采用 **B 方案（元数据全量同步 +
-> 附件按需拉取 + LRU 容量上限）**，放弃全量镜像。详见 [ADR-002](adr/)。
+> 附件按需拉取 + LRU 容量上限）**，放弃全量镜像。
 
 ### 5.1 问题
 
@@ -380,7 +380,6 @@ sui/
 ├── docs/                        # 详细文档
 │   ├── index.md / getting-started.md / architecture.md
 │   ├── api-reference.md / deployment.md / troubleshooting.md
-│   ├── adr/                     # 架构决策记录
 │   ├── guides/                  # 用户指南、网页剪藏
 │   └── examples/                # 代码示例
 ├── protos/                      # 同步协议定义（预留）
@@ -497,8 +496,7 @@ sui/
   （附件刷新以 `refreshAttachments` 返回值取自该笔记，**不回读**全局字段）。编辑器命令目标按
   **视图键**索引（主窗口固定 `kMainViewKey = 'main'`、独立窗口取窗口句柄），由焦点事件驱动
   `setActiveViewKey` 路由命令。生命周期：窗口注册表预置主窗口，关闭**全部**窗口即退出应用；菜单
-  「退出」= `flushPendingEdits` → 尽力推送 → 关闭全部窗口 → 退出（FR-42 / FR-43 / BR-42 / BR-43，
-  设计见 [ADR-012](adr/)）。接缝
+  「退出」= `flushPendingEdits` → 尽力推送 → 关闭全部窗口 → 退出（FR-42 / FR-43 / BR-42 / BR-43）。接缝
   `NoteWindowManager` / `WindowEventHub` 平台无关，窗口语义可在纯 Dart 单测中驱动（12 项）。
 - **编辑器编辑能力与附件体验增强（M9 / v0.10.0）**：在「Markdown 唯一正本」原则不变的前提下
   （架构零改动，与 M5 同一范式），补齐编辑器五大编辑能力：

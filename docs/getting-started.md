@@ -91,7 +91,6 @@ sui/
 ├── docs/                        # 详细文档（本目录，见 index.md）
 │   ├── index.md / getting-started.md / architecture.md
 │   ├── api-reference.md / deployment.md / troubleshooting.md
-│   ├── adr/                     # 架构决策记录
 │   ├── guides/                  # 用户指南、网页剪藏
 │   └── examples/                # 代码示例
 ├── server/                      # Go 服务端

@@ -9,7 +9,7 @@
 | 你的角色 | 建议阅读顺序 |
 |----------|--------------|
 | 想先跑起来 | [快速开始](getting-started.md) → [用户指南](guides/user-guide.md) |
-| 想理解系统 | [系统架构](architecture.md) → [架构决策记录](adr/) |
+| 想理解系统 | [系统架构](architecture.md) → 架构决策记录（ADR） |
 | 要对接接口 | [API 参考](api-reference.md) |
 | 要部署上线 | [部署指南](deployment.md) |
 | 遇到问题 | [故障排查](troubleshooting.md) |
@@ -26,7 +26,7 @@
 
 - [系统架构](architecture.md) —— 分层、数据模型、同步协议、附件策略、平台分层、目录结构
 - [API 参考](api-reference.md) —— HTTP 端点清单与 push / pull 载荷
-- [架构决策记录（ADR）](adr/) —— 关键决策的背景与权衡
+- 架构决策记录（ADR）—— 关键决策的背景与权衡（随项目技术文档单独维护，不随本仓库发布）
 - [代码示例](examples/api-usage.md) —— 端到端 REST 调用示例
 
 ### 运维
