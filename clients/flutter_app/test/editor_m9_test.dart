@@ -507,6 +507,58 @@ void main() {
     });
   });
 
+  group('TableAtomicDeleteWidget（FR-44 / §12.1.1 ⑥ / AC-140 / BR-44.6）', () {
+    late AppDatabase db;
+
+    // 正文：`前文\n| A | B |\n| --- | --- |\n| 1 | 2 |\n后文`
+    // 表格块区间 [3, 36)：table.start=3、table.end=36（end 不含行尾换行）。
+    const withAround = '前文\n| A | B |\n| --- | --- |\n| 1 | 2 |\n后文';
+
+    Future<void> cursorAt(WidgetTester tester, int offset) async {
+      await tester.tap(_contentField());
+      await tester.pump();
+      _contentValue(tester).selection = TextSelection.collapsed(offset: offset);
+      await tester.pump();
+    }
+
+    Future<void> press(WidgetTester tester, LogicalKeyboardKey key) async {
+      await tester.sendKeyEvent(key);
+      await tester.pump();
+    }
+
+    testWidgets('退格落在表格末尾（table.end）→ 整块删除整张表格，不再打回原形', (tester) async {
+      db = AppDatabase.memory();
+      await _pumpEditor(tester, db, 'm9t12-tabdel1', withAround);
+
+      await cursorAt(tester, 36); // 表格吸附终点 table.end
+      await press(tester, LogicalKeyboardKey.backspace);
+
+      expect(
+        _contentValue(tester).text,
+        '前文\n后文',
+        reason: '退格落在表格末尾须整块删除整张表格，绝不逐字符删掉末尾 `|` 致表格回退为原文（§12.1.1 ⑥ / BR-44.6）',
+      );
+
+      await db.close();
+    });
+
+    testWidgets('删除键未落在表格边界 → 表格逐字保留', (tester) async {
+      db = AppDatabase.memory();
+      await _pumpEditor(tester, db, 'm9t12-tabdel3', withAround);
+
+      await cursorAt(tester, 1); // 「前文」中间，远离表格
+      await press(tester, LogicalKeyboardKey.backspace);
+
+      final text = _contentValue(tester).text;
+      expect(text.contains('| --- | --- |'), isTrue,
+          reason: '非表格边界的删除键不得波及表格');
+      expect(text.contains('| 1 | 2 |'), isTrue);
+      expect(text.length, withAround.length - 1, reason: '仅逐字符删掉光标前一字符');
+
+      await db.close();
+    });
+  });
+
   group('AttachmentPanelWidget（FR-46 / FR-47）', () {
     late AppDatabase db;
 

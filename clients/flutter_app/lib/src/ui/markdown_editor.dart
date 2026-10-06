@@ -28,7 +28,7 @@ class MarkdownEditor extends StatelessWidget {
     this.focusNode,
     this.onBlockNewline,
     this.onSoftNewline,
-    this.onAttachmentDelete,
+    this.onStructuralDelete,
     this.showCursor = true,
   });
 
@@ -54,10 +54,11 @@ class MarkdownEditor extends StatelessWidget {
   /// （如表格单元格内插入 `<br>`），返回 false 表示交由默认行为；null 表示不拦截。
   final bool Function()? onSoftNewline;
 
-  /// 格式模式下退格 / 删除键的拦截钩子（FR-46 / §12.4）：返回 true 表示已就地
-  /// 整块删除附件引用或修复残缺引用，返回 false 表示交由默认逐字符删除；
-  /// null 表示不拦截。[backspace] 为 true 表示退格键，false 表示 Delete 键。
-  final bool Function({required bool backspace})? onAttachmentDelete;
+  /// 格式模式下退格 / 删除键的拦截钩子（FR-46 / FR-44 / §12.4 / §12.1.1）：返回 true 表示
+  /// 已就地处理——整块删除附件引用、修复残缺引用，或**整块删除表格**（表格边界删除）；
+  /// 返回 false 表示交由默认逐字符删除；null 表示不拦截。
+  /// [backspace] 为 true 表示退格键，false 表示 Delete 键。
+  final bool Function({required bool backspace})? onStructuralDelete;
 
   /// 是否显示正文光标。格式模式下光标落在嵌套的表格单元格内时（单元格是正文
   /// 焦点节点的子树），正文仍会因 `hasFocus` 而画出自己的光标，造成「两个光标」；
@@ -81,7 +82,7 @@ class MarkdownEditor extends StatelessWidget {
       focusNode: focusNode,
       onBlockNewline: onBlockNewline,
       onSoftNewline: onSoftNewline,
-      onAttachmentDelete: onAttachmentDelete,
+      onStructuralDelete: onStructuralDelete,
       showCursor: showCursor,
     );
   }
@@ -97,7 +98,7 @@ class _SourceEditor extends StatefulWidget {
     this.focusNode,
     this.onBlockNewline,
     this.onSoftNewline,
-    this.onAttachmentDelete,
+    this.onStructuralDelete,
     this.showCursor = true,
   });
 
@@ -108,7 +109,7 @@ class _SourceEditor extends StatefulWidget {
   final FocusNode? focusNode;
   final bool Function()? onBlockNewline;
   final bool Function()? onSoftNewline;
-  final bool Function({required bool backspace})? onAttachmentDelete;
+  final bool Function({required bool backspace})? onStructuralDelete;
   final bool showCursor;
 
   @override
@@ -214,7 +215,7 @@ class _SourceEditorState extends State<_SourceEditor> {
   Widget _wrapKeys(Widget child) {
     final newline = widget.onBlockNewline;
     final softNewline = widget.onSoftNewline;
-    final del = widget.onAttachmentDelete;
+    final del = widget.onStructuralDelete;
     if (newline == null && softNewline == null && del == null) return child;
     return Focus(
       canRequestFocus: false,

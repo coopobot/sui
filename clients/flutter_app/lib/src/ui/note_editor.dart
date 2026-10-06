@@ -443,12 +443,13 @@ class _NoteEditorState extends State<NoteEditor>
     if (_mode != EditorMode.preview) _contentFocus.requestFocus();
   }
 
-  /// 格式模式下退格 / 删除键的附件引用处理（FR-46 / §12.4）。
+  /// 格式模式下退格 / 删除键的**结构化删除**处理（FR-46 / FR-44 / §12.4 / §12.1.1）。
   ///
-  /// 优先级：残缺引用**就地修复**（补 `)`，AC-147）→ 引用边界**整块删除**
-  /// （AC-145 / AC-146）。命中返回 true 抑制默认逐字符删除；未命中返回 false。
-  /// 仅在格式模式 + 折叠光标时生效，源码模式保持原始文本语义（AC-147）。
-  bool _handleAttachmentDelete({required bool backspace}) {
+  /// 优先级：残缺引用**就地修复**（补 `)`，AC-147）→ 附件引用边界**整块删除**
+  /// （AC-145 / AC-146）→ 表格边界**整块删除**（AC-140 / BR-44.6）。命中返回 true
+  /// 抑制默认逐字符删除；未命中返回 false。仅在格式模式 + 折叠光标时生效，
+  /// 源码模式保持原始文本语义（AC-147）。
+  bool _handleStructuralDelete({required bool backspace}) {
     if (_mode != EditorMode.formatted) return false;
     final sel = _content.value.selection;
     if (!sel.isValid || !sel.isCollapsed) return false;
@@ -463,9 +464,23 @@ class _NoteEditorState extends State<NoteEditor>
       sel.extentOffset,
       backspace: backspace,
     );
-    if (ref == null) return false;
-    _writeBack(EditorFormat.deleteAttachmentRef(text, ref));
-    return true;
+    if (ref != null) {
+      _writeBack(EditorFormat.deleteAttachmentRef(text, ref));
+      return true;
+    }
+    // 表格作为原子单元：把表格看作一个整体——退格落在表格末尾 / Delete 落在表格起首
+    // 时**整块删除**整张表格，绝不把删除键落到表格内部字符（如末尾 `|`）导致源码损坏、
+    // 表格非法回退为原文（「打回原形」，§12.1.1 ⑥）。
+    final table = EditorFormat.tableForDeletion(
+      text,
+      sel.extentOffset,
+      backspace: backspace,
+    );
+    if (table != null) {
+      _writeBack(EditorFormat.deleteTable(text, table));
+      return true;
+    }
+    return false;
   }
 
   /// 快捷键映射（§9）：与工具栏指令**同源**，仅改写正本、不产生新保存语义。
@@ -913,8 +928,8 @@ class _NoteEditorState extends State<NoteEditor>
                   _mode == EditorMode.formatted ? _handleBlockNewline : null,
               onSoftNewline:
                   _mode == EditorMode.formatted ? _handleSoftNewline : null,
-              onAttachmentDelete: _mode == EditorMode.formatted
-                  ? _handleAttachmentDelete
+              onStructuralDelete: _mode == EditorMode.formatted
+                  ? _handleStructuralDelete
                   : null,
             ),
           ),

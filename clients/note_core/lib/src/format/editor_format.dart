@@ -1695,6 +1695,62 @@ abstract final class EditorFormat {
     return FormatResult(newText, caret, caret);
   }
 
+  /// 判断一次删除键是否应触发**整块删除**整张表格（BR-44.6 / §12.1.1 ⑥）。
+  ///
+  /// 表格是原子单元（承 §12.1 / BR-44.2），正文光标经吸附只能停在表格前一行或表格末尾；
+  /// 若把 `Backspace` / `Delete` 落到表格内部字符（如末尾 `|`）会改坏管道表源码，
+  /// 使 `parseTable(...).wellFormed` 转假，表格**非法回退为原文**（「打回原形」）。
+  ///
+  /// - `backspace == true`：删除点（`offset − 1`）落在表格字符区间 `[start, end)` 内 → 命中
+  ///   （含 `offset == end`，即退格删掉末尾 `|` 的根因场景）；
+  /// - `backspace == false`：删除点（`offset`）落在 `[start, end)` 内 → 命中（含 `offset == start`）。
+  ///
+  /// 命中时返回该表格，调用方应整块删除（不进入逐字符删除）；否则返回 null。
+  /// 仅**合规**表格（`wellFormed`）参与判定——残缺 / 非法表按普通文本透传（BR-44.5）。
+  static ParsedTable? tableForDeletion(
+    String source,
+    int offset, {
+    required bool backspace,
+  }) {
+    final pos = offset.clamp(0, source.length);
+    var from = 0;
+    while (from < source.length) {
+      final table = parseTable(source, from);
+      if (table == null) {
+        final nl = source.indexOf('\n', from);
+        if (nl == -1) break;
+        from = nl + 1;
+        continue;
+      }
+      if (table.wellFormed) {
+        final s = table.start;
+        final e = table.end;
+        if (backspace && pos > s && pos <= e) return table; // 退格落在表格字符上
+        if (!backspace && pos >= s && pos < e) return table; // Delete 落在表格字符上
+      }
+      if (table.end >= source.length) break;
+      from = table.end + 1;
+    }
+    return null;
+  }
+
+  /// 整块删除一张表格，返回新正本与新光标位置（作为**一次**可撤销编辑，BR-44.6）。
+  ///
+  /// 连同表格块**行尾换行**一并移除；表格位于文末（无后续换行）时改删**前导换行**，
+  /// 避免残留空行。表格之外字符**逐字不动**（守 §4.1）。
+  static FormatResult deleteTable(String text, ParsedTable table) {
+    var s = table.start.clamp(0, text.length);
+    var e = table.end.clamp(0, text.length);
+    if (e < text.length && text[e] == '\n') {
+      e = e + 1; // 表格块后带换行：连行尾换行一起删
+    } else if (s > 0 && text[s - 1] == '\n') {
+      s = s - 1; // 表格位于文末：删前导换行，避免残留空行
+    }
+    final newText = text.substring(0, s) + text.substring(e);
+    final caret = s.clamp(0, newText.length);
+    return FormatResult(newText, caret, caret);
+  }
+
   /// 就地修复**残缺引用**（缺 `)`）：补上闭合括号。
   ///
   /// 返回新文本与光标；[ref] 非残缺时原样返回（无操作）。供 §12.4「残缺自愈」。

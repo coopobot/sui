@@ -1065,6 +1065,86 @@ void main() {
       expect(EditorFormat.repairAttachmentRef(good, ref).text, good);
     });
   });
+
+  group('TableAtomicDelete（FR-44 / §12.1.1 ⑥ / BR-44.6 / AC-140）', () {
+    const tableSrc = '| a | b |\n| --- | --- |\n| 1 | 2 |';
+    // 表格块区间 [3, 36)：`table.start = 3`、`table.end = 36`（`end` 不含行尾换行）。
+    const src = '前文\n$tableSrc\n后文';
+
+    ParsedTable tableOf(String text) => EditorFormat.parseTable(text, 3)!;
+
+    test('退格落在表格末尾（table.end）→ 整块命中整张表格', () {
+      final t = tableOf(src);
+      expect(t.wellFormed, isTrue);
+      final hit = EditorFormat.tableForDeletion(src, t.end, backspace: true);
+      expect(hit, isNotNull, reason: '退格删末尾 `|` 的根因场景须整块命中（⑥）');
+      expect(hit!.start, t.start);
+      expect(hit.end, t.end);
+    });
+
+    test('Delete 落在表格起首（table.start）→ 整块命中', () {
+      final t = tableOf(src);
+      final hit = EditorFormat.tableForDeletion(src, t.start, backspace: false);
+      expect(hit, isNotNull, reason: '文首表格光标停在 table.start 时须整块命中');
+      expect(hit!.start, t.start);
+    });
+
+    test('退格落在表格内部字符 → 整块命中（不进入逐字符删除）', () {
+      final t = tableOf(src);
+      expect(
+        EditorFormat.tableForDeletion(src, t.start + 2, backspace: true),
+        isNotNull,
+      );
+    });
+
+    test('退格落在表格前一字符（表格外）→ 不命中，交由普通删除', () {
+      final t = tableOf(src);
+      expect(
+        EditorFormat.tableForDeletion(src, t.start, backspace: true),
+        isNull,
+        reason: '删除点是表格前一行字符，不得误伤表格',
+      );
+    });
+
+    test('整块删除：连同表格块行尾换行一并移除，表格外字符逐字不动', () {
+      final t = tableOf(src);
+      final r = EditorFormat.deleteTable(src, t);
+      expect(r.text, '前文\n后文');
+      expect(r.selectionStart, r.selectionEnd);
+      expect(r.selectionStart, 3, reason: '光标落回被删表格原起点');
+    });
+
+    test('整块删除：表格位于文末（无后续换行）→ 删前导换行，无残留空行', () {
+      const endSrc = '前文\n$tableSrc';
+      final t = tableOf(endSrc);
+      expect(EditorFormat.deleteTable(endSrc, t).text, '前文');
+    });
+
+    test('一次编辑即整块删除（单次可撤销，AC-140）', () {
+      final t = tableOf(src);
+      final r = EditorFormat.deleteTable(src, t);
+      expect(src.length - r.text.length, t.end - t.start + 1,
+          reason: '删除长度等于整张表格 + 行尾换行，即一次原子操作');
+    });
+
+    test('残缺 / 非法表格（wellFormed=false）不参与整块删除（BR-44.5）', () {
+      const bad = '前文\n| a | b |\n| 1 | 2 |\n后文';
+      final t = EditorFormat.parseTable(bad, 3)!;
+      expect(t.wellFormed, isFalse);
+      expect(
+        EditorFormat.tableForDeletion(bad, t.end, backspace: true),
+        isNull,
+        reason: '残缺表按普通文本透传，不整块删除',
+      );
+    });
+
+    test('无表格时返回 null', () {
+      expect(
+        EditorFormat.tableForDeletion('普通段落\n又一段', 3, backspace: true),
+        isNull,
+      );
+    });
+  });
 }
 
 /// 统计两个等长字符串在同一位置的差异字符数（不等长返回 -1）。
