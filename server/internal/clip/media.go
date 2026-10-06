@@ -33,7 +33,10 @@ const (
 )
 
 // mediaUserAgent 是服务端出网下载图片时声明的 UA（部分站点据此返回原图）。
-const mediaUserAgent = "SuiClip/0.7 (+https://gitee.com/evangubo/sui)"
+// 括号注释位按爬虫惯例标注项目公开地址（形如 Googlebot/2.1 (+http://...)）：
+// 便于被访问站点识别来源、倾向放行而非拦截；删除它功能上仍可运行，但会失去这一层可识别性。
+// 不要伪装成浏览器 UA——部分 CDN 会据此返回压缩/缩略图，反而拿不到原图。
+const mediaUserAgent = "SuiClip/0.7 (+https://coopobot.github.io/sui/)"
 
 // Options 控制剪藏净化与媒体本地化行为（M6 / FR-37 / FR-38）。
 type Options struct {
