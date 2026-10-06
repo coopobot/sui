@@ -262,6 +262,10 @@ class _SourceEditorState extends State<_SourceEditor> {
 ///
 /// 任务列表勾选框由 GFM 语法原生渲染；`==高亮==` 是本次新增的扩展语法，需
 /// 自带行内解析与元素构建器，方能在预览态同样呈现为高亮（BR-31.5 / §10.2）。
+/// 行内软换行 `<br>`（表格单元格的格内换行写法，见 [EditorFormat.tableSoftNewline]）
+/// 亦由本类自注册行内语法解析为 **`br` 元素**，交回 flutter_markdown 原生换行分支
+/// ——否则 `markdown` 的 `InlineHtmlSyntax` 会把它当**普通文本透传**，预览里露出字面量
+/// `<br>`（§12.1.3「⑪」）。
 class MarkdownPreview extends StatelessWidget {
   const MarkdownPreview({super.key, required this.text, this.imageBuilder});
   final String text;
@@ -277,14 +281,36 @@ class MarkdownPreview extends StatelessWidget {
         data: text,
         selectable: true,
         sizedImageBuilder: imageBuilder,
-        // 与默认 GFM 扩展集叠加（markdown 的 Document 会将二者合并）。
-        inlineSyntaxes: <md.InlineSyntax>[_HighlightSyntax()],
+        // 与默认 GFM 扩展集叠加（markdown 的 `Document` 会把二者并入同一个**插入序**集合，
+        // 且**先加入本参数**——故这里的语法总是**先于**扩展集里的 `InlineHtmlSyntax` 命中）。
+        inlineSyntaxes: <md.InlineSyntax>[_HighlightSyntax(), _LineBreakSyntax()],
         builders: <String, MarkdownElementBuilder>{
           'mark': _HighlightBuilder(),
         },
         styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
       ),
     );
+  }
+}
+
+/// 预览态行内软换行 `<br>`（含 `<br/>` / `<br />`）的行内语法（§12.1.3「⑪」）。
+///
+/// 背景：`markdown` 7.3.1 的 `InlineHtmlSyntax` **继承 `TextSyntax` 且替换文本为空**，
+/// 命中后走「无替换即 `advanceBy`」分支——把标签**原文并回文本缓冲当普通文本**，
+/// 既不产出 HTML 元素也不丢弃。于是 flutter_markdown 里
+/// `tag == 'br'` → `RichText('\n')` 的**原生换行分支永远不可达**，预览只能露出字面量 `<br>`。
+///
+/// 本语法把 `<br>` 还原为 **`br` 元素**（`Element.empty`），换行交回 flutter_markdown
+/// 原生分支处理（表格单元格内经 `_mergeInlineChildren` 并入该格 RichText，即格内真实换行）；
+/// **正本一字不改**（`<br>` 仍是格内换行的唯一写法，守 BR-44.2 / BR-23.1）。
+class _LineBreakSyntax extends md.InlineSyntax {
+  _LineBreakSyntax()
+      : super(r'<br\s*/?>', startCharacter: 0x3C, caseSensitive: false);
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(md.Element.empty('br'));
+    return true;
   }
 }
 
