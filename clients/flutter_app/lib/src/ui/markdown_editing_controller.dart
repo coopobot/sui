@@ -261,6 +261,13 @@ class MarkdownEditingController extends TextEditingController {
     return spans;
   }
 
+  /// 跨行区间（表格）补齐文本所用的**零宽、禁断行**填充字符（`U+2060` WORD JOINER）。
+  ///
+  /// 补齐文本必须与正本**等码元**（偏移契约，BR-27.1），故不能直接删掉区间内的 `\n`；
+  /// 但原样保留的 `\n` 会逐行建立行盒、叠加 strut 最小行高，在表格下方撑出**光标不可达、
+  /// 不可删的空行**（§12.1.1「表格后占位行」）。以 `U+2060` 顶替 `\n` / `\r` 即可两全。
+  static const String _noBreakFill = '\u2060';
+
   /// 把单个呈现单元区间替换为对应 widget，并用零宽透明文本补齐剩余码元。
   List<InlineSpan> _regionSpans(
     BuildContext context,
@@ -295,7 +302,8 @@ class MarkdownEditingController extends TextEditingController {
     } else if (region.kind == _RegionKind.table) {
       // 表格呈现单元：整块 GFM 管道表（FR-44 / §12.1）。表格为**独占块**，
       // 行顶对齐（top）使其自首行位置**向下扩展**，后续文字整体下移（承 §5.5 块级呈现）。
-      // 区间首字符由 WidgetSpan 占位，其余（含表内换行）以零宽透明文本补齐，偏移保真。
+      // 区间首字符由 WidgetSpan 占位，其余（含表内换行，换行以 `U+2060` 顶替）以零宽
+      // 透明文本补齐，偏移保真且不撑出空行（见下方 §12.1.1「表格后占位行」说明）。
       alignment = PlaceholderAlignment.top;
       child = formatTableBuilder!(context, region.table!);
     } else {
@@ -311,8 +319,19 @@ class MarkdownEditingController extends TextEditingController {
     // 区间首字符由 WidgetSpan 的 1 个码元占位，其余用零宽透明文本补齐。
     final restStart = region.start + 1;
     if (region.end - restStart > 0) {
+      // 表格是**唯一跨行**的呈现单元：其区间内含有表内 `\n`（`rows×cols` 表共 `rows−1` 个）。
+      // 补齐文本若原样保留这些 `\n`，会在 WidgetSpan 之后**逐行建立行盒**，叠加
+      // `StrutStyle(forceStrutHeight: false)` 的最小行高，撑出多个**可见、光标不可达、
+      // 不可删的空行**（表格行数越多空行越多，§12.1.1「表格后占位行」）。故把 `\n` / `\r`
+      // 顶替为**等码元、零宽、禁断行**的 `U+2060`——既维持 `toPlainText()` 与正本等长
+      // （偏移契约，BR-27.1 / §4.1），又不产生任何额外行盒。单行区间（图片 / 勾选框 /
+      // 附件链接 / 有序编号）不含换行，保持逐字透传。
+      final raw = text.substring(restStart, region.end);
+      final fill = region.kind == _RegionKind.table
+          ? raw.replaceAll('\r', _noBreakFill).replaceAll('\n', _noBreakFill)
+          : raw;
       out.add(TextSpan(
-        text: text.substring(restStart, region.end),
+        text: fill,
         style: base.copyWith(color: Colors.transparent, fontSize: 0),
       ));
     }

@@ -218,7 +218,7 @@ void main() {
     });
   });
 
-  group('表格交互导航（回归：方向键不改写正本 / 幽灵行可删）', () {
+  group('表格交互导航（回归：方向键不改写正本 / 幽灵行可删 / 无表格后占位行）', () {
     late AppDatabase db;
 
     testWidgets('单元格内方向键不改写正本', (tester) async {
@@ -274,6 +274,61 @@ void main() {
       await tester.tap(delBtn);
       await tester.pump();
       expect(ctrl.text, base, reason: '删除行应精确移除刚新增的空行，回到原表');
+
+      await db.close();
+    });
+
+    testWidgets('表格区间补齐文本禁换行：格式模式下方不产生随行数增长的占位行', (tester) async {
+      db = AppDatabase.memory();
+      // 3×3 表（表头 + 分隔行 + 2 数据行 = 4 行）：区间内含 **3 个表内换行**，旧实现正是
+      // 逐个换行建立行盒、在表格下方撑出可见却光标不可达、不可删的「占位行」；
+      // 每新增一行就多一个表内换行 → 多一个占位行。
+      const source = '|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n';
+      await _pumpEditor(tester, db, 'm9t12-nav3', source);
+
+      expect(find.byType(FormatTableView), findsOneWidget, reason: '格式模式应呈现表格单元');
+      final ctrl = _contentValue(tester) as MarkdownEditingController;
+      expect(ctrl.text, source, reason: '呈现不得改动正本');
+
+      final span = ctrl.buildTextSpan(
+        context: tester.element(_contentField()),
+        style: const TextStyle(),
+        withComposing: false,
+      );
+
+      // 偏移契约：span 树纯文本仍与正本逐码元等长（BR-27.1 / AC-154）。
+      expect(
+        span.toPlainText().length,
+        ctrl.text.length,
+        reason: '换行替身必须等码元，否则光标定位会错位',
+      );
+
+      final children = span.children!;
+      expect(
+        children.whereType<WidgetSpan>().length,
+        1,
+        reason: '整块表格折叠为一个 WidgetSpan 占位单元',
+      );
+      final tableIdx = children.indexWhere((s) => s is WidgetSpan);
+      final fill = children[tableIdx + 1] as TextSpan;
+      expect(
+        fill.text!.contains('\n'),
+        isFalse,
+        reason: '表格区间补齐文本含 `\\n` 会逐行建立行盒，在 strut 最小行高下撑出占位行（§12.1.1）',
+      );
+      // 表内换行数 = 正本换行数 − 表尾那 1 个块外换行（`rows:3` 生成表头 + 分隔 + 2 数据行 = 4 行）。
+      final internalNewlines = '\n'.allMatches(source).length - 1;
+      expect(internalNewlines, 3, reason: '3×3 表格正本应为 4 行（3 个表内换行）');
+      expect(
+        '\u2060'.allMatches(fill.text!).length,
+        internalNewlines,
+        reason: '每个表内换行都应以零宽禁断行字符 `U+2060` 顶替，维持等长且不换行',
+      );
+      expect(
+        '\n'.allMatches(span.toPlainText()).length,
+        1,
+        reason: '整棵呈现文本只应保留表格块**外**那 1 个段间换行，不得残留表内换行',
+      );
 
       await db.close();
     });
