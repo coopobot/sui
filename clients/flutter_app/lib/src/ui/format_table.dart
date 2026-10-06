@@ -2,6 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:note_core/note_core.dart';
 
+/// 单元格内「附件引用」**原子呈现单元**的构建器（§12.1.2 / FR-46 / BR-46.6）。
+///
+/// [text] 为单元格**显示文本**（`<br>` 已还原为换行），[ref] 为其内的附件引用区间
+/// （偏移相对 [text]，与单元格光标同一套偏移）；[selected] 由单元格自身光标判定
+/// （单击选中态）；[onSelect] 由单元格提供——把光标落到引用末尾、激活本格并夺取焦点。
+/// 由 UI 层注入并与**正文同源**（同一批呈现单元 widget）；未注入时引用退化为普通文本，
+/// 不影响正本与偏移。
+typedef TableCellUnitBuilder = Widget Function(
+  BuildContext context,
+  String text,
+  AttachmentRef ref, {
+  required bool selected,
+  required VoidCallback onSelect,
+});
+
 /// 格式模式下的**可视化表格**呈现单元（M9-T06 / FR-44 / ui-spec §18.1）。
 ///
 /// 表格正本一律是 GFM 管道表（BR-44.2）；本组件只负责「格式」模式下的网格呈现与
@@ -23,6 +38,7 @@ class FormatTableView extends StatefulWidget {
     required this.onSetAlignment,
     this.onInsertAttachment,
     this.availableWidth,
+    this.cellUnitBuilder,
   });
 
   /// 当前解析结果（来自正本；单元格文本保留 `\|` 转义原样）。
@@ -54,6 +70,12 @@ class FormatTableView extends StatefulWidget {
 
   /// 编辑区可用宽度（按列均分单元格宽度）；缺省 / 非有限时按每列 140 估算。
   final double? availableWidth;
+
+  /// 单元格内**附件引用**的原子呈现单元构建器（§12.1.2 / FR-46 / BR-46.6）。
+  ///
+  /// 由 UI 层注入并与**正文同源**（同一批呈现单元 widget）；未注入时引用退化为普通文本，
+  /// 不影响正本与偏移。
+  final TableCellUnitBuilder? cellUnitBuilder;
 
   @override
   State<FormatTableView> createState() => _FormatTableViewState();
@@ -276,6 +298,7 @@ class _FormatTableViewState extends State<FormatTableView> {
             active: _activeRow == rowIndex && _activeCol == c,
             focusOnMount: _focusOnMount,
             caretOnActivate: _pendingCaret,
+            unitBuilder: widget.cellUnitBuilder,
             onActivate: () => _activate(rowIndex, c),
             onCommit: (value) => widget.onSetCell(rowIndex, c, value),
           ),
@@ -395,6 +418,7 @@ class _FormatTableCell extends StatefulWidget {
     required this.onCommit,
     this.focusOnMount = false,
     this.caretOnActivate,
+    this.unitBuilder,
   });
 
   final String initial;
@@ -413,12 +437,15 @@ class _FormatTableCell extends StatefulWidget {
   /// `null` 表示不干预（点击激活时保持 TextField 自身的点击定位）。
   final int? caretOnActivate;
 
+  /// 单元格内附件引用的原子呈现单元构建器（§12.1.2 / BR-46.6）；`null` 时引用按普通文本显示。
+  final TableCellUnitBuilder? unitBuilder;
+
   @override
   State<_FormatTableCell> createState() => _FormatTableCellState();
 }
 
 class _FormatTableCellState extends State<_FormatTableCell> {
-  late final TextEditingController _controller;
+  late final TableCellEditingController _controller;
   final FocusNode _focus = FocusNode();
   String? _lastCommitted; // 上次提交的 Markdown 正本值（含 `<br>`），避免重复提交
 
@@ -431,7 +458,13 @@ class _FormatTableCellState extends State<_FormatTableCell> {
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: _brToNewline(widget.initial));
+    _controller = TableCellEditingController(text: _brToNewline(widget.initial))
+      ..unitBuilder = widget.unitBuilder
+      // 单击选中附件呈现单元：激活本格并夺取焦点，随后退格即可整块删除（§12.1.2）。
+      ..onUnitSelected = () {
+        widget.onActivate();
+        _focus.requestFocus();
+      };
     _lastCommitted = widget.initial;
     _focus.addListener(() {
       if (!_focus.hasFocus) _commit();
@@ -449,6 +482,8 @@ class _FormatTableCellState extends State<_FormatTableCell> {
   @override
   void didUpdateWidget(covariant _FormatTableCell oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // 注入的构建器随上层重建而变化（闭包每次 build 都是新实例），须同步给控制器。
+    _controller.unitBuilder = widget.unitBuilder;
     // 仅在「外部内容确实变了且本单元格未聚焦」时同步，避免输入过程中被刷掉。
     if (widget.initial != oldWidget.initial &&
         widget.initial != _lastCommitted &&
@@ -497,6 +532,96 @@ class _FormatTableCellState extends State<_FormatTableCell> {
     widget.onCommit(value);
   }
 
+  /// 单元格内 `Backspace` / `Delete`：**在本格内就地完成**（§12.1.2 / BR-44.8）。
+  ///
+  /// 三级处理，与正文口径一致：① **残缺引用**命中 → 就地补齐自愈；② **附件引用**命中
+  /// （光标在引用内部 / 退格落在引用**末尾** / `Delete` 落在引用**起点**）→ **整块删除**
+  /// （一次可撤销，BR-46.1 / BR-46.2 / BR-46.5）；③ 否则按**选区 / 单字符**删除
+  /// （跳过代理对，不劈开 emoji）。
+  ///
+  /// **为何不「返回 `ignored` 交给单元格自身的文本编辑动作」**：实测该按键会一路漏到
+  /// **外层编辑器**的 `EditableText`——外层 `DeleteCharacterIntent` 作用在表格 `WidgetSpan`
+  /// 的占位字符上，实测把**整段表格正本清空**（`note=[]`）。故必须在本格就地消费、绝不漏泡
+  /// （这正是旧实现「无条件吞掉」的原始动机，只是吞掉后忘了自己删）。
+  void _handleCellDelete({required bool backspace}) {
+    final sel = _controller.selection;
+    if (!sel.isValid) return;
+    // 显示文本（`<br>` 已还原为换行）——引用区间扫描与光标共用同一套偏移。
+    final text = _controller.text;
+
+    if (!sel.isCollapsed) {
+      final s = sel.start.clamp(0, text.length);
+      final e = sel.end.clamp(0, text.length);
+      _writeCellValue(text.substring(0, s) + text.substring(e), s);
+      return;
+    }
+
+    final pos = sel.extentOffset.clamp(0, text.length);
+    final at = EditorFormat.attachmentRefAt(text, pos);
+    if (at != null && at.corrupt) {
+      final fixed = EditorFormat.repairAttachmentRef(text, at);
+      _writeCellValue(fixed.text, fixed.selectionStart);
+      return;
+    }
+    final ref = EditorFormat.attachmentRefForDeletion(
+      text,
+      pos,
+      backspace: backspace,
+    );
+    if (ref != null) {
+      final result = EditorFormat.deleteAttachmentRef(text, ref);
+      _writeCellValue(result.text, result.selectionStart);
+      return;
+    }
+
+    if (backspace) {
+      if (pos == 0) return; // 已在格首：无操作（事件仍由调用方吞掉，绝不漏泡）
+      final cut = _surrogateSafeBackward(text, pos);
+      _writeCellValue(text.substring(0, cut) + text.substring(pos), cut);
+    } else {
+      if (pos >= text.length) return; // 已在格尾：无操作
+      final cut = _surrogateSafeForward(text, pos);
+      _writeCellValue(text.substring(0, pos) + text.substring(cut), pos);
+    }
+  }
+
+  /// 退格删除点：落点是**低位代理**时再回退一格，避免劈开代理对（emoji / 罕用字）。
+  static int _surrogateSafeBackward(String text, int off) {
+    final cut = off - 1;
+    if (cut > 0 &&
+        _isLowSurrogate(text.codeUnitAt(cut)) &&
+        _isHighSurrogate(text.codeUnitAt(cut - 1))) {
+      return cut - 1;
+    }
+    return cut;
+  }
+
+  /// 向前删除的终点：落点是**高位代理**时再吞掉其低位代理。
+  static int _surrogateSafeForward(String text, int off) {
+    final cut = off + 1;
+    if (cut < text.length &&
+        _isHighSurrogate(text.codeUnitAt(off)) &&
+        _isLowSurrogate(text.codeUnitAt(cut))) {
+      return cut + 1;
+    }
+    return cut;
+  }
+
+  static bool _isHighSurrogate(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
+
+  static bool _isLowSurrogate(int unit) => unit >= 0xDC00 && unit <= 0xDFFF;
+
+  /// 把单元格编辑器内容改成 [text] 并把光标落到 [caret]，随后提交回正本。
+  void _writeCellValue(String text, int caret) {
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(
+        offset: caret.clamp(0, text.length),
+      ),
+    );
+    _commit();
+  }
+
   TextAlign get _textAlign => switch (widget.align) {
         TableColumnAlign.center => TextAlign.center,
         TableColumnAlign.right => TextAlign.right,
@@ -543,11 +668,15 @@ class _FormatTableCellState extends State<_FormatTableCell> {
       return KeyEventResult.handled;
     }
 
-    // 退格 / Delete：当单元格自身消费不了（光标在边界 / 空单元格）时，事件会漏泡到
-    // 外层编辑器，被外层 EditableText 解读为「删除表格（WidgetSpan）字符」，进而把整段
-    // 表格 Markdown 回灌进正本造成污染。这里一旦收到漏泡的退格 / Delete，就地吞掉。
+    // 退格 / Delete：**必须在本格内生效**（§12.1.2 / BR-44.8）——旧实现为防「漏泡到外层
+    // 编辑器」而无条件吞掉这两个键，实测结果是单元格内**无法删除任何字符**。现在改为**就地
+    // 删除**（残缺引用自愈 / 附件整块删除 / 否则按选区或单字符删除），事件**一律吞掉**。
+    // 绝不返回 `ignored`：实测该按键会漏到外层编辑器，把整段表格正本清空（见 _handleCellDelete）。
     if (key == LogicalKeyboardKey.backspace ||
         key == LogicalKeyboardKey.delete) {
+      if (isDown || isRepeat) {
+        _handleCellDelete(backspace: key == LogicalKeyboardKey.backspace);
+      }
       return KeyEventResult.handled;
     }
 
@@ -752,3 +881,131 @@ class _TableBarDivider extends StatelessWidget {
 
 /// 还原单元格字面文本：把 `\|` 还原为 `|`（展示用；写出时再转义，BR-44.4）。
 String _unescapeCell(String raw) => raw.replaceAll(r'\|', '|');
+
+/// 单元格专用编辑控制器：把单元格文本中的**附件引用**渲染为**原子呈现单元**
+/// （§12.1.2 / FR-46 / BR-46.6）。
+///
+/// 与正文 `MarkdownEditingController`（`markdown_editing_controller.dart`）**同一范式**：
+/// 引用区间替换为 [WidgetSpan]（区间**首码元**由 widget 占位、**其余码元**以零宽禁断行的
+/// `U+2060` 补齐），使整棵 span 树的 `toPlainText()` 与控制器文本**等长**——光标定位、
+/// 命中测试与选区偏移全部照旧（守 §4.1 / BR-27.1 偏移契约），**正本一字不改**。
+///
+/// 与正文的差异：单元格只做**附件引用**一种呈现单元（表格 / 勾选框 / 有序编号等由外层
+/// 控制器负责），且不做 Markdown 逐字符样式——单元格文本仍是可编辑的原始 Markdown。
+class TableCellEditingController extends TextEditingController {
+  TableCellEditingController({super.text});
+
+  /// 附件引用 → 原子呈现单元的构建器（UI 层注入；未注入时引用按普通文本显示）。
+  TableCellUnitBuilder? unitBuilder;
+
+  /// 单击选中某个引用后的回调（单元格据此激活本格并夺取焦点）。
+  VoidCallback? onUnitSelected;
+
+  /// 显示文本中的附件引用（含图片紧随的尺寸属性块），按出现顺序。
+  List<AttachmentRef> get attachmentRefs => EditorFormat.attachmentRefs(text);
+
+  /// 把光标落到 [ref] **末尾**（与正文「单击选中」口径一致，便于随后整块删除）。
+  void selectRef(AttachmentRef ref) {
+    final pos = ref.end.clamp(0, text.length);
+    if (selection.baseOffset != pos || !selection.isCollapsed) {
+      selection = TextSelection.collapsed(offset: pos);
+    }
+    onUnitSelected?.call();
+  }
+
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    final builder = unitBuilder;
+    if (builder == null) {
+      return super.buildTextSpan(
+        context: context,
+        style: style,
+        withComposing: withComposing,
+      );
+    }
+    final refs = attachmentRefs;
+    if (refs.isEmpty) {
+      return super.buildTextSpan(
+        context: context,
+        style: style,
+        withComposing: withComposing,
+      );
+    }
+    final base = style ?? const TextStyle();
+    final composing = withComposing ? value.composing : TextRange.empty;
+    final sel = value.selection;
+    final out = <InlineSpan>[];
+    var cursor = 0;
+    for (final ref in refs) {
+      if (ref.start < cursor || ref.end > text.length || ref.end <= ref.start) {
+        continue; // 与上一区间重叠 / 越界：跳过（防御，不破坏偏移）
+      }
+      if (ref.start > cursor) {
+        _addRun(out, text.substring(cursor, ref.start), cursor, base, composing);
+      }
+      final selected = sel.isValid &&
+          sel.isCollapsed &&
+          sel.start >= ref.start &&
+          sel.start <= ref.end;
+      out.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: builder(
+          context,
+          text,
+          ref,
+          selected: selected,
+          onSelect: () => selectRef(ref),
+        ),
+      ));
+      // 区间首码元由 WidgetSpan 占位，其余码元以**零宽、禁断行**字符等码元补齐（BR-27.1）。
+      final fill = ref.end - ref.start - 1;
+      if (fill > 0) {
+        out.add(TextSpan(
+          text: _zeroWidthFill * fill,
+          style: base.copyWith(color: Colors.transparent, fontSize: 0),
+        ));
+      }
+      cursor = ref.end;
+    }
+    if (cursor < text.length) {
+      _addRun(out, text.substring(cursor), cursor, base, composing);
+    }
+    return TextSpan(style: base, children: out);
+  }
+
+  /// 零宽、禁断行的填充字符（`U+2060` WORD JOINER）：等码元补齐引用区间余下字符，
+  /// 既维持偏移契约又不产生任何行盒 / 断行点（同 §12.1.1「表格后占位行」口径）。
+  static const String _zeroWidthFill = '\u2060';
+
+  /// 追加一段普通文本；**组字中**（IME）区间按 [TextEditingController] 默认行为加下划线。
+  static void _addRun(
+    List<InlineSpan> out,
+    String run,
+    int runStart,
+    TextStyle base,
+    TextRange composing,
+  ) {
+    if (run.isEmpty) return;
+    if (!composing.isValid || composing.isCollapsed) {
+      out.add(TextSpan(text: run, style: base));
+      return;
+    }
+    final s = (composing.start - runStart).clamp(0, run.length);
+    final e = (composing.end - runStart).clamp(0, run.length);
+    if (s >= e) {
+      out.add(TextSpan(text: run, style: base));
+      return;
+    }
+    final composingStyle =
+        base.merge(const TextStyle(decoration: TextDecoration.underline));
+    if (s > 0) out.add(TextSpan(text: run.substring(0, s), style: base));
+    out.add(TextSpan(text: run.substring(s, e), style: composingStyle));
+    if (e < run.length) {
+      out.add(TextSpan(text: run.substring(e), style: base));
+    }
+  }
+}

@@ -755,6 +755,7 @@ class _NoteEditorState extends State<NoteEditor>
             child: FormatTableView(
               table: table,
               availableWidth: available,
+              cellUnitBuilder: _buildCellUnit,
               onSetCell: (rowIndex, column, value) {
                 final t = _resolveTable(table);
                 _writeBackTable(
@@ -814,6 +815,44 @@ class _NoteEditorState extends State<NoteEditor>
           ),
         );
       },
+    );
+  }
+
+  /// 单元格内图片的最大高度（像素）：避免一张大图把表格行高撑破（§12.1.2）。
+  static const double _tableCellImageMaxHeight = 180;
+
+  /// 单元格内**附件引用**的原子呈现单元（§12.1.2 / FR-46 / BR-46.6）。
+  ///
+  /// 与正文**同源**：图片走 `_SuiAttachmentImage`（附件缓存 + 加载 / 失败占位）、附件链接
+  /// 显示为附件卡片（残缺引用带错误标记）；单击选中（由单元格提供回调）、双击打开附件
+  /// （内置预览 / 系统默认应用，承 FR-47）。图片按**单元格可用宽度**等比缩放并**限高**。
+  Widget _buildCellUnit(
+    BuildContext context,
+    String text,
+    AttachmentRef ref, {
+    required bool selected,
+    required VoidCallback onSelect,
+  }) {
+    final att = _attachments.where((a) => a.sha256 == ref.sha256).firstOrNull;
+    final onOpen = att == null ? null : () => _openAttachment(att);
+    // 图片引用交给图片单元（含尺寸属性块解析）；解析失败（如残缺引用）退化为附件卡片。
+    final image = ref.isImage ? EditorFormat.findImage(text, ref.start) : null;
+    if (image == null) {
+      return _FormatAttachmentLinkUnit(
+        label: ref.label,
+        isImage: ref.isImage,
+        corrupt: ref.corrupt,
+        selected: selected,
+        onSelect: onSelect,
+        onDoubleTap: onOpen,
+      );
+    }
+    return _FormatImageUnit(
+      image: image,
+      selected: selected,
+      onSelect: onSelect,
+      onDoubleTap: onOpen,
+      maxHeight: _tableCellImageMaxHeight,
     );
   }
 
@@ -1780,6 +1819,7 @@ class _FormatImageUnit extends StatelessWidget {
     required this.onSelect,
     this.block = false,
     this.onDoubleTap,
+    this.maxHeight,
   });
 
   final ParsedImage image;
@@ -1791,6 +1831,10 @@ class _FormatImageUnit extends StatelessWidget {
   final bool block;
 
   final VoidCallback? onDoubleTap;
+
+  /// 呈现单元的最大高度（像素）；`null` 表示不限。**单元格内**用它（180px）防止一张大图
+  /// 把表格行高撑破（§12.1.2 / BR-46.6）。
+  final double? maxHeight;
 
   @override
   Widget build(BuildContext context) {
@@ -1837,17 +1881,29 @@ class _FormatImageUnit extends StatelessWidget {
                     _AttachmentPlaceholder(label: label),
               );
             }
-            if (!block) return imageWidget;
+            if (!block) return _sized(imageWidget, available);
             // 块级呈现：块占满段落宽（图片左对齐），使该行只承载图片，
             // 行高即块高、向下扩展，后续文字整体下移、与图片不重叠。
             // 用 Align 而非定宽 SizedBox：宽度受限时撑满段落，无界时自动收缩。
             return Align(
               alignment: Alignment.centerLeft,
-              child: imageWidget,
+              child: _sized(imageWidget, available),
             );
           },
         ),
       ),
+    );
+  }
+
+  /// 按 [maxHeight] 限高（并限宽到 [available]）——仅**单元格内**使用（§12.1.2 / BR-46.6）：
+  /// 单元格宽度由列宽决定，未带 `{width=…}` 的大图会按原始像素铺开，必须夹住以免撑破行高。
+  /// [maxHeight] 为 `null` 时原样返回，**不影响正文既有呈现**。
+  Widget _sized(Widget child, double available) {
+    final limit = maxHeight;
+    if (limit == null) return child;
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: available, maxHeight: limit),
+      child: child,
     );
   }
 
