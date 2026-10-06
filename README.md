@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.svg" alt="随手记 Sui" width="120" height="120">
+</p>
+
 # 随手记 Sui
 
 **印象笔记替代品 —— 自托管 · 离线优先 · 多端同步的现代 Markdown 笔记应用。**
