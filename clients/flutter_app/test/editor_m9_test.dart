@@ -507,11 +507,12 @@ void main() {
     });
   });
 
-  group('TableAtomicDeleteWidget（FR-44 / §12.1.1 ⑥ / AC-140 / BR-44.6）', () {
+  group('TableAtomicDeleteWidget（FR-44 / §12.1.1 ⑥⑦ / AC-140 / BR-44.6）', () {
     late AppDatabase db;
 
     // 正文：`前文\n| A | B |\n| --- | --- |\n| 1 | 2 |\n后文`
-    // 表格块区间 [3, 36)：table.start=3、table.end=36（end 不含行尾换行）。
+    // 表格块区间 [3, 36)：table.start=3、table.end=36（end 不含行尾换行；
+    // source[36]='\n'）。表格下方「默认空行」的行首即 table.end + 1 = 37。
     const withAround = '前文\n| A | B |\n| --- | --- |\n| 1 | 2 |\n后文';
 
     Future<void> cursorAt(WidgetTester tester, int offset) async {
@@ -526,17 +527,40 @@ void main() {
       await tester.pump();
     }
 
-    testWidgets('退格落在表格末尾（table.end）→ 整块删除整张表格，不再打回原形', (tester) async {
+    testWidgets('右/下移入表格末尾 → 吸附到表格下方默认空行行首（table.end + 1）', (tester) async {
+      db = AppDatabase.memory();
+      await _pumpEditor(tester, db, 'm9t12-tabsnap', withAround);
+
+      await tester.tap(_contentField());
+      await tester.pump();
+      final ctrl = _contentValue(tester);
+      // 直接驱动折叠光标，模拟「自表格上方向下 / 向右移动」：
+      // 先落在表格前一行（offset 0，方向基准），再移入表格块末（table.end = 36）。
+      ctrl.selection = const TextSelection.collapsed(offset: 0);
+      await tester.pump();
+      ctrl.selection = const TextSelection.collapsed(offset: 36);
+      await tester.pump();
+
+      expect(
+        ctrl.selection.extentOffset,
+        37,
+        reason: '右/下移的光标须停在表格下方默认空行行首（table.end + 1），而非表格末行末尾（§12.1.1 ⑦）',
+      );
+
+      await db.close();
+    });
+
+    testWidgets('退格落在表格下方默认空行行首 → 整块删除整张表格，不再打回原形', (tester) async {
       db = AppDatabase.memory();
       await _pumpEditor(tester, db, 'm9t12-tabdel1', withAround);
 
-      await cursorAt(tester, 36); // 表格吸附终点 table.end
+      await cursorAt(tester, 37); // 表格下方默认空行行首 table.end + 1
       await press(tester, LogicalKeyboardKey.backspace);
 
       expect(
         _contentValue(tester).text,
         '前文\n后文',
-        reason: '退格落在表格末尾须整块删除整张表格，绝不逐字符删掉末尾 `|` 致表格回退为原文（§12.1.1 ⑥ / BR-44.6）',
+        reason: '退格落在表格下方默认空行行首须整块删除整张表格，绝不逐字符删掉末尾 `|` 致表格回退为原文（§12.1.1 ⑥⑦ / BR-44.6）',
       );
 
       await db.close();

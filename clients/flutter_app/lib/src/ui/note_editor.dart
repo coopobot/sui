@@ -468,9 +468,10 @@ class _NoteEditorState extends State<NoteEditor>
       _writeBack(EditorFormat.deleteAttachmentRef(text, ref));
       return true;
     }
-    // 表格作为原子单元：把表格看作一个整体——退格落在表格末尾 / Delete 落在表格起首
-    // 时**整块删除**整张表格，绝不把删除键落到表格内部字符（如末尾 `|`）导致源码损坏、
-    // 表格非法回退为原文（「打回原形」，§12.1.1 ⑥）。
+    // 表格作为原子单元：把表格看作一个整体——退格落在表格末尾、或落在表格下方
+    // 「默认空行」的行首（`table.end + 1`）/ Delete 落在表格起首时**整块删除**整张表格，
+    // 绝不把删除键落到表格内部字符（如末尾 `|`）导致源码损坏、表格非法回退为原文
+    //（「打回原形」，§12.1.1 ⑥⑦）。
     final table = EditorFormat.tableForDeletion(
       text,
       sel.extentOffset,

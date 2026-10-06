@@ -126,7 +126,7 @@ class MarkdownEditingController extends TextEditingController {
   /// 否则原样返回。
   ///
   /// [prev] 提供移动方向（上一次折叠光标偏移）：
-  /// - 右 / 下移动（offset >= prev）→ 跳到表格后（`table.end`）
+  /// - 右 / 下移动（offset >= prev）→ 跳到表格**下方默认空行的行首**（`table.end + 1`）
   /// - 左 / 上移动（offset <  prev）→ 跳到表格前一行（`table.start - 1`）
   /// - 无方向信息时 → 就近吸附
   ///
@@ -137,23 +137,30 @@ class MarkdownEditingController extends TextEditingController {
   /// 此处，落下的字会插到表头行开头，把表格打回原形。故落在 `table.start` 的光标一律前移
   /// 到「表格前一行」——即表格前那个 `\n` 之前（`table.start - 1`）；仅在表格位于文首
   /// （`start == 0`、无前行可退）时保持原位。
+  ///
+  /// 边界收紧（Issue 7）：右 / 下移动的落点应是表格**下方默认空行的行首**（`table.end + 1`，
+  /// 即表格块区间外的那个行尾换行**之后**），而**不是**表格末行末尾（`table.end`）——后者光标
+  /// 会滞留在表格最后一行，无法在表格下方正常落点、输入或回车换行。表格位于文末且其后无
+  /// 换行（`table.end == text.length`）时无行可退，保持 `table.end`。
   static int _snapOffsetAroundTables(String text, int offset, int? prev) {
     final tables = _tableRegions(text);
     for (final t in tables) {
       final beforeStart = t.start > 0 ? t.start - 1 : t.start;
+      // 表格下方「默认空行」的行首：表格块区间外的行尾换行之后。表格到文末无换行时退回原位。
+      final afterEnd = t.end < text.length ? t.end + 1 : t.end;
       if (offset == t.start) {
         if (prev != null) {
-          return offset >= prev ? t.end : beforeStart;
+          return offset >= prev ? afterEnd : beforeStart;
         }
         return beforeStart;
       }
-      if (offset > t.start && offset < t.end) {
+      if (offset > t.start && offset <= t.end) {
         if (prev != null) {
-          return offset >= prev ? t.end : beforeStart;
+          return offset >= prev ? afterEnd : beforeStart;
         }
         final distToStart = offset - t.start;
         final distToEnd = t.end - offset;
-        return distToStart <= distToEnd ? beforeStart : t.end;
+        return distToStart <= distToEnd ? beforeStart : afterEnd;
       }
     }
     return offset;

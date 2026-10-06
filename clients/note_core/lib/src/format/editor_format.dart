@@ -1695,14 +1695,15 @@ abstract final class EditorFormat {
     return FormatResult(newText, caret, caret);
   }
 
-  /// 判断一次删除键是否应触发**整块删除**整张表格（BR-44.6 / §12.1.1 ⑥）。
+  /// 判断一次删除键是否应触发**整块删除**整张表格（BR-44.6 / §12.1.1 ⑥⑦）。
   ///
-  /// 表格是原子单元（承 §12.1 / BR-44.2），正文光标经吸附只能停在表格前一行或表格末尾；
-  /// 若把 `Backspace` / `Delete` 落到表格内部字符（如末尾 `|`）会改坏管道表源码，
-  /// 使 `parseTable(...).wellFormed` 转假，表格**非法回退为原文**（「打回原形」）。
+  /// 表格是原子单元（承 §12.1 / BR-44.2），正文光标经吸附只能停在表格前一行或表格**下方
+  /// 默认空行的行首**（`table.end + 1`）；若把 `Backspace` / `Delete` 落到表格内部字符
+  /// （如末尾 `|`）会改坏管道表源码，使 `parseTable(...).wellFormed` 转假，表格**非法回退为原文**
+  /// （「打回原形」）。
   ///
-  /// - `backspace == true`：删除点（`offset − 1`）落在表格字符区间 `[start, end)` 内 → 命中
-  ///   （含 `offset == end`，即退格删掉末尾 `|` 的根因场景）；
+  /// - `backspace == true`：删除点落在表格字符区间 `[start, end]` 上，或落在表格**下方默认空行
+  ///   的行首**（`offset == end + 1`，即表格末尾那个行尾换行**之后**）→ 命中；
   /// - `backspace == false`：删除点（`offset`）落在 `[start, end)` 内 → 命中（含 `offset == start`）。
   ///
   /// 命中时返回该表格，调用方应整块删除（不进入逐字符删除）；否则返回 null。
@@ -1725,7 +1726,10 @@ abstract final class EditorFormat {
       if (table.wellFormed) {
         final s = table.start;
         final e = table.end;
-        if (backspace && pos > s && pos <= e) return table; // 退格落在表格字符上
+        // 退格落在表格字符上（含末尾 `|`），或落在表格下方「默认空行」行首（末尾换行之后）。
+        // `pos == e + 1` 成立时必有 `e < source.length` 且 `source[e] == '\n'`（parseTable 的 end
+        // 恒指向行尾换行），故该落点即「表格下方默认空行」的行首。
+        if (backspace && pos > s && pos <= e + 1) return table;
         if (!backspace && pos >= s && pos < e) return table; // Delete 落在表格字符上
       }
       if (table.end >= source.length) break;

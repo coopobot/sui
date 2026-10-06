@@ -1066,7 +1066,7 @@ void main() {
     });
   });
 
-  group('TableAtomicDelete（FR-44 / §12.1.1 ⑥ / BR-44.6 / AC-140）', () {
+  group('TableAtomicDelete（FR-44 / §12.1.1 ⑥⑦ / BR-44.6 / AC-140）', () {
     const tableSrc = '| a | b |\n| --- | --- |\n| 1 | 2 |';
     // 表格块区间 [3, 36)：`table.start = 3`、`table.end = 36`（`end` 不含行尾换行）。
     const src = '前文\n$tableSrc\n后文';
@@ -1080,6 +1080,32 @@ void main() {
       expect(hit, isNotNull, reason: '退格删末尾 `|` 的根因场景须整块命中（⑥）');
       expect(hit!.start, t.start);
       expect(hit.end, t.end);
+    });
+
+    test('退格落在表格下方默认空行行首（table.end + 1）→ 整块命中（⑦）', () {
+      final t = tableOf(src);
+      // `table.end` 即表格块外的行尾换行下标，`table.end + 1` 是表格下一行（默认空行）的行首。
+      expect(src[t.end], '\n', reason: 'table.end 应指向行尾换行');
+      final hit = EditorFormat.tableForDeletion(src, t.end + 1, backspace: true);
+      expect(hit, isNotNull, reason: '表尾光标落在默认空行行首时退格须整块命中（⑦）');
+      expect(hit!.start, t.start);
+      expect(hit.end, t.end);
+    });
+
+    test('退格落在表尾行首再往右（表格外）→ 不命中，交由普通删除', () {
+      final t = tableOf(src);
+      expect(
+        EditorFormat.tableForDeletion(src, t.end + 2, backspace: true),
+        isNull,
+        reason: '默认空行行首之后的字符属正文，不得误伤表格',
+      );
+    });
+
+    test('整块删除：表尾默认空行行首退格 → 表格与行尾换行一并移除', () {
+      final t = tableOf(src);
+      final r = EditorFormat.deleteTable(src, t);
+      expect(r.text, '前文\n后文');
+      expect(r.selectionStart, 3, reason: '光标落回被删表格原起点');
     });
 
     test('Delete 落在表格起首（table.start）→ 整块命中', () {
