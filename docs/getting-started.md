@@ -227,7 +227,7 @@ make clean
 手动联调流程：
 
 1. 启动服务端：`make run-server`
-2. 注册账号获取 token（见[部署指南 · 注册与 Token](deployment.md#3-注册账号与-token)）
+2. 注册账号获取 token（见[部署指南 · 注册与 Token](deployment.md#5-注册账号与-token)）
 3. 启动客户端：`cd clients/flutter_app && flutter run -d chrome`
 4. 新建一篇笔记 → 再开第二个客户端窗口 → 观察 WebSocket 通知触发同步
 5. 双端同时编辑同一笔记制造冲突 → 验证自动合并不丢字

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" alt="随手记 Sui" width="120" height="120">
+  <img src="docs/assets/logo.svg" alt="随手记 Sui" width="120" height="120">
 </p>
 
 # 随手记 Sui

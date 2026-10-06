@@ -32,6 +32,9 @@ site_dir: site
 
 theme:
   language: zh
+  # 站点左上角图标。必须是 docs_dir 内的路径，指向 docs/assets/logo.svg——
+  # 与仓库根 README 引用的是同一个文件（单一来源，不复制第二份）。
+  logo: assets/logo.svg
   features:
     - search.highlight
     - content.code.copy

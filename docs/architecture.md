@@ -411,7 +411,7 @@ sui/
 
 ## 8. 当前状态与已知缺口
 
-> 本节用于区分「设计目标」与「已落地」。变更历史见根目录 [CHANGELOG.md](../CHANGELOG.md)。
+> 本节用于区分「设计目标」与「已落地」。变更历史见根目录 [CHANGELOG.md](https://gitee.com/evangubo/sui/blob/main/CHANGELOG.md)。
 
 ### 8.1 已落地并验证
 
