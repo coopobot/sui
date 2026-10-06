@@ -24,9 +24,13 @@
 
 site_name: 随手记 Sui
 # 待确认：GitHub 账号。该值决定 canonical URL / sitemap / instant navigation。
-site_url: https://evangubo.github.io/sui/
+site_url: https://coopobot.github.io/sui/
 site_description: 自托管 · 离线优先 · 多端同步的现代 Markdown 笔记应用
 
+# 源码仓库入口（渲染为页头右上角的仓库按钮）。
+# 图标按域名识别，故指向 GitHub；注意与 site_url（站点地址，决定 sitemap/canonical）是两件事。
+repo_url: https://github.com/coopobot/sui
+repo_name: coopobot/sui
 docs_dir: docs
 site_dir: site
 
