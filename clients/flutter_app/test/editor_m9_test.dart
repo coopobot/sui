@@ -334,6 +334,109 @@ void main() {
     });
   });
 
+  group('表格行整格点选激活（回归：含 <br> 单元格的行可精确删除）', () {
+    late AppDatabase db;
+
+    Finder rowDeleteBtn() => find.descendant(
+          of: find.byType(FormatTableView),
+          matching: find.widgetWithIcon(IconButton, Icons.delete_outline),
+        );
+
+    bool rowDeleteEnabled(WidgetTester tester) =>
+        tester.widget<IconButton>(rowDeleteBtn()).onPressed != null;
+
+    testWidgets('行高由多行（`<br>`）单元格决定时，同行单行单元格也铺满整行、留白不再是死区',
+        (tester) async {
+      db = AppDatabase.memory();
+      // 首个数据行首格含 2 个 `<br>`（3 行文本），该行行高远高于同行的单行单元格。
+      // 旧实现：同行单行单元格只包裹自身内容、由 `TableCellVerticalAlignment.middle`
+      // 居中摆放，其上下留白**无任何组件覆盖**，点击不激活该行 → 以活动单元格为基准的
+      // 「删除行」按钮保持**禁用**（用户报「无法删除该行」）；若此前激活过别的行，
+      // 则会**误删那行**（「删除会有问题」）。
+      const src = '| A | B |\n| --- | --- |\n| 1<br>1b<br>1c | 2 |\n| 3 | 4 |';
+      await _pumpEditor(tester, db, 'm9t12-act1', src);
+      final ctrl = _contentValue(tester);
+
+      final tall =
+          tester.getRect(find.byKey(const ValueKey<String>('sui-table-0-0')));
+      final short =
+          tester.getRect(find.byKey(const ValueKey<String>('sui-table-0-1')));
+      expect(
+        short.height,
+        tall.height,
+        reason: '`intrinsicHeight` 下同行各格铺满整行，行内不留可被 hitTest 穿透的垂直死区',
+      );
+      expect(short.top, tall.top, reason: '同行各格上边界应一致（= 行顶）');
+      expect(short.bottom, tall.bottom, reason: '同行各格下边界应一致（= 行底）');
+
+      expect(rowDeleteEnabled(tester), isFalse, reason: '初始活动单元格为表头，删除行禁用');
+
+      // 点同行单行单元格的**顶部留白**（旧实现下此处没有任何组件，点击彻底无效）。
+      await tester.tapAt(Offset(short.center.dx, short.top + 2));
+      await tester.pump();
+      expect(rowDeleteEnabled(tester), isTrue, reason: '整格可点选激活：留白处点击也应激活该行');
+
+      await tester.tap(rowDeleteBtn());
+      await tester.pump();
+      expect(
+        ctrl.text,
+        '| A | B |\n| --- | --- |\n| 3 | 4 |',
+        reason: '含 `<br>` 单元格的行应被精确整行删除（不误删其它行、不留残行）',
+      );
+
+      await db.close();
+    });
+
+    testWidgets('单元格内边距同样可点选激活（命中区覆盖整个单元格盒子）', (tester) async {
+      db = AppDatabase.memory();
+      const src = '| A | B |\n| --- | --- |\n| 1<br>1b | 2 |\n| 3 | 4 |';
+      await _pumpEditor(tester, db, 'm9t12-act2', src);
+      final ctrl = _contentValue(tester);
+
+      final cell =
+          tester.getRect(find.byKey(const ValueKey<String>('sui-table-0-0')));
+      expect(rowDeleteEnabled(tester), isFalse, reason: '尚未激活任何数据行');
+
+      // 落在 6px 水平内边距内：旧实现**只有**内层 `TextField` 带 `onTap`，此处点击无效。
+      await tester.tapAt(Offset(cell.left + 2, cell.center.dy));
+      await tester.pump();
+      expect(rowDeleteEnabled(tester), isTrue, reason: '内边距也应命中并激活该行');
+
+      await tester.tap(rowDeleteBtn());
+      await tester.pump();
+      expect(ctrl.text, '| A | B |\n| --- | --- |\n| 3 | 4 |');
+
+      await db.close();
+    });
+
+    testWidgets('点击文本区仍由 TextField 接管（光标落点不被整格命中区改动）', (tester) async {
+      db = AppDatabase.memory();
+      const src = '| A | B |\n| --- | --- |\n| abcdef | 2 |\n| 3 | 4 |';
+      await _pumpEditor(tester, db, 'm9t12-act3', src);
+
+      const cellKey = ValueKey<String>('sui-table-0-0');
+      final field = find.descendant(
+        of: find.byKey(cellKey),
+        matching: find.byType(TextField),
+      );
+      final controller = tester.widget<TextField>(field).controller!;
+      final rect = tester.getRect(find.byKey(cellKey));
+
+      // 点在文本**末尾之后**、但仍在 `TextField` 盒内：手势竞技场取最内层，故该点击
+      // 仍由 `TextField` 接管、光标落到文本末尾，外层整格命中区不得吞掉它。
+      await tester.tapAt(Offset(rect.right - 8, rect.center.dy));
+      await tester.pump();
+      expect(
+        controller.selection.baseOffset,
+        6,
+        reason: '点击文本区仍应把光标落到文本末尾（外层只负责空白处激活）',
+      );
+      expect(rowDeleteEnabled(tester), isTrue, reason: '激活由 `TextField` 自身 onTap 完成');
+
+      await db.close();
+    });
+  });
+
   group('TableCellAttachmentWidget（FR-44 / §12.1.1 / AC-139）', () {
     ParsedTable table2x2() =>
         EditorFormat.parseTable('| A | B |\n| --- | --- |\n| 1 | 2 |', 0)!;

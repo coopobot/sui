@@ -229,7 +229,14 @@ class _FormatTableViewState extends State<FormatTableView> {
                 color: Theme.of(context).dividerColor,
                 width: 1,
               ),
-              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+              // `intrinsicHeight`：测量阶段以子项**自然高度**参与行高计算，定位阶段再以
+              // **行高紧约束**重新布局子项 —— 单元格盒子因此**铺满整行**，行内不留任何
+              // 「无组件覆盖」的垂直死区（否则同行多行单元格旁的留白点不到、无法激活该行，
+              // 见 §12.1.1 ⑧）。**不可改用 `fill`**：`RenderTable` 在测量阶段跳过 `fill`，
+              // 整行皆为 `fill` 时行高退化为 0。内容由单元格内部 `Center` 垂直居中，
+              // 与原先 `middle` 的观感一致。
+              defaultVerticalAlignment:
+                  TableCellVerticalAlignment.intrinsicHeight,
               columnWidths: {
                 for (var i = 0; i < cols; i++) i: FixedColumnWidth(colWidth),
               },
@@ -677,31 +684,51 @@ class _FormatTableCellState extends State<_FormatTableCell> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
-      decoration: widget.active
-          ? BoxDecoration(border: Border.all(color: scheme.primary, width: 1.5))
-          : null,
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-      child: Focus(
-        onKeyEvent: _onKey,
-        child: TextField(
-          controller: _controller,
-          focusNode: _focus,
-          maxLines: null,
-          textAlign: _textAlign,
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: widget.isHeader ? FontWeight.w600 : FontWeight.normal,
+    // 整格点选激活（§12.1.1 ⑧）：命中区必须覆盖**整个单元格盒子**——含内边距，以及
+    // 「行高大于本格内容高度」时的上下留白（同行有 `<br>` 多行单元格时尤为明显）。
+    // 旧实现把 `onTap` 只挂在**内层 `TextField`** 上，上述位置点击后**不激活**该行，
+    // `_activeRow` 保持旧值（或仍为表头 `-1`），以活动单元格为基准的「删除行」便
+    // **禁用**或**删错行**。`HitTestBehavior.opaque` 让容器空白处同样命中；
+    // 内层 `TextField` 区域的手势仍由 `TextField` **自身优先接管**（手势竞技场取
+    // 最内层），故点击文本处的**光标落点 / 选区行为不变**。
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        widget.onActivate();
+        _focus.requestFocus();
+      },
+      child: Container(
+        decoration: widget.active
+            ? BoxDecoration(
+                border: Border.all(color: scheme.primary, width: 1.5))
+            : null,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        // 单元格盒子现由 `Table` 的 `intrinsicHeight` 对齐**铺满整行**，故内容需显式
+        // 垂直居中，保持与原先 `middle` 对齐一致的观感（内容取自然高度）。
+        child: Center(
+          child: Focus(
+            onKeyEvent: _onKey,
+            child: TextField(
+              controller: _controller,
+              focusNode: _focus,
+              maxLines: null,
+              textAlign: _textAlign,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight:
+                    widget.isHeader ? FontWeight.w600 : FontWeight.normal,
+              ),
+              decoration: const InputDecoration(
+                isDense: true,
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.zero,
+              ),
+              onTap: widget.onActivate,
+              onChanged: (_) => _commit(),
+              onSubmitted: (_) => _moveNextCell(),
+              textInputAction: TextInputAction.next,
+            ),
           ),
-          decoration: const InputDecoration(
-            isDense: true,
-            border: InputBorder.none,
-            contentPadding: EdgeInsets.zero,
-          ),
-          onTap: widget.onActivate,
-          onChanged: (_) => _commit(),
-          onSubmitted: (_) => _moveNextCell(),
-          textInputAction: TextInputAction.next,
         ),
       ),
     );
