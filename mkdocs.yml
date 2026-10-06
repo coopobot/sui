@@ -1,0 +1,35 @@
+# 随手记 Sui · 文档站配置（Zensical）
+#
+# 说明：
+#   1. Zensical 直接读取本文件；配置沿用 MkDocs 的 `mkdocs.yml` 格式与目录约定，
+#      便于将来必要时切到 MkDocs 1.x 作为兜底（该兜底路径未实测）。
+#   2. 文档源就是仓库内的 docs/，不搬迁、不改造任何现有 Markdown。
+#   3. 构建产物为 site/（已在 .gitignore 中忽略），由 GitHub Actions 生成并发布，
+#      不进入仓库。
+#   4. 本地预览：pip install zensical==0.0.68 && zensical serve
+
+site_name: 随手记 Sui
+# 待确认：GitHub 账号。该值决定 canonical URL / sitemap / instant navigation。
+site_url: https://evangubo.github.io/sui/
+site_description: 自托管 · 离线优先 · 多端同步的现代 Markdown 笔记应用
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  language: zh
+  features:
+    - search.highlight
+
+markdown_extensions:
+  # 让中文标题生成「可读 + 与 GitHub 一致」的锚点。此项为必需，不是美化：
+  # 默认 slug 会丢弃 CJK，`## 4. 同步协议与冲突解决` 会退化成 id="4"，
+  # 纯中文标题更会退化成 id="_2" 这类无语义且互相碰撞的锚点，
+  # 导致文档里既有的 `#4-同步协议与冲突解决` 一类链接全部失效（实测 12 处告警）。
+  - toc:
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+
+# 刻意不声明 nav：导航由 docs/ 目录树自动生成，
+# 避免后续文档增删导致配置漂移、站点缺页。

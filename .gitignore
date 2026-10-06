@@ -35,3 +35,5 @@ Thumbs.db
 *.log
 .env
 .env.*
+# Docs site (Zensical; build output is generated in CI and never committed)
+site/
