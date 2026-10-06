@@ -310,12 +310,12 @@ class _FormatTableViewState extends State<FormatTableView> {
           ),
           const _TableBarDivider(),
           _barButton(
-            Icons.keyboard_tab,
+            Icons.first_page,
             '左侧插入列',
             () => widget.onInsertColumn(_activeCol, false),
           ),
           _barButton(
-            Icons.keyboard_tab_rounded,
+            Icons.last_page,
             '右侧插入列',
             () => widget.onInsertColumn(_activeCol, true),
           ),
