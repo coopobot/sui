@@ -62,7 +62,7 @@
 ### 2.2 数据模型（SQLite，服务端）
 
 服务端库只承载**同步汇聚**所需的最小元数据，实际建表语句见
-[`server/internal/store/store.go`](https://gitee.com/evangubo/sui/blob/main/server/internal/store/store.go) 的 `migrate()`。
+`server/internal/store/store.go` 的 `migrate()`。
 
 | 表 | 用途 |
 |----|------|
@@ -129,7 +129,7 @@
 | `DeviceId` | 设备标识（冲突合并 / 来源标记用） |
 
 **本机数据表（drift，`schemaVersion = 6`）**：定义见
-[`clients/note_core/lib/src/db/app_database.dart`](https://gitee.com/evangubo/sui/blob/main/clients/note_core/lib/src/db/app_database.dart)。
+`clients/note_core/lib/src/db/app_database.dart`。
 
 | 表 | 用途 | 随同步上行 |
 |----|------|------------|
@@ -410,7 +410,7 @@ sui/
 
 ## 8. 当前状态与已知缺口
 
-> 本节用于区分「设计目标」与「已落地」。变更历史见根目录 [CHANGELOG.md](https://gitee.com/evangubo/sui/blob/main/CHANGELOG.md)。
+> 本节用于区分「设计目标」与「已落地」。变更历史见根目录 `CHANGELOG.md`。
 
 ### 8.1 已落地并验证
 

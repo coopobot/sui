@@ -45,5 +45,5 @@
   - Web 端附件缓存为进程内内存态（刷新后按需重下）
   - 鉴权为演示级（明文密码前缀比对、无 Token 过期、无内置 HTTPS、CORS 全放开），公网部署前必须加固
 
-> 变更历史见 [CHANGELOG.md](https://gitee.com/evangubo/sui/blob/main/CHANGELOG.md)；缺口明细见
+> 变更历史见 `CHANGELOG.md`；缺口明细见
 > [系统架构 · 当前状态与已知缺口](architecture.md#8-当前状态与已知缺口)。

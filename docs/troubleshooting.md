@@ -1,7 +1,7 @@
 # 故障排查
 
 汇集使用与开发过程中最常见的问题及排查思路。若未覆盖，欢迎通过
-[CONTRIBUTING](https://gitee.com/evangubo/sui/blob/main/CONTRIBUTING.md) 的渠道反馈。
+`CONTRIBUTING.md` 的渠道反馈。
 
 ## 使用类问题
 
