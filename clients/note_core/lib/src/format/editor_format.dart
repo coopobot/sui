@@ -480,7 +480,10 @@ abstract final class EditorFormat {
     if (lineEnd == -1) lineEnd = text.length;
 
     // 行中回车交由默认行为，避免打断行内编辑。
-    if (e < lineEnd) return null;
+    // 例外：表格行内回车——跳到下一个单元格，防止插入真换行破坏管道表结构。
+    if (e < lineEnd) {
+      return _tableCellEnter(text, s);
+    }
 
     final line = text.substring(lineStart, lineEnd);
 
@@ -508,7 +511,172 @@ abstract final class EditorFormat {
       return FormatResult(newText, lineStart, lineStart);
     }
 
+    // 表格行（行尾）：回车跳到下一个单元格（最后一列则新增一行），
+    // 避免插入真实换行破坏 GFM 管道表结构（BR-44.5）。
+    if (_hasUnescapedPipe(line)) {
+      final result = _tableCellEnter(text, s);
+      if (result != null) return result;
+    }
+
     return null;
+  }
+
+  /// 表格单元格内 Shift+Enter 软换行：在光标处插入 `<br>` 标签。
+  ///
+  /// GFM 管道表不支持多行单元格，用内嵌 HTML `<br>` 实现"视觉换行"
+  /// （与 Typora / Obsidian 一致）。只有光标在有效表格行内时生效，
+  /// 否则返回 `null` 交由默认行为处理。
+  static FormatResult? tableSoftNewline(String text, int offset) {
+    final lineStart =
+        offset == 0 ? 0 : text.lastIndexOf('\n', offset - 1) + 1;
+    var lineEnd = text.indexOf('\n', lineStart);
+    if (lineEnd == -1) lineEnd = text.length;
+    final line = text.substring(lineStart, lineEnd);
+    if (!_hasUnescapedPipe(line)) return null;
+
+    // 回溯找表格头，确认当前行在有效表格内
+    final table = _findTableFromLine(text, lineStart);
+    if (table == null || !table.wellFormed) return null;
+    if (lineStart < table.start || lineStart > table.end) return null;
+    if (_isSeparatorRow(line)) return null; // 分隔行不插入软换行
+
+    // 光标在第一个 | 之前 → 不在任何单元格内，走默认行为
+    final cursorInLine = offset - lineStart;
+    var pipeCount = 0;
+    for (var i = 0; i < cursorInLine && i < line.length; i++) {
+      if (line[i] == '|' && (i == 0 || line[i - 1] != '\\')) {
+        pipeCount++;
+      }
+    }
+    if (pipeCount == 0) return null;
+
+    const br = '<br>';
+    final caret = offset + br.length;
+    final newText =
+        text.substring(0, offset) + br + text.substring(offset);
+    return FormatResult(newText, caret, caret);
+  }
+
+  /// 从任意表格行出发，向上回溯找到表头并调用 [parseTable]。
+  ///
+  /// [parseTable] 要求从表格第一行（表头）调用才能返回完整结构，
+  /// 因此对于数据行需要先找到分隔行（`|---|`），再往上一格定位表头。
+  /// 当前行不在任何表格内时返回 `null`。
+  static ParsedTable? _findTableFromLine(String text, int lineStart) {
+    // 先试直接解析（可能就在表头行）
+    var table = parseTable(text, lineStart);
+    if (table != null && table.wellFormed) return table;
+
+    // 向上回溯找分隔行 → 表头
+    var scan = lineStart;
+    for (var i = 0; i < 50; i++) {
+      if (scan == 0) break;
+      // scan 是行首，其前一行的**结束换行**位于 scan-1。要取到「上一行」的起止，
+      // 必须从 scan-2 往前找分隔换行，否则会把 scan-1 这个换行符本身当成上一行的
+      // 结尾，得到 prevStart == scan、prevEnd == scan-1 的非法区间（substring 越界）。
+      final prevNl = scan >= 2 ? text.lastIndexOf('\n', scan - 2) : -1;
+      final prevStart = prevNl == -1 ? 0 : prevNl + 1;
+      final prevEnd = scan - 1;
+      final prevLine = text.substring(prevStart, prevEnd);
+      if (_isSeparatorRow(prevLine)) {
+        // 找到分隔行，再往上一行就是表头（同样要跳过 prevStart-1 处的换行符）
+        if (prevStart == 0) break;
+        final hdrNl =
+            prevStart >= 2 ? text.lastIndexOf('\n', prevStart - 2) : -1;
+        final headerStart = hdrNl == -1 ? 0 : hdrNl + 1;
+        table = parseTable(text, headerStart);
+        if (table != null && table.wellFormed) return table;
+        break;
+      }
+      scan = prevStart;
+    }
+
+    return null;
+  }
+
+  /// 表格单元格内回车：跳到下一个单元格；最后一列则新增一空行并跳到首列。
+  ///
+  /// 光标在行内任意位置都生效——防止用户在单元格里按回车把管道表打断
+  /// （BR-44.5 / 表格「行内回车即现形」）。
+  /// 不在有效表格行内时返回 `null`，走默认换行行为。
+  ///
+  /// 幽灵行守卫（§12.1.1）：已在**末行末列**时，仅当当前行**非全空**才追加空行，
+  /// 否则把光标退回本行首列——避免末格连续回车堆叠**无法删除的尾部空行**。
+  static FormatResult? _tableCellEnter(String text, int offset) {
+    final lineStart =
+        offset == 0 ? 0 : text.lastIndexOf('\n', offset - 1) + 1;
+    var lineEnd = text.indexOf('\n', lineStart);
+    if (lineEnd == -1) lineEnd = text.length;
+    final line = text.substring(lineStart, lineEnd);
+    if (!_hasUnescapedPipe(line)) return null;
+
+    final table = _findTableFromLine(text, lineStart);
+    if (table == null || !table.wellFormed) return null;
+
+    // 确认当前行确实在表格范围内
+    if (lineStart < table.start || lineStart > table.end) return null;
+
+    // 分隔行回车走默认（跳到下一行，即退出表格编辑态）
+    final isSeparator = _isSeparatorRow(line);
+    if (isSeparator) return null;
+
+    final cells = _splitRow(line);
+    final totalCols = cells.length;
+    if (totalCols == 0) return null;
+
+    // 计算光标所在列：数光标前有几个未转义 |
+    final cursorInLine = offset - lineStart;
+    var pipeCount = 0;
+    for (var i = 0; i < cursorInLine && i < line.length; i++) {
+      if (line[i] == '|' && (i == 0 || line[i - 1] != '\\')) {
+        pipeCount++;
+      }
+    }
+    // 光标在第一个 | 之前 → 不在任何单元格内，属于"表格前面"的位置，
+    // 走默认换行（在表格上方插入空行，整体下移）。
+    if (pipeCount == 0) return null;
+    var colIndex = pipeCount - (line.startsWith('|') ? 1 : 0);
+    if (colIndex < 0) colIndex = 0;
+    if (colIndex >= totalCols) colIndex = totalCols - 1;
+
+    if (colIndex < totalCols - 1) {
+      // 非最后一列：跳到下一列
+      var nextPipeAt = -1;
+      for (var i = cursorInLine; i < line.length; i++) {
+        if (line[i] == '|' && (i == 0 || line[i - 1] != '\\')) {
+          nextPipeAt = i;
+          break;
+        }
+      }
+      if (nextPipeAt == -1) {
+        return FormatResult(text, lineEnd, lineEnd);
+      }
+      var nextColStart = nextPipeAt + 1;
+      if (nextColStart < line.length && line[nextColStart] == ' ') {
+        nextColStart++;
+      }
+      final caret = lineStart + nextColStart;
+      return FormatResult(text, caret, caret);
+    } else {
+      // 最后一列：新增一空行，光标落到新行首列。
+      //
+      // 幽灵行守卫（§12.1.1）：若当前已是**表格末行**且该行**全空**，说明它是上一次
+      // 回车新追加出来的空行——此时不再继续追加，否则末格连续回车会堆叠出**无法删除的
+      // 尾部空行**（BR-44.3）。把光标退回本行首列即可。
+      final isLastRow = lineEnd >= table.end;
+      final rowIsEmpty = cells.every((c) => c.trim().isEmpty);
+      if (isLastRow && rowIsEmpty) {
+        final caret = lineStart + 2 > lineEnd ? lineEnd : lineStart + 2;
+        return FormatResult(text, caret, caret);
+      }
+      final newRow = _renderRow(List<String>.filled(totalCols, ''));
+      final insert = '\n$newRow';
+      final newText =
+          text.substring(0, lineEnd) + insert + text.substring(lineEnd);
+      // 新行格式：|  |  |，首列起始 = \n + | + 空格 = 偏移 2
+      final caret = lineEnd + 2;
+      return FormatResult(newText, caret, caret);
+    }
   }
 
   static FormatResult _indent(String text, int start, int end) {
@@ -826,6 +994,12 @@ abstract final class EditorFormat {
   static String escapeTableCell(String raw) =>
       raw.replaceAll(RegExp(r'(?<!\\)\|'), r'\|');
 
+  /// 单元格文本反转义：`\|` → `|`（[escapeTableCell] 的逆操作）。
+  ///
+  /// [ParsedTable] 的单元格保留原文转义（`_splitRow` 原样保留 `\|`），本方法用于取回
+  /// **字面文本**（如把附件引用并入既有单元格内容后再交给 [setTableCell] 重新转义）。
+  static String unescapeTableCell(String raw) => raw.replaceAll(r'\|', '|');
+
   /// 插入管道表：表头行 + 分隔行 +（行−1）空数据行，独占块（§12.1）。
   ///
   /// [rows] / [columns] 为**正整数**，超限时取边界值（行 1~20、列 1~8，BR-44.1）。
@@ -1051,6 +1225,37 @@ abstract final class EditorFormat {
     return text.substring(0, l.start) +
         newLine +
         text.substring(l.start + l.text.length);
+  }
+
+  /// 把附件引用插入表格指定单元格（§12.1.1「单元格内附件」）。
+  ///
+  /// [isImage] 为 true 生成图片引用 `![文件名](sui://<sha256>)`，否则生成附件链接
+  /// `[文件名](sui://<sha256>)`。引用以单元格内**软换行**（`<br>`，与 [tableSoftNewline] 一致；
+  /// GFM 管道表不支持多行单元格）追加到活动单元格既有内容之后——既有内容取回**字面文本**
+  /// （[unescapeTableCell]），并入后再经 [setTableCell] 统一转义 `|` 写回，**其余单元格逐字不动**
+  /// （BR-44.2 / BR-44.4）。行 / 列越界时原样返回。
+  static String insertTableCellAttachment(
+    String text,
+    ParsedTable table,
+    int rowIndex,
+    int column, {
+    required String filename,
+    required String sha256,
+    bool isImage = true,
+  }) {
+    final lines = _tableLines(text, table);
+    final lineIndex = rowIndex < 0 ? 0 : rowIndex + 2;
+    if (lineIndex < 0 || lineIndex >= lines.length) return text;
+    final cells = _splitRow(lines[lineIndex].text);
+    if (column < 0 || column >= cells.length) return text;
+
+    // 单元格内软换行用 `<br>`（GFM 管道表不支持多行单元格，§12.1 / tableSoftNewline）；
+    // 若用字面 `\n` 会把该行物理拆成两行，破坏表格结构。
+    final ref =
+        isImage ? '![$filename](sui://$sha256)' : '[$filename](sui://$sha256)';
+    final existing = unescapeTableCell(cells[column]).trim();
+    final value = existing.isEmpty ? ref : '$existing<br>$ref';
+    return setTableCell(text, table, rowIndex, column, value);
   }
 
   /// 按 [table] 的行区间切出逐行（含每行起始偏移）。

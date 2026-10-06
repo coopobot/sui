@@ -218,6 +218,157 @@ void main() {
     });
   });
 
+  group('表格交互导航（回归：方向键不改写正本 / 幽灵行可删）', () {
+    late AppDatabase db;
+
+    testWidgets('单元格内方向键不改写正本', (tester) async {
+      db = AppDatabase.memory();
+      await _pumpEditor(
+        tester,
+        db,
+        'm9t12-nav1',
+        '| A | B |\n| --- | --- |\n| 1 | 2 |',
+      );
+      final ctrl = _contentValue(tester);
+      final original = ctrl.text;
+
+      // 点选正文区第一个数据单元格 (0,0)，让它获得焦点。
+      await tester.tap(find.byKey(const ValueKey<String>('sui-table-0-0')));
+      await tester.pump();
+
+      for (final k in const <LogicalKeyboardKey>[
+        LogicalKeyboardKey.arrowRight,
+        LogicalKeyboardKey.arrowLeft,
+        LogicalKeyboardKey.arrowDown,
+        LogicalKeyboardKey.arrowUp,
+      ]) {
+        await tester.sendKeyEvent(k);
+        await tester.pump();
+      }
+
+      expect(ctrl.text, original, reason: '方向键只应在单元格内移动光标，不得回灌正本');
+      await db.close();
+    });
+
+    testWidgets('末单元格 Enter 增行后可用「删除行」删除，无残留幽灵行', (tester) async {
+      db = AppDatabase.memory();
+      await _pumpEditor(
+        tester,
+        db,
+        'm9t12-nav2',
+        '| A | B |\n| --- | --- |\n| 1 | 2 |',
+      );
+      final ctrl = _contentValue(tester);
+      const base = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+
+      await tester.tap(find.byKey(const ValueKey<String>('sui-table-0-1')));
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(ctrl.text, '$base\n|  |  |', reason: '末单元格回车应新增一个空数据行');
+
+      final delBtn = find.descendant(
+        of: find.byType(FormatTableView),
+        matching: find.widgetWithIcon(IconButton, Icons.delete_outline),
+      );
+      await tester.tap(delBtn);
+      await tester.pump();
+      expect(ctrl.text, base, reason: '删除行应精确移除刚新增的空行，回到原表');
+
+      await db.close();
+    });
+  });
+
+  group('TableCellAttachmentWidget（FR-44 / §12.1.1 / AC-139）', () {
+    ParsedTable table2x2() =>
+        EditorFormat.parseTable('| A | B |\n| --- | --- |\n| 1 | 2 |', 0)!;
+
+    Future<void> pumpTableView(
+      WidgetTester tester, {
+      required Future<void> Function(int rowIndex, int column)? onInsertAttachment,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: FormatTableView(
+                table: table2x2(),
+                onSetCell: (int r, int c, String v) {},
+                onInsertRow: (int r, bool a) {},
+                onRemoveRow: (int r) {},
+                onInsertColumn: (int c, bool a) {},
+                onRemoveColumn: (int c) {},
+                onSetAlignment: (int c, TableColumnAlign a) {},
+                onInsertAttachment: onInsertAttachment,
+                availableWidth: 800,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    Finder attachButton() => find.descendant(
+          of: find.byType(FormatTableView),
+          matching: find.widgetWithIcon(IconButton, Icons.attach_file),
+        );
+
+    testWidgets('上下文栏「插入图片 / 附件」按钮按活动单元格回调（行，列）', (tester) async {
+      final calls = <(int, int)>[];
+      await pumpTableView(
+        tester,
+        onInsertAttachment: (int r, int c) async => calls.add((r, c)),
+      );
+
+      expect(attachButton(), findsOneWidget, reason: '上下文栏应提供插入图片 / 附件按钮');
+      expect(
+        tester.widget<IconButton>(attachButton()).onPressed,
+        isNotNull,
+        reason: '已接线时按钮可点',
+      );
+
+      // 激活第二个数据单元格 (0,1)，按钮应汇报该活动单元格。
+      await tester.tap(find.byKey(const ValueKey<String>('sui-table-0-1')));
+      await tester.pump();
+      await tester.tap(attachButton());
+      await tester.pump();
+
+      expect(calls, [(0, 1)], reason: '回调须带上活动单元格的行、列下标');
+    });
+
+    testWidgets('未提供 onInsertAttachment 时按钮禁用', (tester) async {
+      await pumpTableView(tester, onInsertAttachment: null);
+      expect(
+        tester.widget<IconButton>(attachButton()).onPressed,
+        isNull,
+        reason: '未接线时按钮应禁用（onPressed == null）',
+      );
+    });
+
+    testWidgets('真实编辑器已接线：表格上下文栏按钮可用', (tester) async {
+      final db = AppDatabase.memory();
+      await _pumpEditor(
+        tester,
+        db,
+        'm9t12-cellatt1',
+        '| A | B |\n| --- | --- |\n| 1 | 2 |',
+      );
+
+      expect(find.byType(FormatTableView), findsOneWidget);
+      expect(attachButton(), findsOneWidget);
+      expect(
+        tester.widget<IconButton>(attachButton()).onPressed,
+        isNotNull,
+        reason: 'NoteEditor 应为 FormatTableView 接上 onInsertAttachment',
+      );
+
+      await db.close();
+    });
+  });
+
   group('AttachmentBlockDeleteWidget（FR-46 / AC-145~AC-147）', () {
     late AppDatabase db;
 

@@ -117,7 +117,7 @@ class _NoteListState extends State<NoteList> {
               : ListView.builder(
                   itemCount: notes.length,
                   itemBuilder: (context, i) =>
-                      _NoteTile(controller: controller, s: notes[i]),
+                      _NoteTile(key: ValueKey(notes[i].note.id), controller: controller, s: notes[i]),
                 ),
         ),
       ],
@@ -216,7 +216,7 @@ class _EmptyHint extends StatelessWidget {
 }
 
 class _NoteTile extends StatelessWidget {
-  const _NoteTile({required this.controller, required this.s});
+  const _NoteTile({super.key, required this.controller, required this.s});
   final AppController controller;
   final NoteSummary s;
 

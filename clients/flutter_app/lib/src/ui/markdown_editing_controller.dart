@@ -56,7 +56,14 @@ typedef FormatTableSpanBuilder = Widget Function(
 final RegExp _taskLinePattern = RegExp(r'^([ \t]*[-*+][ \t]+)\[([ xX])\](.*)$');
 
 class MarkdownEditingController extends TextEditingController {
-  MarkdownEditingController({super.text});
+  MarkdownEditingController({super.text}) : _lastText = text ?? '';
+
+  /// 上一次赋值的正本（用于判断本次赋值是否为「纯光标移动」——文本未变）。
+  String _lastText;
+
+  /// 上一次折叠光标的偏移；用于表格边界吸附时推断移动方向
+  /// （左 / 上 → 跳到表格前，右 / 下 → 跳到表格后）。
+  int? _lastCollapsedOffset;
 
   /// 是否以富样式呈现（true=格式模式，false=源码模式）。
   ///
@@ -88,6 +95,69 @@ class MarkdownEditingController extends TextEditingController {
   /// 由 UI 层接管：据此调用 `EditorFormat.toggleTaskChecked` 原地反转方括号内的
   /// 一个字符并回写正本（BR-31.2）。
   void Function(int lineStart)? onToggleTask;
+
+  @override
+  set value(TextEditingValue newValue) {
+    final isCollapsed =
+        newValue.selection.isValid && newValue.selection.isCollapsed;
+    // 仅当「纯光标移动」（文本未变）且格式模式 + 表格启用时做边界吸附；
+    // 否则（输入文字 / 程序化改写）不吸附，避免把光标强行拽到表格边界。
+    if (styled &&
+        formatTableBuilder != null &&
+        isCollapsed &&
+        newValue.text == _lastText) {
+      final offset = newValue.selection.extentOffset;
+      final snapped =
+          _snapOffsetAroundTables(newValue.text, offset, _lastCollapsedOffset);
+      if (snapped != offset) {
+        newValue = newValue.copyWith(
+          selection: TextSelection.collapsed(offset: snapped),
+        );
+      }
+      _lastCollapsedOffset = snapped;
+    } else {
+      _lastCollapsedOffset = isCollapsed ? newValue.selection.extentOffset : null;
+    }
+    _lastText = newValue.text;
+    super.value = newValue;
+  }
+
+  /// 若 [offset] 落在某张表格的**内部**或**首行起点**，返回「跳过整张表格」后的偏移量；
+  /// 否则原样返回。
+  ///
+  /// [prev] 提供移动方向（上一次折叠光标偏移）：
+  /// - 右 / 下移动（offset >= prev）→ 跳到表格后（`table.end`）
+  /// - 左 / 上移动（offset <  prev）→ 跳到表格前一行（`table.start - 1`）
+  /// - 无方向信息时 → 就近吸附
+  ///
+  /// 表格以「原子块」参与外层光标导航（同块级图片 §5.5）：从上方往下、从下方往上
+  /// 都应**整块跳过**，而不是被吸附回原位导致光标卡在表格边界（H2 复现）。
+  ///
+  /// 边界收紧（Issue 2）：`table.start` 正是表格**首行（控件栏 / 表头行）起点**，光标若停在
+  /// 此处，落下的字会插到表头行开头，把表格打回原形。故落在 `table.start` 的光标一律前移
+  /// 到「表格前一行」——即表格前那个 `\n` 之前（`table.start - 1`）；仅在表格位于文首
+  /// （`start == 0`、无前行可退）时保持原位。
+  static int _snapOffsetAroundTables(String text, int offset, int? prev) {
+    final tables = _tableRegions(text);
+    for (final t in tables) {
+      final beforeStart = t.start > 0 ? t.start - 1 : t.start;
+      if (offset == t.start) {
+        if (prev != null) {
+          return offset >= prev ? t.end : beforeStart;
+        }
+        return beforeStart;
+      }
+      if (offset > t.start && offset < t.end) {
+        if (prev != null) {
+          return offset >= prev ? t.end : beforeStart;
+        }
+        final distToStart = offset - t.start;
+        final distToEnd = t.end - offset;
+        return distToStart <= distToEnd ? beforeStart : t.end;
+      }
+    }
+    return offset;
+  }
 
   @override
   TextSpan buildTextSpan({
@@ -314,7 +384,14 @@ class MarkdownEditingController extends TextEditingController {
     var from = 0;
     while (from < text.length) {
       final table = EditorFormat.parseTable(text, from);
-      if (table == null) break;
+      if (table == null) {
+        // 当前位置不是表格，跳到下一行继续找（而不是直接 break），
+        // 否则表格前面有文字时整段扫描都会提前终止。
+        final nl = text.indexOf('\n', from);
+        if (nl == -1) break;
+        from = nl + 1;
+        continue;
+      }
       if (table.wellFormed) {
         regions.add(_SpanRegion(
           table.start,

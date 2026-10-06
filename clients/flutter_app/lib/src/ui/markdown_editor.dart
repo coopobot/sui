@@ -27,7 +27,9 @@ class MarkdownEditor extends StatelessWidget {
     this.undoController,
     this.focusNode,
     this.onBlockNewline,
+    this.onSoftNewline,
     this.onAttachmentDelete,
+    this.showCursor = true,
   });
 
   /// 正文控制器；其 `text` 是唯一的 Markdown 正本。
@@ -48,10 +50,19 @@ class MarkdownEditor extends StatelessWidget {
   /// §11.2 / BR-32.4），返回 false 表示交由默认换行；null 表示不拦截。
   final bool Function()? onBlockNewline;
 
+  /// 格式模式下 Shift+Enter（软换行）的拦截钩子：返回 true 表示已就地处理
+  /// （如表格单元格内插入 `<br>`），返回 false 表示交由默认行为；null 表示不拦截。
+  final bool Function()? onSoftNewline;
+
   /// 格式模式下退格 / 删除键的拦截钩子（FR-46 / §12.4）：返回 true 表示已就地
   /// 整块删除附件引用或修复残缺引用，返回 false 表示交由默认逐字符删除；
   /// null 表示不拦截。[backspace] 为 true 表示退格键，false 表示 Delete 键。
   final bool Function({required bool backspace})? onAttachmentDelete;
+
+  /// 是否显示正文光标。格式模式下光标落在嵌套的表格单元格内时（单元格是正文
+  /// 焦点节点的子树），正文仍会因 `hasFocus` 而画出自己的光标，造成「两个光标」；
+  /// 由上层据此置 false 隐藏正文光标。
+  final bool showCursor;
 
   @override
   Widget build(BuildContext context) {
@@ -69,7 +80,9 @@ class MarkdownEditor extends StatelessWidget {
       undoController: undoController,
       focusNode: focusNode,
       onBlockNewline: onBlockNewline,
+      onSoftNewline: onSoftNewline,
       onAttachmentDelete: onAttachmentDelete,
+      showCursor: showCursor,
     );
   }
 }
@@ -83,7 +96,9 @@ class _SourceEditor extends StatefulWidget {
     this.undoController,
     this.focusNode,
     this.onBlockNewline,
+    this.onSoftNewline,
     this.onAttachmentDelete,
+    this.showCursor = true,
   });
 
   final MarkdownEditingController controller;
@@ -92,7 +107,9 @@ class _SourceEditor extends StatefulWidget {
   final UndoHistoryController? undoController;
   final FocusNode? focusNode;
   final bool Function()? onBlockNewline;
+  final bool Function()? onSoftNewline;
   final bool Function({required bool backspace})? onAttachmentDelete;
+  final bool showCursor;
 
   @override
   State<_SourceEditor> createState() => _SourceEditorState();
@@ -161,6 +178,9 @@ class _SourceEditorState extends State<_SourceEditor> {
         expands: true,
         maxLines: null,
         keyboardType: TextInputType.multiline,
+        // 光标落在嵌套表格单元格内时（单元格是正文焦点节点的子树），正文仍会因
+        // `hasFocus` 而画自己的光标；置 false 隐藏正文光标，避免「两个光标」。
+        showCursor: widget.showCursor,
         style: _textStyle,
         // [EditableText] 的默认 strutStyle 是
         // `StrutStyle.fromTextStyle(style, forceStrutHeight: true)`，会把**每一行**都强制
@@ -177,6 +197,10 @@ class _SourceEditorState extends State<_SourceEditor> {
           hintStyle: TextStyle(color: scheme.outline.withValues(alpha: 0.6)),
         ),
         onChanged: (_) => _scheduleSave(),
+        // 点击正文时强制把主焦点交还正文输入框，而不是停留在嵌套的表格单元格内：
+        // 单元格是 _focus 的焦点子树，会让 EditableText 误以为「已聚焦」从而跳过
+        // requestFocus，造成「光标卡在表格里出不来」。显式 requestFocus 打破该误判。
+        onTap: () => _focus.requestFocus(),
       ),
     );
   }
@@ -189,16 +213,23 @@ class _SourceEditorState extends State<_SourceEditor> {
   /// 额外占用 Tab 焦点。仅在提供任一钩子（仅格式模式）时启用。
   Widget _wrapKeys(Widget child) {
     final newline = widget.onBlockNewline;
+    final softNewline = widget.onSoftNewline;
     final del = widget.onAttachmentDelete;
-    if (newline == null && del == null) return child;
+    if (newline == null && softNewline == null && del == null) return child;
     return Focus(
       canRequestFocus: false,
       onKeyEvent: (node, event) {
         if (event is! KeyDownEvent) return KeyEventResult.ignored;
         final key = event.logicalKey;
-        if (newline != null &&
-            (key == LogicalKeyboardKey.enter ||
-                key == LogicalKeyboardKey.numpadEnter)) {
+        final isEnter = key == LogicalKeyboardKey.enter ||
+            key == LogicalKeyboardKey.numpadEnter;
+        final isShift = HardwareKeyboard.instance.isShiftPressed;
+        if (isEnter && isShift && softNewline != null) {
+          return softNewline()
+              ? KeyEventResult.handled
+              : KeyEventResult.ignored;
+        }
+        if (isEnter && !isShift && newline != null) {
           return newline() ? KeyEventResult.handled : KeyEventResult.ignored;
         }
         if (del != null && key == LogicalKeyboardKey.backspace) {

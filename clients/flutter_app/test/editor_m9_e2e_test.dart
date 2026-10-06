@@ -3,7 +3,6 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -280,7 +279,6 @@ void main() {
         isTrue,
         reason: 'Ctrl+V 富粘贴应把 <strong> 转为 **加粗**（FR-45 / AC-142）',
       );
-      final afterRich = ctrl.text;
 
       // ---- 纯文本粘贴：Ctrl+Shift+V ----
       ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);

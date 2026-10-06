@@ -72,6 +72,13 @@ class _NoteEditorState extends State<NoteEditor>
   /// 正文焦点节点：工具栏执行指令后据此把焦点交还正文，便于连贯排版。
   final FocusNode _contentFocus = FocusNode();
 
+  /// 是否有焦点落在嵌套的表格单元格内（含上下文操作按钮）。
+  ///
+  /// 单元格是 [_contentFocus] 的焦点子树：焦点在单元格时 [_contentFocus] 的
+  /// `hasFocus` 仍为 true，正文会画出自己的光标，出现「两个光标」。据此在
+  /// 单元格聚焦期间隐藏正文光标（见 [MarkdownEditor.showCursor]）。
+  bool _tableHasFocus = false;
+
   List<String> _tags = [];
   List<Attachment> _attachments = [];
 
@@ -396,6 +403,18 @@ class _NoteEditorState extends State<NoteEditor>
     return true;
   }
 
+  /// 格式模式下 Shift+Enter：表格单元格内插入 `<br>` 软换行。
+  bool _handleSoftNewline() {
+    if (_mode != EditorMode.formatted) return false;
+    final sel = _content.value.selection;
+    if (!sel.isValid || !sel.isCollapsed) return false;
+    final result =
+        EditorFormat.tableSoftNewline(_content.text, sel.extentOffset);
+    if (result == null) return false;
+    _writeBack(result);
+    return true;
+  }
+
   /// 格式模式下把附件链接引用 `[name](sui://<sha256>)` 渲染为原子呈现单元（FR-46）。
   Widget _buildAttachmentLink(BuildContext context, AttachmentRef ref) {
     final sel = _content.value.selection;
@@ -403,12 +422,14 @@ class _NoteEditorState extends State<NoteEditor>
         sel.isCollapsed &&
         sel.start >= ref.start &&
         sel.start <= ref.end;
+    final att = _attachments.where((a) => a.sha256 == ref.sha256).firstOrNull;
     return _FormatAttachmentLinkUnit(
       label: ref.label,
       isImage: ref.isImage,
       corrupt: ref.corrupt,
       selected: selected,
       onSelect: () => _selectAttachmentLink(ref),
+      onDoubleTap: att != null ? () => _openAttachment(att) : null,
     );
   }
 
@@ -553,7 +574,8 @@ class _NoteEditorState extends State<NoteEditor>
   /// 从而**不抢占焦点**——用户可能正在某个单元格内输入，夺焦会中断连续编辑。
   void _writeBackTable(String newText) {
     final sel = _content.value.selection;
-    final base = (sel.isValid ? sel.start : newText.length).clamp(0, newText.length);
+    final base =
+        (sel.isValid ? sel.start : newText.length).clamp(0, newText.length);
     final extent = (sel.isValid ? sel.end : base).clamp(0, newText.length);
     _content.value = TextEditingValue(
       text: newText,
@@ -595,7 +617,8 @@ class _NoteEditorState extends State<NoteEditor>
     final start = (sel.isValid ? sel.start : text.length).clamp(0, text.length);
     final end = (sel.isValid ? sel.end : start).clamp(0, text.length);
     final caret = start + payload.length;
-    _writeBack(FormatResult(text.replaceRange(start, end, payload), caret, caret));
+    _writeBack(
+        FormatResult(text.replaceRange(start, end, payload), caret, caret));
   }
 
   /// 用**当前正本**重新解析同一个表格块，得到与正本一致的最新结构。
@@ -647,11 +670,17 @@ class _NoteEditorState extends State<NoteEditor>
         sel.isCollapsed &&
         sel.start >= image.start &&
         sel.start <= spanEnd;
+    final uri = Uri.tryParse(image.url);
+    final isSui = uri != null && uri.scheme == 'sui';
+    final att = isSui
+        ? _attachments.where((a) => a.sha256 == uri.host).firstOrNull
+        : null;
     return _FormatImageUnit(
       image: image,
       selected: selected,
       block: block ?? false,
       onSelect: () => _selectImage(image),
+      onDoubleTap: att != null ? () => _openAttachment(att) : null,
     );
   }
 
@@ -684,6 +713,13 @@ class _NoteEditorState extends State<NoteEditor>
     _save();
   }
 
+  /// 表格单元格（含上下文操作按钮）聚焦变化的回调：据以触发重建，切换正文光标的
+  /// 显隐（[MarkdownEditor.showCursor]），消除「两个光标」并配合正文点击显式取回焦点。
+  void _setTableFocus(bool focused) {
+    if (_tableHasFocus == focused) return;
+    setState(() => _tableHasFocus = focused);
+  }
+
   /// 格式模式下把整块 GFM 管道表渲染为可交互「表格呈现单元」（FR-44 / §12.1）。
   ///
   /// 表格为**独占块**，宽按可用段落宽计算（`LayoutBuilder`，无界时退回 720），列较多时
@@ -698,61 +734,67 @@ class _NoteEditorState extends State<NoteEditor>
             constraints.maxWidth.isFinite ? constraints.maxWidth : 720.0;
         return SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          child: FormatTableView(
-            table: table,
-            availableWidth: available,
-            onSetCell: (rowIndex, column, value) {
-              final t = _resolveTable(table);
-              _writeBackTable(
-                EditorFormat.setTableCell(
-                  _content.text,
-                  t,
-                  rowIndex,
-                  column,
-                  value,
-                ),
-              );
-            },
-            onInsertRow: (rowIndex, after) {
-              final t = _resolveTable(table);
-              _writeBackTable(
-                EditorFormat.insertTableRow(
-                  _content.text,
-                  t,
-                  rowIndex,
-                  after: after,
-                ),
-              );
-            },
-            onRemoveRow: (rowIndex) {
-              final t = _resolveTable(table);
-              _writeBackTable(
-                EditorFormat.removeTableRow(_content.text, t, rowIndex),
-              );
-            },
-            onInsertColumn: (column, after) {
-              final t = _resolveTable(table);
-              // `after < 0` 表示插到最前：某列「左侧插入」即在其**前一列之后**插入。
-              _writeBackTable(
-                EditorFormat.addTableColumn(
-                  _content.text,
-                  t,
-                  after: after ? column : column - 1,
-                ),
-              );
-            },
-            onRemoveColumn: (column) {
-              final t = _resolveTable(table);
-              _writeBackTable(
-                EditorFormat.removeTableColumn(_content.text, t, column),
-              );
-            },
-            onSetAlignment: (column, align) {
-              final t = _resolveTable(table);
-              _writeBackTable(
-                EditorFormat.setTableAlignment(_content.text, t, column, align),
-              );
-            },
+          child: Focus(
+            onFocusChange: _setTableFocus,
+            child: FormatTableView(
+              table: table,
+              availableWidth: available,
+              onSetCell: (rowIndex, column, value) {
+                final t = _resolveTable(table);
+                _writeBackTable(
+                  EditorFormat.setTableCell(
+                    _content.text,
+                    t,
+                    rowIndex,
+                    column,
+                    value,
+                  ),
+                );
+              },
+              onInsertRow: (rowIndex, after) {
+                final t = _resolveTable(table);
+                _writeBackTable(
+                  EditorFormat.insertTableRow(
+                    _content.text,
+                    t,
+                    rowIndex,
+                    after: after,
+                  ),
+                );
+              },
+              onRemoveRow: (rowIndex) {
+                final t = _resolveTable(table);
+                _writeBackTable(
+                  EditorFormat.removeTableRow(_content.text, t, rowIndex),
+                );
+              },
+              onInsertColumn: (column, after) {
+                final t = _resolveTable(table);
+                // `after < 0` 表示插到最前：某列「左侧插入」即在其**前一列之后**插入。
+                _writeBackTable(
+                  EditorFormat.addTableColumn(
+                    _content.text,
+                    t,
+                    after: after ? column : column - 1,
+                  ),
+                );
+              },
+              onRemoveColumn: (column) {
+                final t = _resolveTable(table);
+                _writeBackTable(
+                  EditorFormat.removeTableColumn(_content.text, t, column),
+                );
+              },
+              onSetAlignment: (column, align) {
+                final t = _resolveTable(table);
+                _writeBackTable(
+                  EditorFormat.setTableAlignment(
+                      _content.text, t, column, align),
+                );
+              },
+              onInsertAttachment: (rowIndex, column) =>
+                  _attachIntoCell(table, rowIndex, column),
+            ),
           ),
         );
       },
@@ -805,7 +847,9 @@ class _NoteEditorState extends State<NoteEditor>
               ),
               // 标签入口（ui-spec §4 / BR-21.4）：标题行**右上角图标**、与标题同行，
               // 点击弹出标签浮层；标签**不再单独占用一行**。
-              Padding(padding: const EdgeInsets.only(top: 4), child: _buildTagEntry()),
+              Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: _buildTagEntry()),
             ],
           ),
         ),
@@ -864,10 +908,14 @@ class _NoteEditorState extends State<NoteEditor>
               imageBuilder: _buildImage,
               undoController: _undoHistory,
               focusNode: _contentFocus,
+              showCursor: !_tableHasFocus,
               onBlockNewline:
                   _mode == EditorMode.formatted ? _handleBlockNewline : null,
-              onAttachmentDelete:
-                  _mode == EditorMode.formatted ? _handleAttachmentDelete : null,
+              onSoftNewline:
+                  _mode == EditorMode.formatted ? _handleSoftNewline : null,
+              onAttachmentDelete: _mode == EditorMode.formatted
+                  ? _handleAttachmentDelete
+                  : null,
             ),
           ),
         ),
@@ -1036,6 +1084,67 @@ class _NoteEditorState extends State<NoteEditor>
     });
     await _save();
     _toast('已添加 $count 个附件');
+  }
+
+  /// 在**活动单元格**内插入图片 / 附件引用（§12.1.1「单元格内附件」）。
+  ///
+  /// 复用 [pickAttachments] 选文件、`AppController.addAttachmentFromBytes` 入库（同 FR-14 /
+  /// FR-24 / §4.2），再经 [EditorFormat.insertTableCellAttachment] 把引用文本（图片
+  /// `![文件名](sui://<sha256>)`、其余 `[文件名](sui://<sha256>)`）**就地回写活动单元格**，
+  /// 其余单元格逐字不动（BR-44.2）。附件字节与内容寻址存储不变。
+  Future<void> _attachIntoCell(
+    ParsedTable fallback,
+    int rowIndex,
+    int column,
+  ) async {
+    final id = _noteId;
+    if (id == null) return;
+
+    List<PickedAttachment> picked;
+    try {
+      picked = await pickAttachments();
+    } catch (e) {
+      _toast('打开文件选择器失败：$e');
+      return;
+    }
+    if (picked.isEmpty) return;
+
+    var text = _content.text;
+    var count = 0;
+    for (final f in picked) {
+      try {
+        final att = await _controller.addAttachmentFromBytes(
+          noteId: id,
+          filename: f.filename,
+          bytes: f.bytes,
+        );
+        // 每次落笔都以**当前正本**重新解析同一表格，拿到最新结构再写入。
+        final parsed = EditorFormat.parseTable(text, fallback.start);
+        final table = (parsed != null && parsed.start == fallback.start)
+            ? parsed
+            : fallback;
+        text = EditorFormat.insertTableCellAttachment(
+          text,
+          table,
+          rowIndex,
+          column,
+          filename: att.filename,
+          sha256: att.sha256,
+          isImage: mimeKindFor(att.filename) == 'image',
+        );
+        count++;
+      } catch (e) {
+        _toast('附件「${f.filename}」添加失败：$e');
+      }
+    }
+    if (count == 0 || !mounted) return;
+
+    // 以「按本笔记刷新」的返回值更新附件缓存；引用文本整体回写正本并即时保存。
+    final freshAttachments = await _controller.refreshAttachments(id);
+    if (!mounted) return;
+    setState(() => _attachments = freshAttachments);
+    _writeBackTable(text);
+    _toast('已在单元格插入 $count 个附件');
   }
 
   Future<void> _removeAttachment(Attachment a) async {
@@ -1654,6 +1763,7 @@ class _FormatImageUnit extends StatelessWidget {
     required this.selected,
     required this.onSelect,
     this.block = false,
+    this.onDoubleTap,
   });
 
   final ParsedImage image;
@@ -1664,6 +1774,8 @@ class _FormatImageUnit extends StatelessWidget {
   /// 块高向下扩展，后续文字整体下移；历史行内引用为 false，保持行内呈现。
   final bool block;
 
+  final VoidCallback? onDoubleTap;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -1672,6 +1784,7 @@ class _FormatImageUnit extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onSelect,
+      onDoubleTap: onDoubleTap,
       child: Container(
         margin: EdgeInsets.symmetric(
           horizontal: 2,
@@ -1742,7 +1855,8 @@ class _FormatImageUnit extends StatelessWidget {
 }
 
 /// 格式模式内联的附件**链接**呈现单元：把 `[name](sui://<sha256>)` 呈现为可点选的
-/// 整块「附件胶囊」（FR-46 / §12.4）。仅格式模式启用；点按即选中（光标落入引用）。
+/// 整块「附件胶囊」（FR-46 / §12.4）。仅格式模式启用；点按即选中（光标落入引用）；
+/// **双击直接打开预览**（FR-47 / AC-148）。
 /// 残缺引用（缺 `)`）显式标红，提示可退格自愈（AC-147）。
 class _FormatAttachmentLinkUnit extends StatelessWidget {
   const _FormatAttachmentLinkUnit({
@@ -1751,6 +1865,7 @@ class _FormatAttachmentLinkUnit extends StatelessWidget {
     required this.corrupt,
     required this.selected,
     required this.onSelect,
+    this.onDoubleTap,
   });
 
   final String label;
@@ -1758,6 +1873,7 @@ class _FormatAttachmentLinkUnit extends StatelessWidget {
   final bool corrupt;
   final bool selected;
   final VoidCallback onSelect;
+  final VoidCallback? onDoubleTap;
 
   @override
   Widget build(BuildContext context) {
@@ -1768,6 +1884,7 @@ class _FormatAttachmentLinkUnit extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onSelect,
+      onDoubleTap: onDoubleTap,
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -2039,9 +2156,7 @@ class _AttachmentPreviewDialog extends StatelessWidget {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
-                  ok
-                      ? '已用系统默认应用打开；编辑保存后将自动回写'
-                      : '当前平台不支持调用系统应用，可先用内置预览查看',
+                  ok ? '已用系统默认应用打开；编辑保存后将自动回写' : '当前平台不支持调用系统应用，可先用内置预览查看',
                 ),
                 duration: const Duration(seconds: 2),
               ),
@@ -2102,7 +2217,8 @@ class _AttachmentPreviewDialog extends StatelessWidget {
           child: SingleChildScrollView(
             child: SelectableText(
               text,
-              style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+              style:
+                  theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
             ),
           ),
         ),

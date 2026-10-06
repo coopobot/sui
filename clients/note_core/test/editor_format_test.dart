@@ -730,6 +730,144 @@ void main() {
     });
   });
 
+  group('TableCellEnterGhostRow（FR-44 / §12.1.1 / AC-139）', () {
+    const table = '| a | b |\n| --- | --- |\n| 1 | 2 |';
+
+    test('非末列回车：仅移动光标到下一单元格，正本逐字不动', () {
+      final r = EditorFormat.blockNewline(table, 3)!;
+      expect(r.text, table, reason: '跨单元格不新增行、不改写正本');
+      expect(r.selectionStart, 6, reason: '落到第二列 `| ` 之后');
+    });
+
+    test('末行末列且该行非空：回车追加一空行并落首列（结构合法）', () {
+      final r = EditorFormat.blockNewline(table, table.length - 1)!;
+      expect(r.text, '$table\n|  |  |');
+      expect(EditorFormat.parseTable(r.text)!.wellFormed, isTrue);
+    });
+
+    test('末行末列且该行全空：幽灵行守卫——不再追加，仅回退光标到首列', () {
+      const withEmpty = '| a | b |\n| --- | --- |\n| 1 | 2 |\n|  |  |';
+      final r = EditorFormat.blockNewline(withEmpty, withEmpty.length - 1)!;
+      expect(r.text, withEmpty, reason: '尾部空行不再堆叠');
+      final lastLineStart = withEmpty.lastIndexOf('\n') + 1;
+      expect(r.selectionStart, lastLineStart + 2,
+          reason: '光标退回本行首列 `| ` 之后');
+    });
+
+    test('末格连续回车：正本只新增一行，不产生无法删除的幽灵行', () {
+      var text = table;
+      for (var i = 0; i < 5; i++) {
+        final r = EditorFormat.blockNewline(text, text.length - 1);
+        expect(r, isNotNull);
+        text = r!.text;
+      }
+      expect(text, '$table\n|  |  |', reason: '连续回车最多只追加一行');
+      expect(EditorFormat.parseTable(text)!.wellFormed, isTrue);
+    });
+  });
+
+  group('TableCellAttachment（FR-44 / §12.1.1 / AC-139）', () {
+    const table = '| a | b |\n| --- | --- |\n| 1 | 2 |';
+    const sha = 'c0ffee';
+
+    test('反转义：`\\|` → `|`，与转义往返一致', () {
+      expect(EditorFormat.unescapeTableCell(r'a\|b'), 'a|b');
+      expect(EditorFormat.unescapeTableCell('a|b'), 'a|b',
+          reason: '未转义保持原样');
+      expect(EditorFormat.unescapeTableCell(r'a\|b\|c'), 'a|b|c');
+      expect(
+        EditorFormat.escapeTableCell(EditorFormat.unescapeTableCell(r'a\|b')),
+        r'a\|b',
+        reason: '转义 → 反转义 → 转义 往返一致',
+      );
+    });
+
+    test('空数据单元格插入图片：生成 `![](sui://…)`，其余单元格逐字不动', () {
+      const src = '| a | b |\n| --- | --- |\n|  | 2 |';
+      final t = EditorFormat.parseTable(src)!;
+      final out = EditorFormat.insertTableCellAttachment(
+        src,
+        t,
+        0,
+        0,
+        filename: 'p.png',
+        sha256: sha,
+      );
+      expect(out, '| a | b |\n| --- | --- |\n| ![p.png](sui://$sha) | 2 |');
+      final re = EditorFormat.parseTable(out)!;
+      expect(re.wellFormed, isTrue);
+      expect(re.rows.first.first, '![p.png](sui://$sha)');
+    });
+
+    test('表头空单元格插入附件链接（非图片）：生成 `[](sui://…)`', () {
+      const hdr = '| a |  |\n| --- | --- |\n| 1 | 2 |';
+      final t = EditorFormat.parseTable(hdr)!;
+      final out = EditorFormat.insertTableCellAttachment(
+        hdr,
+        t,
+        -1,
+        1,
+        filename: 'doc.pdf',
+        sha256: sha,
+        isImage: false,
+      );
+      expect(
+          out, '| a | [doc.pdf](sui://$sha) |\n| --- | --- |\n| 1 | 2 |');
+      expect(EditorFormat.parseTable(out)!.wellFormed, isTrue);
+    });
+
+    test('非空单元格追加引用：以 `<br>` 软换行拼接，既有文字保留、不破坏表格行', () {
+      final t = EditorFormat.parseTable(table)!;
+      final out = EditorFormat.insertTableCellAttachment(
+        table,
+        t,
+        0,
+        0,
+        filename: 'p.png',
+        sha256: sha,
+      );
+      expect(
+        out,
+        '| a | b |\n| --- | --- |\n| 1<br>![p.png](sui://$sha) | 2 |',
+      );
+      final re = EditorFormat.parseTable(out)!;
+      expect(re.wellFormed, isTrue, reason: '引用不产生物理换行，表格仍合法');
+      expect(re.rows.first.first, '1<br>![p.png](sui://$sha)');
+    });
+
+    test('既有单元格含转义竖线：字面文本合并后再转义回写（往返不丢字）', () {
+      const esc = '| a | b |\n| --- | --- |\n| 1\\|2 |  |';
+      final t = EditorFormat.parseTable(esc)!;
+      final out = EditorFormat.insertTableCellAttachment(
+        esc,
+        t,
+        0,
+        0,
+        filename: 'p.png',
+        sha256: sha,
+      );
+      expect(out,
+          '| a | b |\n| --- | --- |\n| 1\\|2<br>![p.png](sui://$sha) |  |');
+      final re = EditorFormat.parseTable(out)!;
+      expect(re.rows.first.first, '1\\|2<br>![p.png](sui://$sha)');
+      expect(re.wellFormed, isTrue);
+    });
+
+    test('行 / 列越界时原样返回', () {
+      final t = EditorFormat.parseTable(table)!;
+      expect(
+        EditorFormat.insertTableCellAttachment(table, t, 9, 0,
+            filename: 'p.png', sha256: sha),
+        table,
+      );
+      expect(
+        EditorFormat.insertTableCellAttachment(table, t, 0, 9,
+            filename: 'p.png', sha256: sha),
+        table,
+      );
+    });
+  });
+
   group('TableRenderDegrade（FR-44 / §12.1 / AC-140）', () {
     test('无分隔行：尽力解析为表头 + 数据行，wellFormed=false', () {
       final t = EditorFormat.parseTable('| a | b |\n| 1 | 2 |')!;
