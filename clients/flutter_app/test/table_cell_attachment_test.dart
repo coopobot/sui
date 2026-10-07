@@ -1,13 +1,16 @@
-/// M9 补丁 v0.10.6：**表格单元格内附件的原子呈现与编辑** widget 测试
-/// （editor-formatting.md §12.1.2 / FR-46 / FR-47 / BR-44.8 / BR-46.6 / AC-140）。
+/// M9 补丁 v0.10.6~v0.10.10：**表格单元格内附件的原子呈现与编辑** widget 测试
+/// （editor-formatting.md §12.1.2 / §12.1.4 / FR-46 / FR-47 / BR-44.8 / BR-44.9 /
+/// BR-46.6 / AC-140）。
 ///
-/// 覆盖三件事：
+/// 覆盖四件事：
 /// 1. 单元格内的附件引用**始终以原子呈现单元渲染**（图片 / 附件卡片），**不再露出原始 Markdown
 ///    文本**（含 `sui://` 之后的 64 位 sha256 长串）；span 树与控制器文本**等长**（BR-27.1 偏移契约）。
 /// 2. 单元格内 `Backspace` / `Delete` **在本格内恢复生效**（逐字符删除并即时回写正本），
 ///    且**不冒泡**到外层编辑器破坏表结构。
 /// 3. 命中附件引用时**整块删除**（一次删除整个引用，不逐字符）；单击呈现单元为**选中**
 ///    （光标落到引用末尾）、双击入口已接线（打开预览 / 系统应用，FR-47）。
+/// 4. **尺寸约束**：格内图片以固定正方形缩略图呈现、完整落在格内，且**不遮盖同格文本**
+///    （图片前后的文字可见、光标可达）；超长文件名卡片省略号截断（BR-44.9 / §12.1.4 ⑫⑮）。
 ///
 /// 纪律：全组**禁用** `pumpAndSettle()`（30s 周期兜底同步会让假时钟无限排帧，Agents.md §5.2）；
 /// 真实 I/O（`bootstrap` / 附件字节入库 / 读字节）一律走 `tester.runAsync`。
@@ -16,6 +19,7 @@ library;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:note_core/note_core.dart';
@@ -138,16 +142,52 @@ int _crc32(List<int> bytes) {
   return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
 }
 
-/// 等图片**真正解码完成**（render box 高度 > 1）——解码是异步的，只等 widget 出现不够，
-/// 而本次缺陷恰恰发生在「解码后尺寸突变」这一刻。
-Future<void> _waitImageDecoded(WidgetTester tester, Finder img) async {
+/// 等图片**真正解码完成**——解码是异步的，只等 `Image` widget 出现不够（此刻可能仍是
+/// 「加载中 / 损坏」占位），而本次缺陷恰恰发生在「解码后尺寸突变」这一刻。
+///
+/// 判定口径：`Image` 已挂载 **且** 格内不再有占位（加载转圈 / 损坏图标）。
+Future<void> _waitImageDecoded(
+  WidgetTester tester,
+  Finder cell,
+  Finder img,
+) async {
   for (var i = 0; i < 40; i++) {
     await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 80)));
     await tester.pump();
-    if (img.evaluate().isNotEmpty && tester.getSize(img).height > 1) return;
+    final placeholder = find.descendant(
+      of: cell,
+      matching: find.byIcon(Icons.broken_image_outlined),
+    );
+    final spinner = find.descendant(
+      of: cell,
+      matching: find.byType(CircularProgressIndicator),
+    );
+    if (img.evaluate().isNotEmpty &&
+        placeholder.evaluate().isEmpty &&
+        spinner.evaluate().isEmpty) {
+      return;
+    }
   }
   fail('超时：单元格内图片未完成解码');
+}
+
+/// 单元格子树里真正的 [RenderEditable]（元素根是包装 render object，需向下遍历）。
+RenderEditable _renderEditable(WidgetTester tester, String cellKey) {
+  RenderEditable? found;
+  void visit(RenderObject o) {
+    if (found != null) return;
+    if (o is RenderEditable) {
+      found = o;
+      return;
+    }
+    o.visitChildren(visit);
+  }
+
+  visit(tester.renderObject(find.descendant(
+      of: find.byKey(ValueKey<String>(cellKey)),
+      matching: find.byType(EditableText))));
+  return found!;
 }
 
 TextEditingController _contentValue(WidgetTester tester) =>
@@ -448,20 +488,16 @@ void main() {
       );
 
       const cellKey = 'sui-table-0-0';
+      final cell = find.byKey(const ValueKey<String>(cellKey));
       final img = _inCell(cellKey, find.byType(Image));
-      await _waitImageDecoded(tester, img);
+      await _waitImageDecoded(tester, cell, img);
 
       final imageRect = tester.getRect(img);
-      final cellRect = tester.getRect(find.byKey(const ValueKey<String>(cellKey)));
+      final cellRect = tester.getRect(cell);
       expect(
-        imageRect.height,
-        80,
-        reason: '格内图片按固定高度 80 呈现（尺寸自首帧稳定，不随异步解码突变）',
-      );
-      expect(
-        imageRect.width,
-        lessThanOrEqualTo(cellRect.width),
-        reason: '格内图片宽度不得超过单元格（列宽）',
+        imageRect.size,
+        const Size(80, 80),
+        reason: '格内图片以**固定正方形缩略图**（边长 80）呈现（尺寸自首帧稳定）',
       );
       // 四边均须落在单元格内——旧实现图片 180 高、行高仅 29，上下各溢出约 75px。
       expect(imageRect.top, greaterThanOrEqualTo(cellRect.top),
@@ -470,6 +506,11 @@ void main() {
           reason: '图片下边界不得溢出单元格（行高由单元格最小高度兜底）');
       expect(imageRect.left, greaterThanOrEqualTo(cellRect.left));
       expect(imageRect.right, lessThanOrEqualTo(cellRect.right));
+      expect(
+        cellRect.height,
+        greaterThanOrEqualTo(80),
+        reason: '行高须容纳缩略图（含图片的单元格另加**强制行高** = 缩略图边长）',
+      );
 
       // 正本一字不改
       expect(_contentValue(tester).text, src);
@@ -505,6 +546,69 @@ void main() {
       expect(label.overflow, TextOverflow.ellipsis, reason: '长文件名须以省略号截断');
       expect(label.maxLines, 1);
 
+      await db.close();
+    });
+
+    testWidgets('单元格内图片不遮盖同格文本：图片前后的文字可见且光标可达（§12.1.4 ⑮）',
+        (tester) async {
+      final db = AppDatabase.memory();
+      final dataDir = _tempDataDir('nocover');
+      final bytes = _pngBytes(400, 600);
+      final sha = sha256Hex(bytes);
+      // 文字在图片**前**与**后**两侧，覆盖用户报的「图片后方无法编辑文字」。
+      final src = '| A | B |\n| --- | --- |\n| 文字![图](sui://$sha)后文 | 2 |';
+      await _pumpEditor(
+        tester,
+        db,
+        'm9t12-nocover',
+        src,
+        dataDir: dataDir,
+        attachmentName: 'big.png',
+        attachmentBytes: bytes,
+      );
+
+      const cellKey = 'sui-table-0-0';
+      final cell = find.byKey(const ValueKey<String>(cellKey));
+      final img = _inCell(cellKey, find.byType(Image));
+      await _waitImageDecoded(tester, cell, img);
+
+      final imgRect = tester.getRect(img);
+
+      final editable = _renderEditable(tester, cellKey);
+      final text = editable.text!.toPlainText();
+      final ref = (_cellController(tester, cellKey) as TableCellEditingController)
+          .attachmentRefs
+          .single;
+      Rect caretAt(int offset) => editable
+          .getLocalRectForCaret(TextPosition(offset: offset))
+          .shift(editable.localToGlobal(Offset.zero));
+
+      // 图片**前方**的文字（偏移 0/1 落在「文字」上）不得被遮盖 —— 旧实现这两处
+      // 与图片后方偏移的光标矩形**全部**落在图片矩形内（文字既被遮盖又点不到）。
+      for (final offset in <int>[0, 1]) {
+        expect(
+          caretAt(offset).overlaps(imgRect),
+          isFalse,
+          reason: '图片前方文字（偏移 $offset）被图片遮盖',
+        );
+      }
+      // 图片**后方**的文字：引用末尾之后一个码元、以及整格末尾，光标都须可达且不被遮盖。
+      for (final offset in <int>[ref.end + 1, text.length]) {
+        expect(
+          caretAt(offset).overlaps(imgRect),
+          isFalse,
+          reason: '图片后方光标（偏移 $offset）被图片遮盖 → 无法继续编辑文字',
+        );
+      }
+      // 缩略图尺寸固定，且与其后文字在**同一显示行**内（行高 = 边长）：可编辑区高度即一行。
+      expect(imgRect.size, const Size(80, 80), reason: '正方形缩略图');
+      expect(
+        editable.size.height,
+        80,
+        reason: '含图片单元格的强制行高 = 缩略图边长，图片正好落在自己那一行内',
+      );
+
+      expect(_contentValue(tester).text, src, reason: '呈现层改动不得动正本');
       await db.close();
     });
   });

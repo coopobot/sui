@@ -17,16 +17,39 @@ typedef TableCellUnitBuilder = Widget Function(
   required VoidCallback onSelect,
 });
 
+/// 单元格内**图片呈现单元**的缩略图边长（像素，正方形）。
+///
+/// **单一来源**：呈现单元（`note_editor.dart` 的 `_buildCellUnit`）用它定盒子尺寸，
+/// 单元格（本文件）用它定**强制行高**与**最小高度**——改一处即三处同步。
+///
+/// 尺寸必须**固定**（不能随图片自然尺寸 / 解码进度变化）：`WidgetSpan` 子项的高度
+/// **不参与行盒与段落测量**（框架明确「高度不受约束，会造成文字溢出 / 截断」），
+/// 且图片字节解码是异步的、解码完成后行高不会重算（§12.1.4 ⑫⑮）。
+const double kTableCellImageBoxSize = 80;
+
 /// 单元格内含**图片**呈现单元时的最小高度（像素）。
 ///
-/// = 图片盒高（`_NoteEditorState._tableCellImageHeight` = 80）+ 呈现单元外边距 / 内边距 /
+/// = 缩略图边长（[kTableCellImageBoxSize] = 80）+ 呈现单元外边距 / 内边距 /
 /// 边框（约 12）+ 单元格内边距（8）+ 余量（4）。
 ///
-/// **为何要有这个兜底**：`WidgetSpan` 子项的**高度不参与段落测量**（框架明确「高度不受
-/// 约束，会造成文字溢出 / 截断」），而图片字节的解码是**异步**的、实测解码完成后**行高
-/// 不会重算**——故行高必须由**单元格自身**给足，图片才能完整落在格内（§12.1.4 ⑫）。
-/// 常量与 `_tableCellImageHeight` 是**成对**的：调整其中一个必须同步另一个。
-const double _tableCellMinHeightWithImage = 104;
+/// **为何要有这个兜底**：`WidgetSpan` 子项的**高度不参与段落测量**，而图片字节的解码是
+/// **异步**的、实测解码完成后**行高不会重算**——故行高必须由**单元格自身**给足，
+/// 图片才能完整落在格内（§12.1.4 ⑫）。
+const double _tableCellMinHeightWithImage = kTableCellImageBoxSize + 24;
+
+/// 单元格内含**图片**呈现单元时的**强制行高**（`StrutStyle`，§12.1.4 ⑮）。
+///
+/// 行盒**不会**因内联子项而增高，若不强制，[kTableCellImageBoxSize] 高的缩略图以「行内
+/// 中间对齐」会压在其**相邻文本行**上：实测 `文字![图]` 单元格里偏移 `0/1` 与图片后方的
+/// 光标矩形**全部落在图片矩形内**，文字既被遮盖、点也点不到。故含图片的单元格**强制每行
+/// 都有缩略图那么高**，图片正好落在自己那一行内，相邻文本行的文字与光标都不被覆盖；
+/// 行高来自**文本 strut**（而非内联子项），段落高度天然可测，不依赖任何异步时机。
+const double _tableCellFontSize = 14;
+const StrutStyle _imageUnitStrut = StrutStyle(
+  fontSize: _tableCellFontSize,
+  height: kTableCellImageBoxSize / _tableCellFontSize,
+  forceStrutHeight: true,
+);
 
 /// 格式模式下的**可视化表格**呈现单元（M9-T06 / FR-44 / ui-spec §18.1）。
 ///
@@ -942,8 +965,11 @@ class _FormatTableCellState extends State<_FormatTableCell> {
               focusNode: _focus,
               maxLines: null,
               textAlign: _textAlign,
+              // 含图片单元时**强制行高 = 缩略图边长**（§12.1.4 ⑮）：行盒不因内联子项增高，
+              // 否则 80 高的缩略图会以「行内中间对齐」压在相邻文本行上，文字被遮盖且点不到。
+              strutStyle: hasImageUnit ? _imageUnitStrut : null,
               style: TextStyle(
-                fontSize: 14,
+                fontSize: _tableCellFontSize,
                 fontWeight:
                     widget.isHeader ? FontWeight.w600 : FontWeight.normal,
               ),

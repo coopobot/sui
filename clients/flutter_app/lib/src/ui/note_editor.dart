@@ -818,20 +818,12 @@ class _NoteEditorState extends State<NoteEditor>
     );
   }
 
-  /// 单元格内图片呈现盒的**固定高度**（像素）：图片按「列宽 × 本高度」的盒子 `contain` 居中呈现
-  /// （§12.1.4 / BR-44.9）。
-  ///
-  /// **必须是固定值**：图片字节的读取与解码是**异步**的，若让图片按「自然尺寸 / 自身比例」自由定尺，
-  /// 首帧只有加载占位的高度、解码后尺寸突变，而 `WidgetSpan` 子项高度不参与段落测量、行高也不会重算，
-  /// 图片就会绘到行外压住相邻行。固定盒子使尺寸**自首帧即稳定**。
-  /// ⚠️ 与 `format_table.dart` 的 `_tableCellMinHeightWithImage`（= 本值 + 24）**成对**，改一处须同步另一处。
-  static const double _tableCellImageHeight = 80;
-
   /// 单元格内**附件引用**的原子呈现单元（§12.1.2 / FR-46 / BR-46.6）。
   ///
   /// 与正文**同源**：图片走 `_SuiAttachmentImage`（附件缓存 + 加载 / 失败占位）、附件链接
   /// 显示为附件卡片（残缺引用带错误标记）；单击选中（由单元格提供回调）、双击打开附件
-  /// （内置预览 / 系统默认应用，承 FR-47）。图片按**单元格可用宽度**等比缩放并**限高**。
+  /// （内置预览 / 系统默认应用，承 FR-47）。图片呈 **`kTableCellImageBoxSize` 边长的正方形
+  /// 缩略图**（尺寸固定、自首帧稳定；单元格另以**强制行高**保证它不遮盖同格文本，§12.1.4 ⑮）。
   Widget _buildCellUnit(
     BuildContext context,
     String text,
@@ -858,8 +850,8 @@ class _NoteEditorState extends State<NoteEditor>
       selected: selected,
       onSelect: onSelect,
       onDoubleTap: onOpen,
-      // 单元格模式（`maxHeight != null`）：固定尺寸盒子「列宽 × 80」，见 §12.1.4 / BR-44.9。
-      maxHeight: _tableCellImageHeight,
+      // 单元格模式：固定**正方形缩略图**（边长 `kTableCellImageBoxSize`），见 §12.1.4 / BR-44.9。
+      cellBoxSize: kTableCellImageBoxSize,
     );
   }
 
@@ -1826,7 +1818,7 @@ class _FormatImageUnit extends StatelessWidget {
     required this.onSelect,
     this.block = false,
     this.onDoubleTap,
-    this.maxHeight,
+    this.cellBoxSize,
   });
 
   final ParsedImage image;
@@ -1839,9 +1831,11 @@ class _FormatImageUnit extends StatelessWidget {
 
   final VoidCallback? onDoubleTap;
 
-  /// 呈现单元的最大高度（像素）；`null` 表示不限。**单元格内**用它（180px）防止一张大图
-  /// 把表格行高撑破（§12.1.2 / BR-46.6）。
-  final double? maxHeight;
+  /// **单元格模式**的缩略图盒子边长（像素，正方形）；`null` = 正文模式（按段落宽度 / 图片
+  /// 自然比例呈现，行为不变）。单元格内固定边长使尺寸**自首帧即稳定**（§12.1.4 / BR-44.9），
+  /// 配合单元格的**强制行高**（`format_table.dart` 的 `_imageUnitStrut`）保证图片落在自己
+  /// 那一行内、不遮盖同格文本（§12.1.4 ⑮）。
+  final double? cellBoxSize;
 
   @override
   Widget build(BuildContext context) {
@@ -1888,13 +1882,13 @@ class _FormatImageUnit extends StatelessWidget {
                     _AttachmentPlaceholder(label: label),
               );
             }
-            if (!block) return _sized(imageWidget, available);
+            if (!block) return _sized(imageWidget);
             // 块级呈现：块占满段落宽（图片左对齐），使该行只承载图片，
             // 行高即块高、向下扩展，后续文字整体下移、与图片不重叠。
             // 用 Align 而非定宽 SizedBox：宽度受限时撑满段落，无界时自动收缩。
             return Align(
               alignment: Alignment.centerLeft,
-              child: _sized(imageWidget, available),
+              child: _sized(imageWidget),
             );
           },
         ),
@@ -1902,16 +1896,17 @@ class _FormatImageUnit extends StatelessWidget {
     );
   }
 
-  /// 单元格内图片的**固定尺寸盒子**（§12.1.4 / BR-44.9）：`maxHeight != null` 即单元格模式。
+  /// 单元格内图片的**固定正方形缩略图盒子**（§12.1.4 / BR-44.9）：`cellBoxSize != null` 即单元格模式。
   ///
-  /// 返回「**可用宽度 × 固定高度**」的盒子，图片以 `BoxFit.scaleDown` + 居中填充——
-  /// 尺寸**自首帧即稳定**（与异步解码无关），配合单元格的最小高度兜底（`format_table.dart`
-  /// 的 `_tableCellMinHeightWithImage`）使图片**完整落在格内**、不压住相邻行列。
-  /// 正文（`maxHeight == null`）原样返回，**行为不变**。
-  Widget _sized(Widget child, double available) {
-    final limit = maxHeight;
-    if (limit == null) return child;
-    return SizedBox(width: available, height: limit, child: child);
+  /// 返回 `边长 × 边长` 的盒子，图片以 `BoxFit.scaleDown` + 居中填充——尺寸**自首帧即稳定**
+  /// （与异步解码无关）；**边长固定（不是列宽）**，图片前 / 后的文字才能与它**同行**排布、不被它挤走。
+  /// 配合单元格的**强制行高**（`format_table.dart` 的 `_imageUnitStrut`，行高 = 边长）与最小高度
+  /// （`_tableCellMinHeightWithImage`），图片**正好落在自己那一行内**、不遮盖同格文本（⑮）。
+  /// 正文（`cellBoxSize == null`）原样返回，**行为不变**。
+  Widget _sized(Widget child) {
+    final box = cellBoxSize;
+    if (box == null) return child;
+    return SizedBox(width: box, height: box, child: child);
   }
 
   /// 把 `{width=...}` 换算为具体像素；未指定宽度时按原图自适应（受可用宽度限制）。
@@ -2490,9 +2485,18 @@ class _AttachmentPlaceholder extends StatelessWidget {
           else
             const Icon(Icons.broken_image_outlined, size: 18),
           const SizedBox(width: 6),
-          Text(
-            loading ? '加载「$label」…' : label,
-            style: Theme.of(context).textTheme.bodySmall,
+          // 文件名须**可压缩**：单元格内呈现单元是固定边长的小盒子（`kTableCellImageBoxSize`
+          // = 80，去掉内边距后仅剩约 58px），不可压缩的 `Text` 会把 `Row` 撑破
+          // （实测 `RenderFlex overflowed by 38 pixels`，§12.1.4 ⑮）——加 `Flexible` +
+          // 单行省略号后短名照旧、长名截断。
+          Flexible(
+            child: Text(
+              loading ? '加载「$label」…' : label,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
           ),
         ],
       ),
