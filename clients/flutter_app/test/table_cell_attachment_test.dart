@@ -600,26 +600,30 @@ void main() {
           reason: '图片后方光标（偏移 $offset）被图片遮盖 → 无法继续编辑文字',
         );
       }
-      // 缩略图尺寸固定，且与其后文字在**同一显示行**内（行高 = 边长）：可编辑区高度即一行。
+      // 缩略图尺寸固定；图片与其后文字在**同一显示行**内 → 该行高 = 呈现单元自身高度
+      // （缩略图 + 单元边距，§12.1.4 ⑮⑰），不再是「整格统一 80」。
       expect(imgRect.size, const Size(80, 80), reason: '正方形缩略图');
       expect(
         editable.size.height,
-        80,
-        reason: '含图片单元格的强制行高 = 缩略图边长，图片正好落在自己那一行内',
+        kTableCellImageLineHeight,
+        reason: '单行（含图片）行高 = 呈现单元自身高度，'
+            '而不是整格统一的缩略图边长 $kTableCellImageBoxSize',
       );
 
       expect(_contentValue(tester).text, src, reason: '呈现层改动不得动正本');
       await db.close();
     });
 
-    testWidgets('含图片单元格的光标为字号级，换行后也不跟图片一样高（§12.1.4 ⑯）',
+    testWidgets('含图片单元格行情按行取自身高度（文字行 = 文字自身高度），光标仍为字号级（§12.1.4 ⑯⑰）',
         (tester) async {
       final db = AppDatabase.memory();
       final dataDir = _tempDataDir('caret');
       final bytes = _pngBytes(400, 600);
       final sha = sha256Hex(bytes);
-      // 用户场景：图片 + 软换行 + 下一行文字（在该行里继续输入）。
-      final src = '| A | B |\n| --- | --- |\n| ![图](sui://$sha)<br>文字 | 2 |';
+      // 用户场景：图片 + 软换行 + 下一行文字（在该行里继续输入）；
+      // 同行 B 列是**纯文本**单元格，用来读取「文字自身行高」作对照。
+      final src =
+          '| A | B |\n| --- | --- |\n| ![图](sui://$sha)<br>文字 | 纯文字 |';
       await _pumpEditor(
         tester,
         db,
@@ -637,19 +641,35 @@ void main() {
 
       final editable = _renderEditable(tester, cellKey);
       final text = editable.text!.toPlainText();
+      // 纯文本单元格（B 列）的单行高 = **文字自身行高**。
+      final textLineHeight = _renderEditable(tester, 'sui-table-0-1').size.height;
+      expect(
+        textLineHeight,
+        lessThan(kTableCellImageLineHeight),
+        reason: '文字自身行高须明显小于「含图片行」的行高'
+            '（$textLineHeight vs $kTableCellImageLineHeight）',
+      );
+
+      // ⑰ 行高**按行取该行内容自身的高度**：含图片行 = 呈现单元自身高度，
+      // 文字行 = 文字自身行高 —— 而不是整格统一成缩略图边长。
+      expect(
+        editable.size.height,
+        kTableCellImageLineHeight + textLineHeight,
+        reason: '「图片 + 换行 + 文字」的行高 = 图片行（呈现单元自身高度 '
+            '$kTableCellImageLineHeight）+ 文字行（文字自身高度 $textLineHeight）；'
+            '旧实现整格统一为 $kTableCellImageBoxSize × 2 = 160',
+      );
+
       double caretHeight(int offset) =>
           editable.getLocalRectForCaret(TextPosition(offset: offset)).height;
-
-      // 两行、每行 = 缩略图边长（图片落在自己那一行内，不遮盖文字）。
-      expect(editable.size.height, 160, reason: '两行 × 强制行高 80');
-      // 光标须是**字号级**：行高被强制成 80，若不显式指定 `cursorHeight`，
-      // `RenderEditable` 会取 `preferredLineHeight` = 80 →「跟图片一样高的巨光标」。
+      // ⑯ 光标须是**字号级**：含图片行有 $kTableCellImageLineHeight 那么高，若不显式指定
+      // `cursorHeight`，`RenderEditable` 会取 `preferredLineHeight`（= 行高）→「巨光标」。
       for (final offset in <int>[0, text.length]) {
         expect(
           caretHeight(offset),
           inInclusiveRange(10, 24),
           reason: '偏移 $offset 的光标高度须为字号级（14px 字号的常规高度），'
-              '而不是行高 ${editable.size.height / 2}——旧实现换行后即 80（巨光标）',
+              '而不是行高——旧实现换行后即 $kTableCellImageBoxSize（巨光标）',
         );
       }
 

@@ -22,44 +22,59 @@ typedef TableCellUnitBuilder = Widget Function(
 /// 单元格内**图片呈现单元**的缩略图边长（像素，正方形）。
 ///
 /// **单一来源**：呈现单元（`note_editor.dart` 的 `_buildCellUnit`）用它定盒子尺寸，
-/// 单元格（本文件）用它定**强制行高**与**最小高度**——改一处即三处同步。
+/// 单元格（本文件）用它定**含图片行的行高**——改一处即同步。
 ///
 /// 尺寸必须**固定**（不能随图片自然尺寸 / 解码进度变化）：`WidgetSpan` 子项的高度
 /// **不参与行盒与段落测量**（框架明确「高度不受约束，会造成文字溢出 / 截断」），
-/// 且图片字节解码是异步的、解码完成后行高不会重算（§12.1.4 ⑫⑮）。
+/// 且图片字节解码是异步的、解码完成后行高不会重算（§12.1.4 ⑮）。
 const double kTableCellImageBoxSize = 80;
 
-/// 单元格内含**图片**呈现单元时的最小高度（像素）。
+/// 呈现单元在**垂直方向**的额外占位（像素）。
 ///
-/// = 缩略图边长（[kTableCellImageBoxSize] = 80）+ 呈现单元外边距 / 内边距 /
-/// 边框（约 12）+ 单元格内边距（8）+ 余量（4）。
-///
-/// **为何要有这个兜底**：`WidgetSpan` 子项的**高度不参与段落测量**，而图片字节的解码是
-/// **异步**的、实测解码完成后**行高不会重算**——故行高必须由**单元格自身**给足，
-/// 图片才能完整落在格内（§12.1.4 ⑫）。
-const double _tableCellMinHeightWithImage = kTableCellImageBoxSize + 24;
+/// = `_FormatImageUnit` 的外边距（上下各 2）+ 内边距（上下各 2）+ 边框（上下各 2）。
+/// 单元格行高按「**该行内容自身高度**」取值，含图片那一行须取
+/// [kTableCellImageLineHeight]（= 缩略图边长 + 本值），否则单元会探出本行、压到相邻行。
+const double kTableCellUnitVerticalChrome = 12;
 
-/// 单元格内含**图片**呈现单元时的**强制行高**（`StrutStyle`，§12.1.4 ⑮）。
-///
-/// 行盒**不会**因内联子项而增高，若不强制，[kTableCellImageBoxSize] 高的缩略图以「行内
-/// 中间对齐」会压在其**相邻文本行**上：实测 `文字![图]` 单元格里偏移 `0/1` 与图片后方的
-/// 光标矩形**全部落在图片矩形内**，文字既被遮盖、点也点不到。故含图片的单元格**强制每行
-/// 都有缩略图那么高**，图片正好落在自己那一行内，相邻文本行的文字与光标都不被覆盖；
-/// 行高来自**文本 strut**（而非内联子项），段落高度天然可测，不依赖任何异步时机。
+/// 单元格内**含图片那一行**的行高（像素）：= 缩略图边长 + 呈现单元垂直边距。
+const double kTableCellImageLineHeight =
+    kTableCellImageBoxSize + kTableCellUnitVerticalChrome;
+
+/// 单元格文本的**字号**（与单元格 `TextStyle` 一致）。
 const double _tableCellFontSize = 14;
-const StrutStyle _imageUnitStrut = StrutStyle(
-  fontSize: _tableCellFontSize,
-  height: kTableCellImageBoxSize / _tableCellFontSize,
-  forceStrutHeight: true,
-);
 
 /// 含图片单元格的**光标高度**（像素，§12.1.4 ⑯）。
 ///
-/// 上面的强制行高会**顺带撑大光标**：`RenderEditable.cursorHeight` 默认取
-/// `preferredLineHeight`（有 strut 时即行高 80），于是「换行后在下一行输入」会出现
-/// **跟图片一样高的巨光标**。故显式给一个**字号级**高度（≈ 14px 字号的自然行高 16.4，
-/// 取 18 略宽松）：框架会把光标在行内**垂直居中**，与行内居中的文字自然对齐。
+/// 光标高度默认取 `preferredLineHeight`（即行高），含图片行有 [kTableCellImageLineHeight]
+/// 那么高，若不定光标高度就会出现「跟图片一样高的巨光标」。故显式给一个**字号级**高度
+/// （≈ 14px 字号的自然行高 16.4，取 18 略宽松）：框架会把光标在行内**垂直居中**
+/// （`caretRect.top + (fullHeight - caretHeight) / 2`），与行内文字自然对齐。
 const double _tableCellCaretHeight = 18;
+
+/// 单元格内**图片引用所在行**的行高倍数（`TextStyle.height`，§12.1.4 ⑮）。
+///
+/// 行盒**不因内联子项增高**（`WidgetSpan` 子项高度不参与行盒），因此图片行的高度只能由
+/// **与该图片同行的文本 run** 承载 —— 即单元格控制器为引用补齐的**零宽**文本串
+/// （`U+2060 × (ref.end − ref.start − 1)`：天生与图片同行、不占宽度、不换行）。
+/// 给它 `height = kTableCellImageLineHeight / 字号`，该行即被顶到**呈现单元自身的高度**；
+/// 而**其余文本行仍取文字自身高度**。
+const double _tableCellImageLineHeightFactor =
+    kTableCellImageLineHeight / _tableCellFontSize;
+
+/// 单元格的 `StrutStyle`：**必须显式给出，且不得强制行高**（§12.1.4 ⑮）。
+///
+/// ⚠️ 关键事实（实测 + 源码）：`EditableText` 在 `strutStyle == null` 时会**自造**一个
+/// **`forceStrutHeight: true`** 的 strut（`flutter/lib/src/widgets/editable_text.dart:1122`：
+/// `StrutStyle.fromTextStyle(style, forceStrutHeight: true)`），它把**每一行**都钉成文本行高
+/// ——图片行的高度载体（上面的 `TextStyle.height`）会被它**静默压掉**（实测：改前图片行
+/// 仍是文字行高，图片重新压到相邻行）。故这里显式给一个**只做下限、且下限低于文字自然行高**
+/// 的 strut：`height: 1` ⇒ 下限 = 字号（14）< 文字自然行高，等于不施加任何约束，
+/// 文本行取**文字自身高度**、含图片行由载体顶到 [kTableCellImageLineHeight]。
+const StrutStyle _cellStrut = StrutStyle(
+  fontSize: _tableCellFontSize,
+  height: 1,
+  forceStrutHeight: false,
+);
 
 /// 格式模式下的**可视化表格**呈现单元（M9-T06 / FR-44 / ui-spec §18.1）。
 ///
@@ -943,6 +958,13 @@ class _FormatTableCellState extends State<_FormatTableCell> {
     // 只要格高 ≥ 盒高 + 单元与单元格的边距，图片即完整落在格内（图片在格内居中摆放）。
     final hasImageUnit =
         _controller.unitBuilder != null && _controller.hasImageUnit;
+    // 行高策略（§12.1.4 ⑮）：**按行取该行内容自身的高度**——文字行 = 文字自身行高，
+    // 含图片行 = 呈现单元自身高度（[kTableCellImageLineHeight]）。因此单元格**不加**
+    // `StrutStyle`（strut 是**整段级**的，`forceStrutHeight` 会把每行都钉成同一高度，
+    // 文字行会被一并拉高）；图片行的高度由控制器里**与图片同行的零宽补齐串**以
+    // `TextStyle.height` 顶起（见 [TableCellEditingController.buildTextSpan]）。
+    // 也不需要「单元格最小高度」兜底：段高由**文本度量**驱动（撑高串是文本 run，
+    // 参与段落测量），表格行高经 `intrinsicHeight` 天然可测。
     // 整格点选激活（§12.1.1 ⑧）：命中区必须覆盖**整个单元格盒子**——含内边距，以及
     // 「行高大于本格内容高度」时的上下留白（同行有 `<br>` 多行单元格时尤为明显）。
     // 旧实现把 `onTap` 只挂在**内层 `TextField`** 上，上述位置点击后**不激活**该行，
@@ -957,15 +979,12 @@ class _FormatTableCellState extends State<_FormatTableCell> {
         _focus.requestFocus();
       },
       child: Container(
-        constraints: hasImageUnit
-            ? const BoxConstraints(minHeight: _tableCellMinHeightWithImage)
-            : null,
         decoration: widget.active
             ? BoxDecoration(
                 border: Border.all(color: scheme.primary, width: 1.5))
             : null,
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-        // 单元格盒子现由 `Table` 的 `intrinsicHeight` 对齐**铺满整行**，故内容需显式
+        // 单元格盒子由 `Table` 的 `intrinsicHeight` 对齐**铺满整行**，故内容需显式
         // 垂直居中，保持与原先 `middle` 对齐一致的观感（内容取自然高度）。
         child: Center(
           child: Focus(
@@ -975,12 +994,14 @@ class _FormatTableCellState extends State<_FormatTableCell> {
               focusNode: _focus,
               maxLines: null,
               textAlign: _textAlign,
-              // 含图片单元时**强制行高 = 缩略图边长**（§12.1.4 ⑮）：行盒不因内联子项增高，
-              // 否则 80 高的缩略图会以「行内中间对齐」压在相邻文本行上，文字被遮盖且点不到。
-              strutStyle: hasImageUnit ? _imageUnitStrut : null,
-              // 光标 / 选中高亮仍按**字号**（§12.1.4 ⑯）：强制行高会把 `cursorHeight` 的默认值
-              // （`preferredLineHeight` = 80）一并抬高，换行后在下一行输入就会出现「跟图片一样高的
-              // 巨光标」。显式给字号级高度 + `BoxHeightStyle.tight`，二者不随行高拉伸。
+              // 行高**按行取该行内容自身的高度**（§12.1.4 ⑮）：显式给一个**不强制**行高的
+              // strut（否则 `EditableText` 会自造 `forceStrutHeight: true` 的 strut 把每行钉成
+              // 文字行高，压掉图片行的高度载体）。文字行 = 文字自身高度；含图片行由控制器里
+              // 与图片同行的补齐串以 `TextStyle.height` 顶到呈现单元高度。
+              strutStyle: _cellStrut,
+              // 光标 / 选中高亮按**字号**（§12.1.4 ⑯）：含图片行的行高是呈现单元高度
+              // （[kTableCellImageLineHeight]），而 `cursorHeight` 默认取 `preferredLineHeight`
+              // （= 行高），若不显式指定，换行后在下一行输入就会出现「跟图片一样高的巨光标」。
               cursorHeight: hasImageUnit ? _tableCellCaretHeight : null,
               selectionHeightStyle:
                   hasImageUnit ? BoxHeightStyle.tight : null,
@@ -1109,12 +1130,29 @@ class TableCellEditingController extends TextEditingController {
           onSelect: () => selectRef(ref),
         ),
       ));
-      // 区间首码元由 WidgetSpan 占位，其余码元以**零宽、禁断行**字符等码元补齐（BR-27.1）。
+      // 区间首码元由 WidgetSpan 占位，其余码元以**零宽、禁断行**字符等码元补齐
+      // （偏移契约 BR-27.1）；**图片引用**的补齐串同时是**本行行高的载体**（§12.1.4 ⑮）：
+      // 行盒不因内联子项增高，只有与图片**同行的文本 run** 才能把该行顶到呈现单元高度
+      // （[kTableCellImageLineHeight]）。
+      //
+      // **首个码元必须是「有字体度量」的字符**：行高 = 本行各 run 的「字体度量 × height」的
+      // 最大值，而 `U+2060` 这类格式字符**没有字形、不贡献任何行高**（实测：只改它的
+      // `height`，行高仍等于文字行高）。故用**不换行空格**承载度量（透明不可见），其余码元
+      // 继续用零宽字符——总码元数仍等于 `fill`，不额外占宽、不改偏移。
+      // 附件卡片（非图片）高度本就与文字行相近，**不**抬高其行高。
       final fill = ref.end - ref.start - 1;
       if (fill > 0) {
         out.add(TextSpan(
-          text: _zeroWidthFill * fill,
-          style: base.copyWith(color: Colors.transparent, fontSize: 0),
+          text: ref.isImage
+              ? '$_metricFillChar${_zeroWidthFill * (fill - 1)}'
+              : _zeroWidthFill * fill,
+          style: ref.isImage
+              ? base.copyWith(
+                  color: Colors.transparent,
+                  fontSize: _tableCellFontSize,
+                  height: _tableCellImageLineHeightFactor,
+                )
+              : base.copyWith(color: Colors.transparent, fontSize: 0),
         ));
       }
       cursor = ref.end;
@@ -1128,6 +1166,10 @@ class TableCellEditingController extends TextEditingController {
   /// 零宽、禁断行的填充字符（`U+2060` WORD JOINER）：等码元补齐引用区间余下字符，
   /// 既维持偏移契约又不产生任何行盒 / 断行点（同 §12.1.1「表格后占位行」口径）。
   static const String _zeroWidthFill = '\u2060';
+
+  /// **有字体度量**的填充字符（`U+00A0` 不换行空格，透明不可见）：补齐串用它**首个码元**
+  /// 承载图片行的行高（[kTableCellImageLineHeight]）——`U+2060` 无字形、不贡献行高（§12.1.4 ⑮）。
+  static const String _metricFillChar = '\u00A0';
 
   /// 追加一段普通文本；**组字中**（IME）区间按 [TextEditingController] 默认行为加下划线。
   static void _addRun(
