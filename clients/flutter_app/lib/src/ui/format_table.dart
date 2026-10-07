@@ -1,3 +1,5 @@
+import 'dart:ui' show BoxHeightStyle;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:note_core/note_core.dart';
@@ -50,6 +52,14 @@ const StrutStyle _imageUnitStrut = StrutStyle(
   height: kTableCellImageBoxSize / _tableCellFontSize,
   forceStrutHeight: true,
 );
+
+/// 含图片单元格的**光标高度**（像素，§12.1.4 ⑯）。
+///
+/// 上面的强制行高会**顺带撑大光标**：`RenderEditable.cursorHeight` 默认取
+/// `preferredLineHeight`（有 strut 时即行高 80），于是「换行后在下一行输入」会出现
+/// **跟图片一样高的巨光标**。故显式给一个**字号级**高度（≈ 14px 字号的自然行高 16.4，
+/// 取 18 略宽松）：框架会把光标在行内**垂直居中**，与行内居中的文字自然对齐。
+const double _tableCellCaretHeight = 18;
 
 /// 格式模式下的**可视化表格**呈现单元（M9-T06 / FR-44 / ui-spec §18.1）。
 ///
@@ -968,6 +978,12 @@ class _FormatTableCellState extends State<_FormatTableCell> {
               // 含图片单元时**强制行高 = 缩略图边长**（§12.1.4 ⑮）：行盒不因内联子项增高，
               // 否则 80 高的缩略图会以「行内中间对齐」压在相邻文本行上，文字被遮盖且点不到。
               strutStyle: hasImageUnit ? _imageUnitStrut : null,
+              // 光标 / 选中高亮仍按**字号**（§12.1.4 ⑯）：强制行高会把 `cursorHeight` 的默认值
+              // （`preferredLineHeight` = 80）一并抬高，换行后在下一行输入就会出现「跟图片一样高的
+              // 巨光标」。显式给字号级高度 + `BoxHeightStyle.tight`，二者不随行高拉伸。
+              cursorHeight: hasImageUnit ? _tableCellCaretHeight : null,
+              selectionHeightStyle:
+                  hasImageUnit ? BoxHeightStyle.tight : null,
               style: TextStyle(
                 fontSize: _tableCellFontSize,
                 fontWeight:

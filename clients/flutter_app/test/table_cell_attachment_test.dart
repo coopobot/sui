@@ -611,5 +611,50 @@ void main() {
       expect(_contentValue(tester).text, src, reason: '呈现层改动不得动正本');
       await db.close();
     });
+
+    testWidgets('含图片单元格的光标为字号级，换行后也不跟图片一样高（§12.1.4 ⑯）',
+        (tester) async {
+      final db = AppDatabase.memory();
+      final dataDir = _tempDataDir('caret');
+      final bytes = _pngBytes(400, 600);
+      final sha = sha256Hex(bytes);
+      // 用户场景：图片 + 软换行 + 下一行文字（在该行里继续输入）。
+      final src = '| A | B |\n| --- | --- |\n| ![图](sui://$sha)<br>文字 | 2 |';
+      await _pumpEditor(
+        tester,
+        db,
+        'm9t12-cellcaret',
+        src,
+        dataDir: dataDir,
+        attachmentName: 'big.png',
+        attachmentBytes: bytes,
+      );
+
+      const cellKey = 'sui-table-0-0';
+      final cell = find.byKey(const ValueKey<String>(cellKey));
+      final img = _inCell(cellKey, find.byType(Image));
+      await _waitImageDecoded(tester, cell, img);
+
+      final editable = _renderEditable(tester, cellKey);
+      final text = editable.text!.toPlainText();
+      double caretHeight(int offset) =>
+          editable.getLocalRectForCaret(TextPosition(offset: offset)).height;
+
+      // 两行、每行 = 缩略图边长（图片落在自己那一行内，不遮盖文字）。
+      expect(editable.size.height, 160, reason: '两行 × 强制行高 80');
+      // 光标须是**字号级**：行高被强制成 80，若不显式指定 `cursorHeight`，
+      // `RenderEditable` 会取 `preferredLineHeight` = 80 →「跟图片一样高的巨光标」。
+      for (final offset in <int>[0, text.length]) {
+        expect(
+          caretHeight(offset),
+          inInclusiveRange(10, 24),
+          reason: '偏移 $offset 的光标高度须为字号级（14px 字号的常规高度），'
+              '而不是行高 ${editable.size.height / 2}——旧实现换行后即 80（巨光标）',
+        );
+      }
+
+      expect(_contentValue(tester).text, src, reason: '呈现层改动不得动正本');
+      await db.close();
+    });
   });
 }
