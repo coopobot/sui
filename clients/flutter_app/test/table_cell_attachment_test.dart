@@ -94,6 +94,62 @@ Finder _contentField() => find
     )
     .first;
 
+/// 构造一张**可解码**的最小 PNG（纯色），用于让 `Image.memory` 拿到**真实像素尺寸**
+/// ——格内图片溢出的复现前提正是「真实尺寸的图片」。
+Uint8List _pngBytes(int width, int height) {
+  final raw = <int>[];
+  for (var y = 0; y < height; y++) {
+    raw.add(0); // 每行的 filter 字节：none
+    for (var x = 0; x < width; x++) {
+      raw
+        ..add(200)
+        ..add(30)
+        ..add(30);
+    }
+  }
+  final idat = ZLibEncoder().convert(Uint8List.fromList(raw));
+  final out = <int>[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  void chunk(String type, List<int> data) {
+    final body = <int>[...type.codeUnits, ...data];
+    out
+      ..addAll(_be32(data.length))
+      ..addAll(body)
+      ..addAll(_be32(_crc32(body)));
+  }
+
+  // PNG 头：宽 / 高（大端）+ 位深 8 + 颜色类型 2（truecolor）+ 压缩 / 过滤 / 隔行扫描。
+  chunk('IHDR', <int>[..._be32(width), ..._be32(height), 8, 2, 0, 0, 0]);
+  chunk('IDAT', idat);
+  chunk('IEND', const <int>[]);
+  return Uint8List.fromList(out);
+}
+
+List<int> _be32(int v) =>
+    <int>[(v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF];
+
+int _crc32(List<int> bytes) {
+  var crc = 0xFFFFFFFF;
+  for (final b in bytes) {
+    crc ^= b;
+    for (var i = 0; i < 8; i++) {
+      crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1;
+    }
+  }
+  return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
+}
+
+/// 等图片**真正解码完成**（render box 高度 > 1）——解码是异步的，只等 widget 出现不够，
+/// 而本次缺陷恰恰发生在「解码后尺寸突变」这一刻。
+Future<void> _waitImageDecoded(WidgetTester tester, Finder img) async {
+  for (var i = 0; i < 40; i++) {
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 80)));
+    await tester.pump();
+    if (img.evaluate().isNotEmpty && tester.getSize(img).height > 1) return;
+  }
+  fail('超时：单元格内图片未完成解码');
+}
+
 TextEditingController _contentValue(WidgetTester tester) =>
     tester.widget<TextField>(_contentField()).controller!;
 
@@ -369,6 +425,85 @@ void main() {
         ref.end,
         reason: '单击呈现单元应把光标落到引用末尾（与正文口径一致）',
       );
+
+      await db.close();
+    });
+
+    testWidgets('单元格内图片以固定尺寸盒子呈现、完整落在格内（不溢出，§12.1.4 ⑫）',
+        (tester) async {
+      final db = AppDatabase.memory();
+      final dataDir = _tempDataDir('fitimg');
+      // 800×1200 的大图：若不限尺寸，会远大于单元格。
+      final bytes = _pngBytes(800, 1200);
+      final sha = sha256Hex(bytes);
+      final src = '| A | B |\n| --- | --- |\n| ![图](sui://$sha) | 2 |\n| 3 | 4 |';
+      await _pumpEditor(
+        tester,
+        db,
+        'm9t12-cellfitimg',
+        src,
+        dataDir: dataDir,
+        attachmentName: 'big.png',
+        attachmentBytes: bytes,
+      );
+
+      const cellKey = 'sui-table-0-0';
+      final img = _inCell(cellKey, find.byType(Image));
+      await _waitImageDecoded(tester, img);
+
+      final imageRect = tester.getRect(img);
+      final cellRect = tester.getRect(find.byKey(const ValueKey<String>(cellKey)));
+      expect(
+        imageRect.height,
+        80,
+        reason: '格内图片按固定高度 80 呈现（尺寸自首帧稳定，不随异步解码突变）',
+      );
+      expect(
+        imageRect.width,
+        lessThanOrEqualTo(cellRect.width),
+        reason: '格内图片宽度不得超过单元格（列宽）',
+      );
+      // 四边均须落在单元格内——旧实现图片 180 高、行高仅 29，上下各溢出约 75px。
+      expect(imageRect.top, greaterThanOrEqualTo(cellRect.top),
+          reason: '图片上边界不得溢出单元格');
+      expect(imageRect.bottom, lessThanOrEqualTo(cellRect.bottom),
+          reason: '图片下边界不得溢出单元格（行高由单元格最小高度兜底）');
+      expect(imageRect.left, greaterThanOrEqualTo(cellRect.left));
+      expect(imageRect.right, lessThanOrEqualTo(cellRect.right));
+
+      // 正本一字不改
+      expect(_contentValue(tester).text, src);
+      await db.close();
+    });
+
+    testWidgets('超长文件名的附件卡片不横向溢出（省略号截断，§12.1.4 ⑫）',
+        (tester) async {
+      final db = AppDatabase.memory();
+      final dataDir = _tempDataDir('fitcard');
+      final linkSha = 'e5' * 32;
+      const longName = '斯坦福商业决策课（斯坦福大学战略决策和风险管理（SDRM）认证项目教材）.pdf';
+      final src = '| A | B |\n| --- | --- |\n| 1 | [$longName](sui://$linkSha) |';
+      await _pumpEditor(tester, db, 'm9t12-cellfitcard', src, dataDir: dataDir);
+
+      const cellKey = 'sui-table-0-1';
+      final cardIcon = _inCell(cellKey, find.byIcon(Icons.attach_file));
+      expect(cardIcon, findsOneWidget);
+      final card = find.ancestor(of: cardIcon, matching: find.byType(Row)).first;
+      final cardRect = tester.getRect(card);
+      final cellRect = tester.getRect(find.byKey(const ValueKey<String>(cellKey)));
+
+      expect(
+        cardRect.right,
+        lessThanOrEqualTo(cellRect.right),
+        reason: '卡片不得溢出单元格右边界（旧实现 RenderFlex overflowed 315px）',
+      );
+      expect(cardRect.width, lessThanOrEqualTo(cellRect.width));
+      // 长名被截断：卡片内文本不应等于完整文件名
+      final label = tester.widget<Text>(
+        find.descendant(of: card, matching: find.byType(Text)).first,
+      );
+      expect(label.overflow, TextOverflow.ellipsis, reason: '长文件名须以省略号截断');
+      expect(label.maxLines, 1);
 
       await db.close();
     });

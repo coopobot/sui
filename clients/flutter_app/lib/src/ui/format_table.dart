@@ -17,6 +17,17 @@ typedef TableCellUnitBuilder = Widget Function(
   required VoidCallback onSelect,
 });
 
+/// 单元格内含**图片**呈现单元时的最小高度（像素）。
+///
+/// = 图片盒高（`_NoteEditorState._tableCellImageHeight` = 80）+ 呈现单元外边距 / 内边距 /
+/// 边框（约 12）+ 单元格内边距（8）+ 余量（4）。
+///
+/// **为何要有这个兜底**：`WidgetSpan` 子项的**高度不参与段落测量**（框架明确「高度不受
+/// 约束，会造成文字溢出 / 截断」），而图片字节的解码是**异步**的、实测解码完成后**行高
+/// 不会重算**——故行高必须由**单元格自身**给足，图片才能完整落在格内（§12.1.4 ⑫）。
+/// 常量与 `_tableCellImageHeight` 是**成对**的：调整其中一个必须同步另一个。
+const double _tableCellMinHeightWithImage = 104;
+
 /// 格式模式下的**可视化表格**呈现单元（M9-T06 / FR-44 / ui-spec §18.1）。
 ///
 /// 表格正本一律是 GFM 管道表（BR-44.2）；本组件只负责「格式」模式下的网格呈现与
@@ -144,13 +155,19 @@ class _FormatTableViewState extends State<FormatTableView> {
       // 最后一列但不是最后一行：跳到下一行首列
       _activate(_activeRow + 1, 0, caret: 0);
     } else {
-      // 最后一行最后一列：若当前行已全空，或本次不要求新增行（Tab），则不再新增，
-      // 只把光标退回本行首列（避免末格连续回车 / Tab 堆叠「幽灵行」）。
-      if (!createRow || _rowIsEmpty(_activeRow)) {
-        _activate(_activeRow, 0, caret: 0);
-      } else {
+      // 末行末列：`Enter`（createRow == true）**每次追加一行**并把光标移到新行首列
+      // ——可在表格末尾**连续新增**；`Tab`（createRow == false）只把光标退回本行首列、
+      // **绝不新增行**。
+      //
+      // 旧实现在此另加「当前行非空才追加」的**幽灵行守卫**：其动机是防「无法删除的尾部
+      // 空行」，而当时单元格内删除键本身就失效（§12.1.2 ⑩ 已修）——如今行删除按钮与
+      // 单元格内删除键均可用、空行可删，故守卫**已无必要**，反而使「新建的空行无法再
+      // 回车续行」（§12.1.1 ⑬）。此处直接每次回车都追加。
+      if (createRow) {
         widget.onInsertRow(_activeRow, true);
         _activate(_activeRow + 1, 0, caret: 0);
+      } else {
+        _activate(_activeRow, 0, caret: 0);
       }
     }
     // 焦点交给新激活单元格的 TextField（由单元格自身 didUpdateWidget 处理）。
@@ -169,12 +186,6 @@ class _FormatTableViewState extends State<FormatTableView> {
       return true;
     }
     return false; // 表头第 0 列，前面没有单元格
-  }
-
-  /// 数据行 [row] 的所有单元格是否都为空（用于避免末格连续回车堆叠空行）。
-  bool _rowIsEmpty(int row) {
-    if (row < 0 || row >= widget.table.rows.length) return true;
-    return widget.table.rows[row].every((c) => c.trim().isEmpty);
   }
 
   /// 向上移动一格。到达表头行再往上时返回 false（由外层决定是否退出表格）。
@@ -813,6 +824,14 @@ class _FormatTableCellState extends State<_FormatTableCell> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // 单元格内含**图片**呈现单元时，行高不能指望「呈现单元高度参与段落测量」
+    // ——`WidgetSpan` 子项**高度不受框架支持**（其源码注释即言明「高度不受约束，会造成
+    // 文字溢出 / 截断」），且图片字节的读取与解码是**异步**的（首帧只有占位高度），
+    // 实测解码完成后**行高不会重算**，图片便居中绘到行外、压住相邻行（§12.1.4 ⑫）。
+    // 故改由**单元格自身的最小高度**兜底：呈现单元为固定尺寸盒子（列宽 × 固定高度），
+    // 只要格高 ≥ 盒高 + 单元与单元格的边距，图片即完整落在格内（图片在格内居中摆放）。
+    final hasImageUnit =
+        _controller.unitBuilder != null && _controller.hasImageUnit;
     // 整格点选激活（§12.1.1 ⑧）：命中区必须覆盖**整个单元格盒子**——含内边距，以及
     // 「行高大于本格内容高度」时的上下留白（同行有 `<br>` 多行单元格时尤为明显）。
     // 旧实现把 `onTap` 只挂在**内层 `TextField`** 上，上述位置点击后**不激活**该行，
@@ -827,6 +846,9 @@ class _FormatTableCellState extends State<_FormatTableCell> {
         _focus.requestFocus();
       },
       child: Container(
+        constraints: hasImageUnit
+            ? const BoxConstraints(minHeight: _tableCellMinHeightWithImage)
+            : null,
         decoration: widget.active
             ? BoxDecoration(
                 border: Border.all(color: scheme.primary, width: 1.5))
@@ -903,6 +925,12 @@ class TableCellEditingController extends TextEditingController {
 
   /// 显示文本中的附件引用（含图片紧随的尺寸属性块），按出现顺序。
   List<AttachmentRef> get attachmentRefs => EditorFormat.attachmentRefs(text);
+
+  /// 显示文本中是否含**图片**引用。
+  ///
+  /// 单元格据此决定是否施加**行高兜底**（见 `_tableCellMinHeightWithImage` / §12.1.4 ⑫）：
+  /// 图片呈现单元高度不参与段落测量，必须由单元格自身高度兜住。
+  bool get hasImageUnit => attachmentRefs.any((r) => r.isImage);
 
   /// 把光标落到 [ref] **末尾**（与正文「单击选中」口径一致，便于随后整块删除）。
   void selectRef(AttachmentRef ref) {

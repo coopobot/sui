@@ -332,6 +332,51 @@ void main() {
 
       await db.close();
     });
+
+    testWidgets('末格回车可连续新增行（含空行），`Tab` 在末格不新增行（§12.1.1 ⑬ / BR-44.3）',
+        (tester) async {
+      db = AppDatabase.memory();
+      const src = '| A | B | C |\n| --- | --- | --- |\n| 1 | 2 | 3 |';
+      await _pumpEditor(tester, db, 'm9t12-enterrow', src);
+      final ctrl = _contentValue(tester);
+      const newRow = '|  |  |  |';
+
+      // ① 末行末列回车 → 追加一行，光标落到新行首列。
+      await tester.tap(find.byKey(const ValueKey<String>('sui-table-0-2')));
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(ctrl.text, '$src\n$newRow', reason: '末格回车应追加一行');
+
+      // ② 走到**新建的空行**末列再回车 → 仍应追加（旧「幽灵行守卫」要求当前行非空，会拦住
+      //    这一步，用户即「只能新增一行、之后不能再新建」）。
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(
+        ctrl.text,
+        '$src\n$newRow\n$newRow',
+        reason: '空行末格回车也应追加一行（可连续新增）',
+      );
+
+      // ③ `Tab` 在末格**不新增行**（只把光标退回本行首列）。
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      expect(
+        ctrl.text,
+        '$src\n$newRow\n$newRow',
+        reason: '`Tab` 在末格不得新增行（BR-44.3）',
+      );
+
+      await db.close();
+    });
   });
 
   group('表格行整格点选激活（回归：含 <br> 单元格的行可精确删除）', () {

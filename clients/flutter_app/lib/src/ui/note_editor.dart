@@ -818,8 +818,14 @@ class _NoteEditorState extends State<NoteEditor>
     );
   }
 
-  /// 单元格内图片的最大高度（像素）：避免一张大图把表格行高撑破（§12.1.2）。
-  static const double _tableCellImageMaxHeight = 180;
+  /// 单元格内图片呈现盒的**固定高度**（像素）：图片按「列宽 × 本高度」的盒子 `contain` 居中呈现
+  /// （§12.1.4 / BR-44.9）。
+  ///
+  /// **必须是固定值**：图片字节的读取与解码是**异步**的，若让图片按「自然尺寸 / 自身比例」自由定尺，
+  /// 首帧只有加载占位的高度、解码后尺寸突变，而 `WidgetSpan` 子项高度不参与段落测量、行高也不会重算，
+  /// 图片就会绘到行外压住相邻行。固定盒子使尺寸**自首帧即稳定**。
+  /// ⚠️ 与 `format_table.dart` 的 `_tableCellMinHeightWithImage`（= 本值 + 24）**成对**，改一处须同步另一处。
+  static const double _tableCellImageHeight = 80;
 
   /// 单元格内**附件引用**的原子呈现单元（§12.1.2 / FR-46 / BR-46.6）。
   ///
@@ -852,7 +858,8 @@ class _NoteEditorState extends State<NoteEditor>
       selected: selected,
       onSelect: onSelect,
       onDoubleTap: onOpen,
-      maxHeight: _tableCellImageMaxHeight,
+      // 单元格模式（`maxHeight != null`）：固定尺寸盒子「列宽 × 80」，见 §12.1.4 / BR-44.9。
+      maxHeight: _tableCellImageHeight,
     );
   }
 
@@ -1895,16 +1902,16 @@ class _FormatImageUnit extends StatelessWidget {
     );
   }
 
-  /// 按 [maxHeight] 限高（并限宽到 [available]）——仅**单元格内**使用（§12.1.2 / BR-46.6）：
-  /// 单元格宽度由列宽决定，未带 `{width=…}` 的大图会按原始像素铺开，必须夹住以免撑破行高。
-  /// [maxHeight] 为 `null` 时原样返回，**不影响正文既有呈现**。
+  /// 单元格内图片的**固定尺寸盒子**（§12.1.4 / BR-44.9）：`maxHeight != null` 即单元格模式。
+  ///
+  /// 返回「**可用宽度 × 固定高度**」的盒子，图片以 `BoxFit.scaleDown` + 居中填充——
+  /// 尺寸**自首帧即稳定**（与异步解码无关），配合单元格的最小高度兜底（`format_table.dart`
+  /// 的 `_tableCellMinHeightWithImage`）使图片**完整落在格内**、不压住相邻行列。
+  /// 正文（`maxHeight == null`）原样返回，**行为不变**。
   Widget _sized(Widget child, double available) {
     final limit = maxHeight;
     if (limit == null) return child;
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: available, maxHeight: limit),
-      child: child,
-    );
+    return SizedBox(width: available, height: limit, child: child);
   }
 
   /// 把 `{width=...}` 换算为具体像素；未指定宽度时按原图自适应（受可用宽度限制）。
@@ -1974,11 +1981,21 @@ class _FormatAttachmentLinkUnit extends StatelessWidget {
               color: scheme.onSecondaryContainer,
             ),
             const SizedBox(width: 4),
-            Text(
-              label.isEmpty ? '附件' : label,
-              style: TextStyle(
-                fontSize: 13,
-                color: scheme.onSecondaryContainer,
+            // 文件名须**可压缩**：卡片所在的内联 widget 宽受段落 / 单元格可用宽度约束，
+            // 而 `Text` 默认按自身固有宽度参与 `Row` 布局——文件名一长（如长标题 PDF）
+            // 就把 `Row` 撑出可用宽度（实测 `RenderFlex overflowed by 315 pixels`），
+            // 卡片于是横向溢出单元格 / 段落（§12.1.4 ⑫）。`Flexible` + 单行省略号即可：
+            // 短名照旧自适应，长名截断且不再溢出（正文与单元格同时受益）。
+            Flexible(
+              child: Text(
+                label.isEmpty ? '附件' : label,
+                maxLines: 1,
+                softWrap: false,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: scheme.onSecondaryContainer,
+                ),
               ),
             ),
             if (corrupt) ...[
