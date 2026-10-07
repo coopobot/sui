@@ -80,6 +80,13 @@ Finder _contentField() => find
 TextEditingController _contentValue(WidgetTester tester) =>
     tester.widget<TextField>(_contentField()).controller!;
 
+/// 某个单元格的 `TextField` 控制器（单元格键为 `sui-table-<行>-<列>`，表头行为 `-1`）。
+TextEditingController _cellField(WidgetTester tester, String cellKey) => tester
+    .widget<TextField>(find.descendant(
+        of: find.byKey(ValueKey<String>(cellKey)),
+        matching: find.byType(TextField)))
+    .controller!;
+
 /// 有界推进若干帧，等待对话框路由动画完成（替代 `pumpAndSettle()`）。
 Future<void> _settleRoute(WidgetTester tester) async {
   await tester.pump();
@@ -374,6 +381,71 @@ void main() {
         '$src\n$newRow\n$newRow',
         reason: '`Tab` 在末格不得新增行（BR-44.3）',
       );
+
+      await db.close();
+    });
+
+    testWidgets('单元格内 Home / End / PageUp / PageDown / Ctrl+A 就地生效、绝不污染正本（§12.1.1 ⑭）',
+        (tester) async {
+      db = AppDatabase.memory();
+      // 格内两行（显示文本 `ab\ncd`）：用于验证 Home / End 的**行内**语义。
+      const src = '| A | B |\n| --- | --- |\n| ab<br>cd | 2 |';
+      await _pumpEditor(tester, db, 'm9t12-caretjump', src);
+      final ctrl = _contentValue(tester);
+      const cellKey = 'sui-table-0-0';
+
+      await tester.tap(find.byKey(const ValueKey<String>(cellKey)));
+      await tester.pump();
+      final cell = _cellField(tester, cellKey);
+      expect(cell.text, 'ab\ncd', reason: '格内软换行 `<br>` 显示为换行');
+
+      Future<void> key(LogicalKeyboardKey k,
+          {LogicalKeyboardKey? mod, LogicalKeyboardKey? mod2}) async {
+        if (mod != null) await tester.sendKeyDownEvent(mod);
+        if (mod2 != null) await tester.sendKeyDownEvent(mod2);
+        await tester.sendKeyEvent(k);
+        if (mod2 != null) await tester.sendKeyUpEvent(mod2);
+        if (mod != null) await tester.sendKeyUpEvent(mod);
+        await tester.pump();
+      }
+
+      // `End` / `Home`：落到**当前显示行**的行尾 / 行首。
+      cell.selection = const TextSelection.collapsed(offset: 0);
+      await tester.pump();
+      await key(LogicalKeyboardKey.end);
+      expect(cell.selection.baseOffset, 2, reason: '`End` 应落到格内当前显示行的行尾');
+      await key(LogicalKeyboardKey.home);
+      expect(cell.selection.baseOffset, 0, reason: '`Home` 应落到格内当前显示行的行首');
+
+      // `Ctrl+End` / `Ctrl+Home`：落到**格内首 / 末**。
+      await key(LogicalKeyboardKey.end, mod: LogicalKeyboardKey.controlLeft);
+      expect(cell.selection.baseOffset, cell.text.length,
+          reason: '`Ctrl+End` 应落到格内末尾');
+      await key(LogicalKeyboardKey.home, mod: LogicalKeyboardKey.controlLeft);
+      expect(cell.selection.baseOffset, 0, reason: '`Ctrl+Home` 应落到格内开头');
+
+      // `PageUp` / `PageDown`：格内无「页」概念，落到格内首 / 末。
+      await key(LogicalKeyboardKey.pageDown);
+      expect(cell.selection.baseOffset, cell.text.length);
+      await key(LogicalKeyboardKey.pageUp);
+      expect(cell.selection.baseOffset, 0);
+
+      // `Shift+End`：按 Shift **扩选**（保持 baseOffset、移动 extentOffset）。
+      await key(LogicalKeyboardKey.end, mod: LogicalKeyboardKey.shiftLeft);
+      expect(cell.selection.baseOffset, 0);
+      expect(cell.selection.extentOffset, 2, reason: '`Shift+End` 应扩选到当前行行尾');
+
+      // `Ctrl+A`：全选**格内**文本。
+      await key(LogicalKeyboardKey.keyA, mod: LogicalKeyboardKey.controlLeft);
+      expect(cell.selection.baseOffset, 0);
+      expect(cell.selection.extentOffset, cell.text.length,
+          reason: '`Ctrl+A` 应全选格内文本');
+
+      // 全程：格内文本与正本都不得被外层编辑器回灌污染。
+      expect(cell.text, 'ab\ncd',
+          reason: '这些键不得把整段笔记 Markdown 灌进单元格控制器');
+      expect(ctrl.text, src,
+          reason: '这些键不得改动正本（旧实现会把整表 Markdown 转义后塞进单元格）');
 
       await db.close();
     });

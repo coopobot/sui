@@ -622,6 +622,64 @@ class _FormatTableCellState extends State<_FormatTableCell> {
 
   static bool _isLowSurrogate(int unit) => unit >= 0xDC00 && unit <= 0xDFFF;
 
+  /// 光标 / 选择类按键（须由单元格**就地接管**，见 [_handleCaretJump]）。
+  static bool _isCaretJumpKey(LogicalKeyboardKey key) =>
+      key == LogicalKeyboardKey.home ||
+      key == LogicalKeyboardKey.end ||
+      key == LogicalKeyboardKey.pageUp ||
+      key == LogicalKeyboardKey.pageDown;
+
+  /// `Home` / `End` / `PageUp` / `PageDown` 在**单元格内**移动 / 扩选光标
+  /// （§12.1.1 ⑭ / BR-44.10）。
+  ///
+  /// - `Ctrl+Home` / `Ctrl+End` → **格内首 / 末**；`Home` / `End` → **格内当前显示行**
+  ///   （格内软换行以 `\n` 表示）的行首 / 行尾；
+  /// - `PageUp` / `PageDown` → 格内无「页」概念，落到**格内首 / 末**；
+  /// - [shift] 为 true 时**扩选**（保持 `baseOffset`、移动 `extentOffset`），否则折叠光标。
+  ///
+  /// **为何必须就地完成**：这些键一旦漏泡到外层编辑器，外层处理时会把它自己的文本
+  /// （**整段笔记 Markdown**）回灌进本格控制器，随后 `_commit` 把它当格内内容经
+  /// `setTableCell` 转义写回正本——正本被塞进一坨 `| \| A \| B \|<br>…` 文本（⑭ 的成因，
+  /// 机制与方向键历史成因 H1 相同）。
+  void _handleCaretJump(LogicalKeyboardKey key, {required bool shift}) {
+    final text = _controller.text;
+    final sel = _controller.selection;
+    final off = sel.isValid ? sel.extentOffset.clamp(0, text.length) : 0;
+    final ctrl = HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isMetaPressed;
+    final int target;
+    switch (key) {
+      case LogicalKeyboardKey.home:
+        target = ctrl ? 0 : _lineStartAt(text, off);
+      case LogicalKeyboardKey.end:
+        target = ctrl ? text.length : _lineEndAt(text, off);
+      case LogicalKeyboardKey.pageUp:
+        target = 0;
+      case LogicalKeyboardKey.pageDown:
+        target = text.length;
+      default:
+        return;
+    }
+    final base = shift && sel.isValid ? sel.baseOffset : target;
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection(baseOffset: base, extentOffset: target),
+    );
+  }
+
+  /// 光标 [off] 所在**显示行**的行首偏移（格内软换行以 `\n` 表示）。
+  static int _lineStartAt(String text, int off) {
+    if (off <= 0) return 0;
+    final nl = text.lastIndexOf('\n', off - 1);
+    return nl == -1 ? 0 : nl + 1;
+  }
+
+  /// 光标 [off] 所在**显示行**的行尾偏移（不含换行符）。
+  static int _lineEndAt(String text, int off) {
+    final nl = text.indexOf('\n', off);
+    return nl == -1 ? text.length : nl;
+  }
+
   /// 把单元格编辑器内容改成 [text] 并把光标落到 [caret]，随后提交回正本。
   void _writeCellValue(String text, int caret) {
     _controller.value = TextEditingValue(
@@ -659,6 +717,26 @@ class _FormatTableCellState extends State<_FormatTableCell> {
     // 污染（H1 复现）。
     if (_isCaretKey(key)) {
       _handleCaretKey(key);
+      return KeyEventResult.handled;
+    }
+
+    // 光标 / 选择类按键：`Home` / `End` / `PageUp` / `PageDown`（含 `Ctrl` / `Shift` 组合）
+    // —— **必须在单元格内自行处理并吞掉**（§12.1.1 ⑭ / BR-44.10）。漏泡的后果见
+    // [_handleCaretJump]：外层会把整段笔记 Markdown 回灌进本格，再被 `_commit` 写进正本。
+    if (_isCaretJumpKey(key)) {
+      _handleCaretJump(key, shift: HardwareKeyboard.instance.isShiftPressed);
+      return KeyEventResult.handled;
+    }
+
+    // `Ctrl+A`：全选**格内**文本（而非整篇笔记）。同样必须就地吞掉（同 ⑭）。
+    if (key == LogicalKeyboardKey.keyA &&
+        (HardwareKeyboard.instance.isControlPressed ||
+            HardwareKeyboard.instance.isMetaPressed)) {
+      final text = _controller.text;
+      _controller.value = TextEditingValue(
+        text: text,
+        selection: TextSelection(baseOffset: 0, extentOffset: text.length),
+      );
       return KeyEventResult.handled;
     }
 
