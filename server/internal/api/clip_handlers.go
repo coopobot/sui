@@ -76,8 +76,12 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		title = "未命名剪藏"
 	}
 
-	// 正文开头附上来源链接
-	sourceLine := "> 来源：[" + req.URL + "](" + req.URL + ")\n\n"
+	// 正文开头附上来源链接。
+	//
+	// M10-T30：来源 URL 是外部输入，直接拼进 Markdown 会被 `]` / `)` 截断链接、
+	// 把剩余内容漏成正文（甚至注入结构），故文本位与目标位分别转义。
+	sourceLine := "> 来源：[" + clip.EscapeMarkdownText(req.URL) + "](" +
+		clip.EscapeMarkdownURL(req.URL) + ")\n\n"
 	fullContent := sourceLine + content
 
 	// 幂等判定（M4/BR-34.2/34.3）：非空 URL 命中 notes.source_url → 复用库内既有 id；

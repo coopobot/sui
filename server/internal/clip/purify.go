@@ -317,7 +317,7 @@ func (r *renderer) render(n *html.Node, depth int) string {
 				sb.WriteString("~~" + r.inline(c) + "~~")
 			case "a":
 				href := getAttr(c, "href")
-				sb.WriteString("[" + r.inline(c) + "](" + href + ")")
+				sb.WriteString("[" + r.inline(c) + "](" + EscapeMarkdownURL(href) + ")")
 			case "img":
 				sb.WriteString(imageMarkdown(c))
 			case "picture", "figure":
@@ -499,7 +499,9 @@ func imageMarkdown(c *html.Node) string {
 	if src == "" {
 		return ""
 	}
-	out := "![" + getAttr(c, "alt") + "](" + src + ")"
+	// M10-T30：alt 进**文本位**、src 进**目标位**，都是页面提供的字符串，必须转义
+	// 结构性字符——否则一个 `]` / `)` 就能截断图片标签或目标位。
+	out := "![" + EscapeMarkdownText(getAttr(c, "alt")) + "](" + EscapeMarkdownURL(src) + ")"
 	if attrs := sizeAttribute(c); attrs != "" {
 		out += attrs
 	}
@@ -557,7 +559,7 @@ func (r *renderer) inline(n *html.Node) string {
 				sb.WriteString("~~" + r.inline(c) + "~~")
 			case "a":
 				href := getAttr(c, "href")
-				sb.WriteString("[" + r.inline(c) + "](" + href + ")")
+				sb.WriteString("[" + r.inline(c) + "](" + EscapeMarkdownURL(href) + ")")
 			case "img":
 				sb.WriteString(imageMarkdown(c))
 			case "code":

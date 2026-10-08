@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../util/hashes.dart';
 import 'blob_store.dart';
 import 'local_blob_store.dart';
 
@@ -155,6 +156,10 @@ class CachedBlobStore implements BlobStore {
     final out = <BlobCacheEntry>[];
     for (final e in await _meta.entries()) {
       if (e.uploadedAt != null) continue;
+      // M10-T30：记账里可能残留非法摘要（历史脏行 / 外部下发的映射）。这类取值在本地
+      // 存储里**永不可能存在**（写入会被拒），此处**跳过**——维护性盘点不该因一行脏数据
+      // 把整轮同步打断，也不该把它送上服务端。
+      if (!isValidSha256(e.sha256)) continue;
       if (await _local.exists(e.sha256)) out.add(e);
     }
     return out;

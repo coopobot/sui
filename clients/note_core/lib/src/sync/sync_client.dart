@@ -20,6 +20,7 @@ import '../models/note.dart';
 import '../models/notebook.dart';
 import '../models/tag.dart';
 import '../repository/note_repository.dart';
+import '../util/hashes.dart';
 
 /// 同步客户端：协调本地仓储与远端服务。
 ///
@@ -462,12 +463,15 @@ class SyncClient {
   Future<bool> uploadBlob(String sha256) async {
     final store = blobStore;
     if (store == null || sha256.isEmpty) return false;
+    // M10-T30：摘要来自外部（附件映射 / 正文 sui:// 引用），拼 URL 与落盘前先过白名单。
+    if (!isValidSha256(sha256)) return false;
     // exists 走本地物理层，避免 read 未命中时触发一次按需下载。
     if (!await store.exists(sha256)) return false;
     final bytes = await store.read(sha256);
     if (bytes == null || bytes.isEmpty) return false;
 
-    final uri = Uri.parse('$baseUrl/api/v1/blobs/$sha256');
+    final uri =
+        Uri.parse('$baseUrl/api/v1/blobs/${Uri.encodeComponent(sha256)}');
     // 内容寻址上传是幂等的，重放安全。
     final resp = await _withAuth(
       (h) => _http.put(
@@ -490,10 +494,15 @@ class SyncClient {
     if (store == null) {
       throw StateError('blobStore 未配置，无法按需下载附件');
     }
+    // M10-T30：非白名单摘要直接拒绝（只拒绝、不清洗）。
+    if (!isValidSha256(sha256)) {
+      throw ArgumentError.value(sha256, 'sha256', '不是合法的内容寻址摘要');
+    }
     final cached = await store.read(sha256);
     if (cached != null) return cached;
 
-    final uri = Uri.parse('$baseUrl/api/v1/blobs/$sha256');
+    final uri =
+        Uri.parse('$baseUrl/api/v1/blobs/${Uri.encodeComponent(sha256)}');
     final resp = await _withAuth((h) => _http.get(uri, headers: h));
     if (resp.statusCode != 200) {
       throw HttpException(resp.statusCode, resp.body);
