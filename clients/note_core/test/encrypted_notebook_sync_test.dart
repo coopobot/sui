@@ -164,10 +164,20 @@ void main() {
       expect(items.single['encrypted'], isTrue);
 
       await syncer.pull();
-      final remoteNote = await repo.getNote('note-remote');
-      expect(remoteNote, isNotNull);
-      expect(remoteNote!.encrypted, isTrue);
-      expect(remoteNote.title, 'AQEAAAA=', reason: '密文必须原样落库（不做任何解密 / 改写）');
+      // 存储层：密文**原样落库**（不经任何解密 / 改写）——故直接读行来断言。
+      final row = await (db.select(db.notes)..where((n) => n.id.equals('note-remote')))
+          .getSingle();
+      expect(row.title, 'AQEAAAA=', reason: '密文必须原样落库');
+      expect(row.contentMarkdown, 'AQEAAAA=');
+      expect(row.encrypted, isTrue);
+
+      // 展示层（M10-T29 读取接缝）：未解锁 → 占位，绝不把密文当明文交给上层。
+      final display = await repo.getNote('note-remote');
+      expect(display, isNotNull);
+      expect(display!.locked, isTrue);
+      expect(display.title, NoteRepository.lockedPlaceholderTitle);
+      expect(display.contentMarkdown, isEmpty);
+
       final remoteNb = await repo.getNotebook('nb-remote');
       expect(remoteNb!.encrypted, isTrue);
       expect(remoteNb.cryptoMeta, meta);

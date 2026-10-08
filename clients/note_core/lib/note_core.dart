@@ -9,6 +9,7 @@ export 'src/blob/cached_blob_store.dart';
 export 'src/blob/local_blob_store.dart';
 export 'src/blob/sqlite_blob_cache_meta.dart';
 export 'src/crypto/notebook_crypto.dart';
+export 'src/crypto/notebook_key_store.dart';
 export 'src/models/attachment.dart';
 export 'src/models/note.dart';
 export 'src/models/notebook.dart';

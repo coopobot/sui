@@ -1,5 +1,7 @@
 import 'package:drift/drift.dart';
 
+import '../crypto/notebook_crypto.dart';
+import '../crypto/notebook_key_store.dart';
 import '../db/app_database.dart';
 import '../models/attachment.dart';
 import '../models/note.dart';
@@ -22,7 +24,95 @@ class NoteRepository {
   final AppDatabase db;
   final String deviceId;
 
-  NoteRepository(this.db, {this.deviceId = ''});
+  /// 解锁态的 `K_nb` **内存映射**（M10-T29 / FR-51）：不落库、不上行，回锁即删。
+  final NotebookKeyStore keyStore;
+
+  /// 未解锁时的占位标题（§6.3）。
+  static const lockedPlaceholderTitle = '🔒 加密笔记';
+
+  /// 密文损坏 / 篡改时的占位标题（§11：既**不**当明文，也不让用户误以为是密码错）。
+  static const damagedPlaceholderTitle = '⚠️ 加密笔记无法解密';
+
+  NoteRepository(this.db, {this.deviceId = '', NotebookKeyStore? keyStore})
+      : keyStore = keyStore ?? NotebookKeyStore();
+
+  // ---- 加密笔记本：解锁 / 回锁 / 展示形态（M10-T29 / FR-51） ----
+
+  /// 解锁加密笔记本：读 `crypto_meta` → 派生 `K_nb` → 驻留内存。
+  ///
+  /// 密码错误抛 [NotebookUnlockException]；`crypto_meta` 缺失 / 损坏抛
+  /// [CryptoMetaFormatException]（§11：**不**静默当明文）。
+  Future<void> unlockNotebook(String notebookId, String password) async {
+    final nb = await getNotebook(notebookId);
+    if (nb == null) {
+      throw StateError('笔记本不存在：$notebookId');
+    }
+    if (!nb.encrypted) {
+      throw StateError('该笔记本不是加密笔记本：$notebookId');
+    }
+    final meta = CryptoMeta.fromJson(nb.cryptoMeta);
+    keyStore.unlock(
+      notebookId,
+      await NotebookCrypto.unlock(password: password, meta: meta),
+    );
+  }
+
+  /// 回锁单个笔记本（手动「锁定」按钮 / 切换笔记本时的可选立即回锁）。
+  bool lockNotebook(String notebookId) => keyStore.lock(notebookId);
+
+  /// 全部回锁（登出 / 关闭应用 / 会话结束）。
+  void lockAllNotebooks() => keyStore.lockAll();
+
+  /// 该笔记本当前是否已解锁。
+  bool isNotebookUnlocked(String notebookId) => keyStore.isUnlocked(notebookId);
+
+  /// 把**存储形态**的笔记转成**展示形态**。
+  ///
+  /// * 未加密 → 原样返回；
+  /// * 已加密且已解锁 → 解密为明文（编辑器 / 合并逻辑仍以 Markdown 明文为正本，§6.2）；
+  /// * 已加密但**未解锁** → 返回占位并置 [Note.locked]；
+  /// * 密文**损坏 / 被篡改**（含 AAD 绑定不符）→ 同样占位（用 [damagedPlaceholderTitle] 区分）。
+  ///
+  /// 任何分支都**不会**把密文当作明文交给上层。
+  Future<Note> toDisplayNote(Note stored) async {
+    if (!stored.encrypted) return stored;
+    final key = keyStore.keyFor(stored.notebookId);
+    if (key == null) return _placeholderNote(stored);
+    final cipher = NotebookFieldCipher(key);
+    final nbId = stored.notebookId ?? '';
+    try {
+      return stored.copyWith(
+        title: await _decryptField(
+            cipher, nbId, stored.id, NotebookField.title, stored.title),
+        contentMarkdown: await _decryptField(
+            cipher, nbId, stored.id, NotebookField.content, stored.contentMarkdown),
+      );
+    } on NotebookDecryptException {
+      return _placeholderNote(stored, damaged: true);
+    }
+  }
+
+  static Future<String> _decryptField(NotebookFieldCipher cipher, String notebookId,
+      String noteId, NotebookField field, String stored) async {
+    if (stored.isEmpty) return '';
+    return cipher.decrypt(
+        notebookId: notebookId, noteId: noteId, field: field, envelope: stored);
+  }
+
+  Note _placeholderNote(Note stored, {bool damaged = false}) => stored.copyWith(
+        title: damaged ? damagedPlaceholderTitle : lockedPlaceholderTitle,
+        contentMarkdown: '',
+        locked: true,
+      );
+
+  /// 加密行由 Dart 侧对**解密后明文**再判定；明文行的命中已由 SQL 保证。
+  static bool _matchesSearch(Note n, String? search) {
+    if (search == null || search.isEmpty) return true;
+    if (!n.encrypted) return true;
+    final s = search.toLowerCase();
+    return n.title.toLowerCase().contains(s) ||
+        n.contentMarkdown.toLowerCase().contains(s);
+  }
 
   /// 下一条本地修订编号：`max(现存 revision.version) + 1`。
   ///
@@ -302,7 +392,11 @@ class NoteRepository {
   Future<Note?> getNote(String id) async {
     final row = await (db.select(db.notes)..where((t) => t.id.equals(id)))
         .getSingleOrNull();
-    return row?.toModel();
+    if (row == null) return null;
+    // 接缝：存储形态 → 展示形态（解锁则解密；未解锁 / 损坏则占位）。所有返回笔记的
+    // API（createNote / updateNoteContent / moveNoteToNotebook / restoreNote /
+    // restoreRevision）最终都经过这里，故接缝只需一处。
+    return toDisplayNote(row.toModel());
   }
 
   Future<NoteSummary?> getNoteSummary(String id) async {
@@ -384,16 +478,18 @@ class NoteRepository {
     }
     if (search != null && search.isNotEmpty) {
       final like = '%${search.toLowerCase()}%';
+      // 加密行的密文不可能匹配明文关键词，故整体取出，稍后对**解密后明文**过滤（§9.2）。
       q.where((n) =>
-          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
     }
     q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
 
-    final rows = await q.get();
-    final notes = rows.map((r) => r.toModel()).toList();
-
     final summaries = <NoteSummary>[];
-    for (final n in notes) {
+    for (final r in await q.get()) {
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
       summaries.add(NoteSummary(
           note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
@@ -615,12 +711,15 @@ class NoteRepository {
     if (search != null && search.isNotEmpty) {
       final like = '%${search.toLowerCase()}%';
       q.where((n) =>
-          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
     }
     q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
     final summaries = <NoteSummary>[];
     for (final r in await q.get()) {
-      final n = r.toModel();
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
       summaries.add(NoteSummary(
           note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
@@ -634,12 +733,15 @@ class NoteRepository {
     if (search != null && search.isNotEmpty) {
       final like = '%${search.toLowerCase()}%';
       q.where((n) =>
-          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
     }
     q.orderBy([(n) => OrderingTerm.desc(n.deletedAt)]);
     final summaries = <NoteSummary>[];
     for (final r in await q.get()) {
-      final n = r.toModel();
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
       summaries.add(NoteSummary(
           note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
