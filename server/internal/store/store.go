@@ -85,6 +85,7 @@ func (s *Store) migrate() error {
 			archived INTEGER NOT NULL DEFAULT 0,  -- 归档状态（FR-25）
 			source_device TEXT NOT NULL DEFAULT '', -- 最近一次修改的来源设备
 			source_url TEXT, -- 剪藏专用幂等键（普通笔记为 NULL，M4/BR-34.3）
+			encrypted INTEGER NOT NULL DEFAULT 0, -- M10-T29：所属笔记本是否为加密笔记本（镜像，FR-51）
 			updated_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS revisions (
@@ -125,6 +126,9 @@ func (s *Store) migrate() error {
 			is_deleted INTEGER NOT NULL DEFAULT 0,
 			version INTEGER NOT NULL DEFAULT 0,
 			source_device TEXT NOT NULL DEFAULT '',
+			-- M10-T29（FR-51）：加密笔记本标记 + **非敏感**加密元数据（JSON；不含任何密钥）。
+			encrypted INTEGER NOT NULL DEFAULT 0,
+			crypto_meta TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -172,6 +176,16 @@ func (s *Store) migrate() error {
 	}
 	// M4/BR-34.3：notes 幂等补列 source_url（剪藏专用幂等键，可空）。
 	if err := s.ensureColumn("notes", "source_url", "TEXT"); err != nil {
+		return err
+	}
+	// M10-T29（FR-51）：加密笔记本的标记与非敏感元数据（老库幂等补列，不掉数据）。
+	if err := s.ensureColumn("notebooks", "encrypted", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("notebooks", "crypto_meta", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("notes", "encrypted", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
@@ -619,15 +633,17 @@ type NoteRow struct {
 	Version         int
 	IsDeleted       bool
 	Archived        bool
-	SourceDevice    string
-	SourceURL       string
-	UpdatedAt       time.Time
+	// Encrypted 表示该笔记所属笔记本是否为加密笔记本（M10-T29；正文 / 标题届时为密文）。
+	Encrypted    bool
+	SourceDevice string
+	SourceURL    string
+	UpdatedAt    time.Time
 }
 
 // UpdatedSince 返回 updated_at > since 的所有笔记（增量拉取）。
 func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, updated_at
+		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, encrypted, source_device, updated_at
 		 FROM notes WHERE updated_at > ? ORDER BY updated_at`,
 		since.UTC().Format(time.RFC3339),
 	)
@@ -638,13 +654,14 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 	var out []NoteRow
 	for rows.Next() {
 		var r NoteRow
-		var del, arch int
+		var del, arch, enc int
 		var ts string
-		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &r.SourceDevice, &ts); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &enc, &r.SourceDevice, &ts); err != nil {
 			return nil, err
 		}
 		r.IsDeleted = del != 0
 		r.Archived = arch != 0
+		r.Encrypted = enc != 0
 		r.UpdatedAt = parseTime(ts)
 		out = append(out, r)
 	}
@@ -654,13 +671,13 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 // GetNote 返回指定笔记的服务端状态。
 func (s *Store) GetNote(id string) (*NoteRow, error) {
 	var r NoteRow
-	var del, arch int
+	var del, arch, enc int
 	var srcURL sql.NullString
 	var ts string
 	err := s.db.QueryRow(
-		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, source_url, updated_at
+		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, encrypted, source_device, source_url, updated_at
 		 FROM notes WHERE id = ?`, id,
-	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &r.SourceDevice, &srcURL, &ts)
+	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &enc, &r.SourceDevice, &srcURL, &ts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -669,6 +686,7 @@ func (s *Store) GetNote(id string) (*NoteRow, error) {
 	}
 	r.IsDeleted = del != 0
 	r.Archived = arch != 0
+	r.Encrypted = enc != 0
 	r.SourceURL = srcURL.String
 	r.UpdatedAt = parseTime(ts)
 	return &r, nil
@@ -705,7 +723,7 @@ func (s *Store) SetNoteSourceURL(noteID, sourceURL string) error {
 }
 
 // UpsertNote 落库笔记（增量），同时记录一条修订。返回新版本号。
-func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted, archived bool, sourceDevice string, version int) (int, error) {
+func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted, archived, encrypted bool, sourceDevice string, version int) (int, error) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -714,16 +732,17 @@ func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted,
 	defer tx.Rollback()
 
 	if err := upsert(tx,
-		`INSERT INTO notes (id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO notes (id, title, content_markdown, notebook_id, version, is_deleted, archived, encrypted, source_device, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   title=excluded.title, content_markdown=excluded.content_markdown,
 		   notebook_id=excluded.notebook_id,
 		   version=excluded.version, is_deleted=excluded.is_deleted,
 		   archived=excluded.archived,
+		   encrypted=excluded.encrypted,
 		   source_device=excluded.source_device,
 		   updated_at=excluded.updated_at`,
-		noteID, title, content, notebookID, version, b2i(isDeleted), b2i(archived), sourceDevice, ts,
+		noteID, title, content, notebookID, version, b2i(isDeleted), b2i(archived), b2i(encrypted), sourceDevice, ts,
 	); err != nil {
 		return 0, err
 	}
@@ -749,12 +768,15 @@ func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted,
 // 与笔记共用同一套版本线语义：version 为服务端权威版本，is_deleted 为墓碑，
 // source_device 记录最近一次修改的来源设备，用于跨端增量收敛。
 type NotebookRow struct {
-	ID           string
-	ParentID     string
-	Name         string
-	SortOrder    int
-	IsDeleted    bool
-	Version      int
+	ID        string
+	ParentID  string
+	Name      string
+	SortOrder int
+	IsDeleted bool
+	Version   int
+	// M10-T29（FR-51）：是否加密笔记本 + **非敏感**加密元数据（JSON，服务端不解析）。
+	Encrypted    bool
+	CryptoMeta   string
 	SourceDevice string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -774,7 +796,7 @@ type TagRow struct {
 // UpdatedNotebooksSince 返回 updated_at > since 的笔记本分组（增量拉取，含墓碑）。
 func (s *Store) UpdatedNotebooksSince(since time.Time) ([]NotebookRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, parent_id, name, sort_order, is_deleted, version, source_device, created_at, updated_at
+		`SELECT id, parent_id, name, sort_order, is_deleted, version, encrypted, crypto_meta, source_device, created_at, updated_at
 		 FROM notebooks WHERE updated_at > ? ORDER BY updated_at`,
 		since.UTC().Format(time.RFC3339),
 	)
@@ -785,12 +807,13 @@ func (s *Store) UpdatedNotebooksSince(since time.Time) ([]NotebookRow, error) {
 	var out []NotebookRow
 	for rows.Next() {
 		var r NotebookRow
-		var del int
+		var del, enc int
 		var created, updated string
-		if err := rows.Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &r.SourceDevice, &created, &updated); err != nil {
+		if err := rows.Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &enc, &r.CryptoMeta, &r.SourceDevice, &created, &updated); err != nil {
 			return nil, err
 		}
 		r.IsDeleted = del != 0
+		r.Encrypted = enc != 0
 		r.CreatedAt = parseTime(created)
 		r.UpdatedAt = parseTime(updated)
 		out = append(out, r)
@@ -801,12 +824,12 @@ func (s *Store) UpdatedNotebooksSince(since time.Time) ([]NotebookRow, error) {
 // GetNotebook 返回指定笔记本分组的服务端状态（不存在返回 nil, nil）。
 func (s *Store) GetNotebook(id string) (*NotebookRow, error) {
 	var r NotebookRow
-	var del int
+	var del, enc int
 	var created, updated string
 	err := s.db.QueryRow(
-		`SELECT id, parent_id, name, sort_order, is_deleted, version, source_device, created_at, updated_at
+		`SELECT id, parent_id, name, sort_order, is_deleted, version, encrypted, crypto_meta, source_device, created_at, updated_at
 		 FROM notebooks WHERE id = ?`, id,
-	).Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &r.SourceDevice, &created, &updated)
+	).Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &enc, &r.CryptoMeta, &r.SourceDevice, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -814,6 +837,7 @@ func (s *Store) GetNotebook(id string) (*NotebookRow, error) {
 		return nil, err
 	}
 	r.IsDeleted = del != 0
+	r.Encrypted = enc != 0
 	r.CreatedAt = parseTime(created)
 	r.UpdatedAt = parseTime(updated)
 	return &r, nil
@@ -821,16 +845,17 @@ func (s *Store) GetNotebook(id string) (*NotebookRow, error) {
 
 // UpsertNotebook 落库笔记本分组（增量）。created_at 只在首次插入时写入，
 // 冲突更新时不覆盖，保持分组创建时间稳定。
-func (s *Store) UpsertNotebook(id, parentID, name string, sortOrder int, isDeleted bool, sourceDevice string, version int) error {
+func (s *Store) UpsertNotebook(id, parentID, name string, sortOrder int, isDeleted bool, encrypted bool, cryptoMeta string, sourceDevice string, version int) error {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	return upsert(s.db,
-		`INSERT INTO notebooks (id, parent_id, name, sort_order, is_deleted, version, source_device, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO notebooks (id, parent_id, name, sort_order, is_deleted, version, encrypted, crypto_meta, source_device, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   parent_id=excluded.parent_id, name=excluded.name, sort_order=excluded.sort_order,
 		   is_deleted=excluded.is_deleted, version=excluded.version,
+		   encrypted=excluded.encrypted, crypto_meta=excluded.crypto_meta,
 		   source_device=excluded.source_device, updated_at=excluded.updated_at`,
-		id, parentID, name, sortOrder, b2i(isDeleted), version, sourceDevice, ts, ts,
+		id, parentID, name, sortOrder, b2i(isDeleted), version, b2i(encrypted), cryptoMeta, sourceDevice, ts, ts,
 	)
 }
 

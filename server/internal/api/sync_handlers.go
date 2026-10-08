@@ -174,6 +174,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		Version      int      `json:"version"`
 		IsDeleted    bool     `json:"isDeleted"`
 		Archived     bool     `json:"archived"`
+		Encrypted    bool     `json:"encrypted"`
 		SourceDevice string   `json:"sourceDevice"`
 		UpdatedAt    string   `json:"updatedAt"`
 		Attachments  []attOut `json:"attachments,omitempty"`
@@ -186,6 +187,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		item := out{
 			ID: rw.ID, Title: rw.Title, Content: rw.ContentMarkdown,
 			Version: rw.Version, IsDeleted: rw.IsDeleted, Archived: rw.Archived,
+			Encrypted:    rw.Encrypted,
 			SourceDevice: rw.SourceDevice,
 			NotebookID:   rw.NotebookID,
 			UpdatedAt:    rw.UpdatedAt.UTC().Format(time.RFC3339),
@@ -211,6 +213,8 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		SortOrder    int    `json:"sortOrder"`
 		Version      int    `json:"version"`
 		IsDeleted    bool   `json:"isDeleted"`
+		Encrypted    bool   `json:"encrypted"`
+		CryptoMeta   string `json:"cryptoMeta,omitempty"`
 		SourceDevice string `json:"sourceDevice"`
 		UpdatedAt    string `json:"updatedAt"`
 	}
@@ -232,6 +236,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		notebooks = append(notebooks, nbOut{
 			ID: nb.ID, ParentID: nb.ParentID, Name: nb.Name, SortOrder: nb.SortOrder,
 			Version: nb.Version, IsDeleted: nb.IsDeleted, SourceDevice: nb.SourceDevice,
+			Encrypted: nb.Encrypted, CryptoMeta: nb.CryptoMeta,
 			UpdatedAt: nb.UpdatedAt.UTC().Format(time.RFC3339),
 		})
 	}

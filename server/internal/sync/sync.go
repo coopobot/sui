@@ -22,13 +22,16 @@ func New(st *store.Store) *Protocol {
 
 // PushItem 是客户端推送的一条笔记变更。
 type PushItem struct {
-	ID           string           `json:"id"`
-	Title        string           `json:"title"`
-	Content      string           `json:"content"`
-	BaseVersion  int              `json:"baseVersion"`
-	Version      int              `json:"version"`
-	IsDeleted    bool             `json:"isDeleted"`
-	Archived     bool             `json:"archived"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Content     string `json:"content"`
+	BaseVersion int    `json:"baseVersion"`
+	Version     int    `json:"version"`
+	IsDeleted   bool   `json:"isDeleted"`
+	Archived    bool   `json:"archived"`
+	// M10-T29（FR-51）：所属笔记本是否为加密笔记本（镜像）。加密时 Title / Content 为**密文**，
+	// 服务端只搬运、不解析。
+	Encrypted    bool             `json:"encrypted"`
 	SourceDevice string           `json:"sourceDevice"`
 	Attachments  []AttachmentItem `json:"attachments,omitempty"`
 
@@ -116,7 +119,8 @@ func (p *Protocol) Push(it PushItem) (*PushResponse, error) {
 			notebookID = *it.NotebookID
 		}
 		if _, err := p.store.UpsertNote(
-			it.ID, it.Title, it.Content, notebookID, it.IsDeleted, it.Archived, it.SourceDevice, nextVer,
+			it.ID, it.Title, it.Content, notebookID, it.IsDeleted, it.Archived, it.Encrypted,
+			it.SourceDevice, nextVer,
 		); err != nil {
 			return nil, err
 		}
@@ -201,10 +205,14 @@ func parseOptionalTime(s string) time.Time {
 // 与笔记一样携带 baseVersion/version/isDeleted/sourceDevice，复用同一套
 // 「base 与服务端权威版本一致才应用」的冲突判定与墓碑语义。
 type NotebookItem struct {
-	ID           string `json:"id"`
-	ParentID     string `json:"parentId"`
-	Name         string `json:"name"`
-	SortOrder    int    `json:"sortOrder"`
+	ID        string `json:"id"`
+	ParentID  string `json:"parentId"`
+	Name      string `json:"name"`
+	SortOrder int    `json:"sortOrder"`
+	// M10-T29（FR-51）：是否加密笔记本 + **非敏感**加密元数据（算法 / KDF 参数 / salt / verifier）。
+	// 名称保持明文（便于辨认该解锁哪个笔记本）；服务端不解析 cryptoMeta。
+	Encrypted    bool   `json:"encrypted"`
+	CryptoMeta   string `json:"cryptoMeta,omitempty"`
 	BaseVersion  int    `json:"baseVersion"`
 	Version      int    `json:"version"`
 	IsDeleted    bool   `json:"isDeleted"`
@@ -234,7 +242,8 @@ func (p *Protocol) PushNotebook(it NotebookItem) (*PushResponse, error) {
 	if it.BaseVersion == serverVer {
 		nextVer := serverVer + 1
 		if err := p.store.UpsertNotebook(
-			it.ID, it.ParentID, it.Name, it.SortOrder, it.IsDeleted, it.SourceDevice, nextVer,
+			it.ID, it.ParentID, it.Name, it.SortOrder, it.IsDeleted, it.Encrypted, it.CryptoMeta,
+			it.SourceDevice, nextVer,
 		); err != nil {
 			return nil, err
 		}
