@@ -7,6 +7,23 @@
 
 ## [Unreleased]
 
+### 新增 / 变更
+
+- **Windows 安装包（Inno Setup 6）**：新增 `clients/flutter_app/installer/sui.iss`，把
+  `flutter build windows --release` 的产物整目录打成单文件安装包——支持自定义安装目录、开始菜单 /
+  桌面快捷方式、标准卸载器与 `/VERYSILENT` 静默安装；产物为
+  `clients/flutter_app/dist/sui-setup-<版本>-x64.exe`（不入库）。安装器不写死版本号，
+  缺 `/DMyAppVersion` 即编译报错，避免与版本真源漂移。
+- **版本号单一真源**：`clients/flutter_app/pubspec.yaml` 的 `version:` 为**唯一真源**
+  （本次修正为 `0.10.14+1014`；build number 规则 `major*10000+minor*100+patch`，同时充当
+  Android `versionCode`）。此前该字段停在 `0.1.0`，导致 Windows exe 文件属性与 Android 包版本长期错版。
+- **服务端版本改为构建期注入**：`server/internal/version/version.go` 的 `String` 由 `const` 改 `var`
+  （`-ldflags -X` 只对变量生效），`make build-server` 从 pubspec 读版本并注入；此前硬编码在 `0.9.1`。
+- **新增 `scripts/version.sh`**（`show` / `check` / `set`）：`check` 交叉校验 pubspec ↔ `version.go`
+  ↔ `CHANGELOG` ↔ git tag，并作为 `make build-server` 的前置门禁（版本漂移则构建失败）。
+- **Makefile** 新增 `version-show` / `version-check` 目标，`build-server` 注入 `-ldflags` 版本。
+- **`.gitignore`** 忽略 `clients/flutter_app/dist/`（安装包产物目录）。
+
 ## [0.10.14] - 2026-10-08
 
 M9 补丁：超链接弹框录入与工具栏快捷键提示。在「Markdown 唯一正本」原则不变的前提下，

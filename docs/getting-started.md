@@ -124,7 +124,7 @@ sui/
 │                                # app_controller（Provider 状态）
 ├── extension/                   # Chrome 剪藏扩展（MV3）
 ├── protos/                      # 预留（当前为空目录，未入库）
-└── scripts/                     # 预留（当前为空目录，未入库）
+└── scripts/                     # 构建工具（version.sh：版本号单一真源）
 ```
 
 ## 4. 构建与测试
@@ -135,7 +135,8 @@ sui/
 cd server
 go mod tidy                # 首次拉取依赖（国内可用 GOPROXY=https://goproxy.cn,direct）
 go build ./...             # 编译
-go build -o bin/sui-server ./cmd/sui-server   # 输出二进制
+make build-server                              # 推荐：注入版本号 + 版本一致性校验
+go build -o bin/sui-server ./cmd/sui-server    # 直接构建：版本停在 version.go 内最后同步值
 go vet ./...               # 静态检查
 go test ./... -count=1     # 全部测试（当前 8 个用例，均在 internal/api）
 ```
@@ -218,8 +219,49 @@ curl -L -o sqlite3.wasm \
 make build-server   # 编译服务端到 server/bin/sui-server
 make run-server     # 编译并运行（SUI_ADDR 可覆盖端口）
 make test           # 服务端测试
+make version-show   # 打印版本号真源与派生目标
+make version-check  # 校验 pubspec ↔ version.go ↔ CHANGELOG ↔ git tag
 make clean
 ```
+
+### 4.6 Windows 安装包（Inno Setup）
+
+桌面端对外的交付物是**安装包**（`setup.exe`），而不是 `flutter build windows` 直接产出的那个文件夹。
+构建与打包都在 **Windows 宿主**上做（WSL 侧只维护源码）：
+
+```powershell
+# 同步 WSL 权威库 -> D:\dev\sui，再构建 + 打包（一条命令）
+powershell -ExecutionPolicy Bypass -File D:\dev\build_windows_installer.ps1
+
+# 复用已有 Release 产物，只重打安装包
+powershell -ExecutionPolicy Bypass -File D:\dev\build_windows_installer.ps1 -SkipBuild
+```
+
+| 步骤 | 命令 / 位置 | 产物 |
+| --- | --- | --- |
+| 构建 | `flutter build windows --release` | `clients/flutter_app/build/windows/x64/runner/Release/` |
+| 打包 | `ISCC.exe /DMyAppVersion=<版本> clients/flutter_app/installer/sui.iss` | `clients/flutter_app/dist/sui-setup-<版本>-x64.exe` |
+
+前置条件：**Inno Setup 6.3+**（从官方站点安装即可；脚本会自动探测安装路径，也可用 `-IsccPath` 指定）。
+目标机需 **VC++ 2015-2022 x64 运行库**（产物依赖 `MSVCP140.dll` / `VCRUNTIME140.dll`），安装器会检测并提示。
+
+**版本号只有一个真源**：`clients/flutter_app/pubspec.yaml` 的 `version:`（形如 `0.10.14+1014`）。
+它决定 exe 的文件属性、Android 包版本与安装包版本；服务端版本在构建期用 `-ldflags` 注入
+（`make build-server` 已接好）。改版本号与校验：
+
+```bash
+bash scripts/version.sh set 0.10.15   # 唯一入口：改 pubspec 并同步 version.go，随后补 CHANGELOG 小节
+bash scripts/version.sh check         # 交叉校验 pubspec / version.go / CHANGELOG / git tag
+```
+
+静默安装（批量部署）：
+
+```powershell
+sui-setup-0.10.14-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+```
+
+> 卸载**不会**删除用户数据（`%APPDATA%\com.sui\Sui\sui\sui.sqlite`）。
+> 若在本机直接运行独立 exe 启动即崩，属端点安全软件 DLL 注入所致（见故障排查），需将安装目录加入信任区。
 
 ## 5. 端到端联调
 

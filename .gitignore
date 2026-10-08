@@ -16,6 +16,8 @@ clients/flutter_app/.flutter-plugins-dependencies
 clients/flutter_app/ios/Pods/
 clients/flutter_app/android/.gradle/
 clients/flutter_app/.idea/
+# Windows 安装包产物（Inno Setup，见 installer/sui.iss）
+clients/flutter_app/dist/
 
 # Dart / note_core
 clients/note_core/.dart_tool/
