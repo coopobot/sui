@@ -66,6 +66,99 @@ class NoteRepository {
   /// 该笔记本当前是否已解锁。
   bool isNotebookUnlocked(String notebookId) => keyStore.isUnlocked(notebookId);
 
+  /// 把笔记本**设为加密笔记本**（M10-T29 / FR-51，详细设计 §5.1）。
+  ///
+  /// 一次性动作（设计里无「取消加密」的反向流程）：
+  ///   1. 派生 `K_nb`（随机 `salt`）并**先放入内存**——接下来的转换需要目标笔记本的密钥；
+  ///   2. 该笔记本内**现有**笔记及其**全部修订**就地加密（与 [moveNoteToNotebook] 同口径：
+  ///      加密笔记本里绝不留明文历史）；
+  ///   3. 写 `notebooks.encrypted` / `crypto_meta`（并推进版本，供上行冲突判定）；
+  ///   4. 笔记本随后保持**已解锁**（用户刚设定的密码，不必再输一次）。
+  ///
+  /// **入队上行由调用方负责**（仓储不持有同步客户端，与 [createNote] 同口径）。
+  /// 任一步失败即**撤销内存密钥**并原样抛出，不留「未加密却已解锁」的中间态。
+  Future<({Notebook notebook, List<Note> converted})> setNotebookEncrypted(
+    String notebookId,
+    String password,
+  ) async {
+    final nb = await getNotebook(notebookId);
+    if (nb == null) throw StateError('笔记本不存在：$notebookId');
+    if (nb.encrypted) throw StateError('该笔记本已是加密笔记本：$notebookId');
+
+    final created = await NotebookCrypto.create(password: password);
+    keyStore.unlock(notebookId, created.key);
+    try {
+      final rows = await (db.select(db.notes)
+            ..where((n) => n.notebookId.equals(notebookId)))
+          .get();
+
+      // 先算完全部密文再进事务：事务内不做异步密码学运算（与 moveNoteToNotebook 同口径）。
+      final noteWrites = <({String id, String title, String content})>[];
+      final revWrites = <({String id, String title, String content})>[];
+      for (final row in rows) {
+        // 本笔记本此前未加密，理论上不会有已加密行；出现即跳过，绝不重复加密。
+        if (row.encrypted) continue;
+        final enc = await _toStorage(
+          notebookId: notebookId,
+          noteId: row.id,
+          title: row.title,
+          content: row.contentMarkdown,
+          encrypted: true,
+        );
+        noteWrites.add((id: row.id, title: enc.title, content: enc.content));
+        final revRows = await (db.select(db.revisions)
+              ..where((r) => r.noteId.equals(row.id)))
+            .get();
+        for (final r in revRows) {
+          final revEnc = await _toStorage(
+            notebookId: notebookId,
+            noteId: row.id,
+            title: r.title,
+            content: r.contentMarkdown,
+            encrypted: true,
+          );
+          revWrites.add((id: r.id, title: revEnc.title, content: revEnc.content));
+        }
+      }
+
+      final t = DateTime.now();
+      await db.transaction(() async {
+        for (final n in noteWrites) {
+          await (db.update(db.notes)..where((x) => x.id.equals(n.id)))
+              .write(NotesCompanion(
+            title: Value(n.title),
+            contentMarkdown: Value(n.content),
+            encrypted: const Value(true),
+            updatedAt: Value(t),
+          ));
+        }
+        for (final r in revWrites) {
+          await (db.update(db.revisions)..where((x) => x.id.equals(r.id)))
+              .write(RevisionsCompanion(
+            title: Value(r.title),
+            contentMarkdown: Value(r.content),
+          ));
+        }
+        await (db.update(db.notebooks)..where((x) => x.id.equals(notebookId)))
+            .write(NotebooksCompanion(
+          encrypted: const Value(true),
+          cryptoMeta: Value(created.meta.toJson()),
+          updatedAt: Value(t),
+          version: Value(nb.version + 1),
+        ));
+      });
+
+      final converted = <Note>[];
+      for (final n in noteWrites) {
+        converted.add((await getNote(n.id))!);
+      }
+      return (notebook: (await getNotebook(notebookId))!, converted: converted);
+    } catch (_) {
+      keyStore.lock(notebookId);
+      rethrow;
+    }
+  }
+
   /// 把**存储形态**的笔记转成**展示形态**。
   ///
   /// * 未加密 → 原样返回；

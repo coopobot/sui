@@ -794,6 +794,31 @@ class AppController extends ChangeNotifier {
       _notebooks.where((n) => n.id == id).firstOrNull?.parentId;
 
   /// 笔记本变更入同步队列（仅当已连服务端时有效）。
+  /// 把笔记本**设为加密笔记本**（M10-T29 / FR-51，设计 §5.1）。
+  ///
+  /// 成功后该笔记本保持**已解锁**（用户刚设的密码），并把笔记本与**受影响笔记**一并入队上行；
+  /// 失败返回可直接展示的文案（UI 用 SnackBar 提示），不抛异常。
+  Future<String?> setNotebookEncrypted(String notebookId, String password) async {
+    try {
+      final res = await _repository.setNotebookEncrypted(notebookId, password);
+      _enqueueNotebook(res.notebook);
+      final client = _syncClient;
+      if (client != null) {
+        // 逐条入队：它们刚从明文转为密文，必须上行，否则对端仍是明文副本。
+        for (final n in res.converted) {
+          await client.enqueue(n);
+        }
+      }
+      _lockedNotice = null;
+      await refreshNotebooks();
+      await refreshNotes();
+      notifyListeners();
+      return null;
+    } catch (e) {
+      return _describeError(e);
+    }
+  }
+
   void _enqueueNotebook(Notebook notebook) {
     final client = _syncClient;
     if (client == null) return;

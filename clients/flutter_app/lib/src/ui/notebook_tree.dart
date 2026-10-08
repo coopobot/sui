@@ -251,17 +251,24 @@ class _NotebookNode extends StatelessWidget {
                 case 'down':
                   await controller.moveNotebookDown(nb.id);
                   break;
+                case 'encrypt':
+                  await _setEncrypted(context);
+                  break;
                 case 'delete':
                   await _confirmDelete(context);
                   break;
               }
             },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'rename', child: Text('重命名')),
-              PopupMenuItem(value: 'newchild', child: Text('新建子笔记本')),
-              PopupMenuItem(value: 'up', child: Text('上移')),
-              PopupMenuItem(value: 'down', child: Text('下移')),
-              PopupMenuItem(value: 'delete', child: Text('删除')),
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'rename', child: Text('重命名')),
+              const PopupMenuItem(value: 'newchild', child: Text('新建子笔记本')),
+              const PopupMenuItem(value: 'up', child: Text('上移')),
+              const PopupMenuItem(value: 'down', child: Text('下移')),
+              // M10-T29（FR-51 §5.1）：「设为加密笔记本」为**一次性**动作，已加密则不再出现。
+              if (!nb.encrypted)
+                const PopupMenuItem(
+                    value: 'encrypt', child: Text('设为加密笔记本')),
+              const PopupMenuItem(value: 'delete', child: Text('删除')),
             ],
           ),
           onTap: () => controller.selectNotebook(nb.id),
@@ -323,6 +330,100 @@ class _NotebookNode extends StatelessWidget {
       ),
     );
     if (ok == true) await controller.deleteNotebook(nb.id);
+  }
+
+  /// 设为加密笔记本（M10-T29 / FR-51 §5.1）：先二次确认锁定密码，再交给控制器。
+  Future<void> _setEncrypted(BuildContext context) async {
+    final password = await showDialog<String>(
+      context: context,
+      builder: (context) => _SetLockPasswordDialog(notebookName: nb.name),
+    );
+    if (password == null) return;
+    final err = await controller.setNotebookEncrypted(nb.id, password);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(err ??
+            '已加密笔记本「${nb.name}」——请牢记锁定密码，忘记后内容无法找回'),
+      ),
+    );
+  }
+}
+
+/// 「设为加密笔记本」的锁定密码录入框：**两次输入一致**才允许落笔（§5.1 二次确认）。
+class _SetLockPasswordDialog extends StatefulWidget {
+  const _SetLockPasswordDialog({required this.notebookName});
+
+  final String notebookName;
+
+  @override
+  State<_SetLockPasswordDialog> createState() => _SetLockPasswordDialogState();
+}
+
+class _SetLockPasswordDialogState extends State<_SetLockPasswordDialog> {
+  final _pw = TextEditingController();
+  final _confirm = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _pw.dispose();
+    _confirm.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (_pw.text.isEmpty) {
+      setState(() => _error = '锁定密码不能为空');
+      return;
+    }
+    if (_pw.text != _confirm.text) {
+      setState(() => _error = '两次输入的锁定密码不一致');
+      return;
+    }
+    Navigator.pop(context, _pw.text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final err = Theme.of(context).colorScheme.error;
+    return AlertDialog(
+      title: const Text('设为加密笔记本'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('笔记本「${widget.notebookName}」内的标题与正文将在本机加密后才落库、才上传；'
+              '服务端无法解密，也不需要锁定密码。'),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _pw,
+            autofocus: true,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: '锁定密码'),
+          ),
+          TextField(
+            controller: _confirm,
+            obscureText: true,
+            onSubmitted: (_) => _submit(),
+            decoration: InputDecoration(
+              labelText: '再次输入锁定密码',
+              errorText: _error,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text('⚠️ 锁定密码无法找回：忘记后该笔记本内容将永久不可读。',
+              style: TextStyle(color: err, fontSize: 12)),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('加密')),
+      ],
+    );
   }
 }
 

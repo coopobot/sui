@@ -15,4 +15,4 @@
 package version
 
 // String 是服务端版本号，构建期可被 -ldflags -X 覆盖。
-var String = "0.11.0"
+var String = "0.11.1"
