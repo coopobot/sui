@@ -10,6 +10,7 @@ import (
 	"sui/note-server/internal/auth"
 	"sui/note-server/internal/blob"
 	"sui/note-server/internal/cors"
+	"sui/note-server/internal/securechan"
 	"sui/note-server/internal/store"
 	"sui/note-server/internal/sync"
 	"sui/note-server/internal/ws"
@@ -24,6 +25,9 @@ type Server struct {
 	// mediaClient 供剪藏媒体本地化使用；nil → 由 clip 包使用带**出网地址闸门**的默认客户端
 	// （M10-T27）。仅测试会注入不带闸门的客户端。
 	mediaClient *http.Client
+	// chanKey 是**受保护通道**的服务端长期密钥（M10-T27 / FR-50，auth.md §9）。
+	// nil = 通道未启用：握手返回 503，加密请求一律拒绝，**明文请求照常**（通道是加成而非强制）。
+	chanKey *securechan.Key
 }
 
 // New 创建带依赖的 API Server。
@@ -45,6 +49,11 @@ func (s *Server) Hub() *ws.Hub { return s.hub }
 // 既有媒体用例用 127.0.0.1 的 httptest 服务器供图，必须显式注入不带闸门的客户端。
 func (s *Server) SetMediaClient(c *http.Client) { s.mediaClient = c }
 
+// SetChannelKey 注入受保护通道的服务端长期密钥（M10-T27 / FR-50）。
+//
+// 生产由 `cmd/sui-server` 从 `<SUI_DATA>/securechan.key` 加载或首次生成；**测试**可注入内存密钥。
+func (s *Server) SetChannelKey(k *securechan.Key) { s.chanKey = k }
+
 // Router 返回根 mux：CORS 包裹 + 公开路由 + 受保护路由。
 func (s *Server) Router() http.Handler {
 	// M10-T23 / BR-52.5：CORS 与 WebSocket 共用同一份来源白名单；
@@ -55,10 +64,21 @@ func (s *Server) Router() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealth)
 	mux.HandleFunc("GET /api/v1/ping", s.handlePing)
-	mux.HandleFunc("POST /api/v1/register", s.handleRegister)
-	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
+	// M10-T27 / FR-50：受保护通道握手（公开；返回服务端长期公钥 + 指纹，供 TOFU 核对，§9.2）。
+	mux.HandleFunc("GET /api/v1/crypto/handshake", s.handleHandshake)
+
+	// 含**敏感正文**（口令 / 令牌）的公开端点也过通道中间件：客户端声明加密时解封请求、加密响应；
+	// 未声明（`X-Sui-Enc` 缺失）则原样透传——通道是**加成**而非强制（§9.6）。
+	secure := func(h http.Handler) http.Handler {
+		if s.chanKey == nil {
+			return h
+		}
+		return securechan.Middleware(s.chanKey, h)
+	}
+	mux.Handle("POST /api/v1/register", secure(http.HandlerFunc(s.handleRegister)))
+	mux.Handle("POST /api/v1/login", secure(http.HandlerFunc(s.handleLogin)))
 	// 刷新端点**不**经 auth 中间件：访问令牌可能已过期，凭刷新令牌本身鉴权（§8.3）。
-	mux.HandleFunc("POST /api/v1/refresh", s.handleRefresh)
+	mux.Handle("POST /api/v1/refresh", secure(http.HandlerFunc(s.handleRefresh)))
 
 	// WebSocket 端点（M4/BR-35.x：须鉴权，未通过 → 401）
 	mux.HandleFunc("GET /api/v1/ws", s.handleWS)
@@ -66,13 +86,13 @@ func (s *Server) Router() http.Handler {
 	// 受保护路由挂载在同一 mux 下，交由 auth 中间件包裹。
 	root := NewRouter(s)
 	authWrap := auth.Middleware(s.store, root)
-	mux.Handle("/api/v1/sync/push", authWrap)
-	mux.Handle("/api/v1/sync/pull", authWrap)
-	mux.Handle("/api/v1/blobs/", authWrap)
-	mux.Handle("/api/v1/notes/", authWrap)
-	mux.Handle("/api/v1/clips", authWrap)
-	mux.Handle("/api/v1/logout", authWrap)
-	mux.Handle("/api/v1/logout-all", authWrap)
+	mux.Handle("/api/v1/sync/push", secure(authWrap))
+	mux.Handle("/api/v1/sync/pull", secure(authWrap))
+	mux.Handle("/api/v1/blobs/", secure(authWrap))
+	mux.Handle("/api/v1/notes/", secure(authWrap))
+	mux.Handle("/api/v1/clips", secure(authWrap))
+	mux.Handle("/api/v1/logout", secure(authWrap))
+	mux.Handle("/api/v1/logout-all", secure(authWrap))
 
 	// CORS 中间件包裹最外层（M4/BR-36.3 + M10-T23：白名单精确匹配；未配置 = 默认拒绝）
 	return cors.Middleware(origins, mux)
@@ -94,6 +114,23 @@ func allowedOrigins() []string {
 		}
 	}
 	return out
+}
+
+// handleHandshake 返回服务端长期通道公钥与指纹（M10-T27 / FR-50，auth.md §9.2 / §9.6）。
+//
+// 无需令牌：它是**信任根分发**入口（TOFU），不含任何秘密。
+func (s *Server) handleHandshake(w http.ResponseWriter, r *http.Request) {
+	if s.chanKey == nil {
+		writeJSON(w, http.StatusServiceUnavailable,
+			map[string]any{"ok": false, "error": "channel-disabled"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"alg":         "x25519",
+		"serverPub":   s.chanKey.PublicB64(),
+		"fingerprint": s.chanKey.Fingerprint(),
+	})
 }
 
 // handleWS 校验 WS 连接鉴权（M10：请求头 / 子协议，见 auth.md §4.5），未通过 → 401 + 错误码。

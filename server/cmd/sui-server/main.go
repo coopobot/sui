@@ -14,6 +14,7 @@ import (
 
 	"sui/note-server/internal/api"
 	"sui/note-server/internal/blob"
+	"sui/note-server/internal/securechan"
 	"sui/note-server/internal/store"
 	"sui/note-server/internal/version"
 )
@@ -42,9 +43,18 @@ func main() {
 		log.Fatalf("init blob store: %v", err)
 	}
 
+	apiSrv := api.New(st, blobs)
+	// M10-T27 / FR-50：受保护通道的长期密钥（首次启动生成并持久化，0600；信任根，TOFU + 指纹）。
+	chanKey, err := securechan.LoadOrCreateKey(dataDir + "/securechan.key")
+	if err != nil {
+		log.Fatalf("init secure channel key: %v", err)
+	}
+	apiSrv.SetChannelKey(chanKey)
+	log.Printf("secure channel ready (fingerprint %s)", chanKey.Fingerprint())
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: api.New(st, blobs).Router(),
+		Handler: apiSrv.Router(),
 		// M10-T25 / BR-52.5（input-validation.md §8）：补 ReadHeaderTimeout 防慢速
 		// 请求头攻击、补 IdleTimeout 回收keep-alive 空闲连接；既有 Read/Write 保持不变。
 		ReadHeaderTimeout: 10 * time.Second,
