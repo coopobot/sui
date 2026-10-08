@@ -608,6 +608,20 @@ class _FormatTableCellState extends State<_FormatTableCell> {
     // 显示文本（`<br>` 已还原为换行）——引用区间扫描与光标共用同一套偏移。
     final text = _controller.text;
 
+    // 与**正文同源**的结构删除（§13.2 / BR-23.8）：残缺引用自愈 → 附件引用整块删除 →
+    // **行内记号原子删除**（`**粗**` / `==高==` / 链接语法一次去掉整对，内容逐字保留）
+    // → 未命中则交下面的逐字符删除（选区 / 单字符，跳过代理对）。
+    final structural = EditorFormat.structuralDelete(
+      text,
+      sel.start,
+      sel.end,
+      backspace: backspace,
+    );
+    if (structural != null && structural.text != text) {
+      _writeCellValue(structural.text, structural.selectionStart);
+      return;
+    }
+
     if (!sel.isCollapsed) {
       final s = sel.start.clamp(0, text.length);
       final e = sel.end.clamp(0, text.length);
@@ -616,22 +630,6 @@ class _FormatTableCellState extends State<_FormatTableCell> {
     }
 
     final pos = sel.extentOffset.clamp(0, text.length);
-    final at = EditorFormat.attachmentRefAt(text, pos);
-    if (at != null && at.corrupt) {
-      final fixed = EditorFormat.repairAttachmentRef(text, at);
-      _writeCellValue(fixed.text, fixed.selectionStart);
-      return;
-    }
-    final ref = EditorFormat.attachmentRefForDeletion(
-      text,
-      pos,
-      backspace: backspace,
-    );
-    if (ref != null) {
-      final result = EditorFormat.deleteAttachmentRef(text, ref);
-      _writeCellValue(result.text, result.selectionStart);
-      return;
-    }
 
     if (backspace) {
       if (pos == 0) return; // 已在格首：无操作（事件仍由调用方吞掉，绝不漏泡）
@@ -1089,21 +1087,7 @@ class TableCellEditingController extends TextEditingController {
     required bool withComposing,
   }) {
     final builder = unitBuilder;
-    if (builder == null) {
-      return super.buildTextSpan(
-        context: context,
-        style: style,
-        withComposing: withComposing,
-      );
-    }
-    final refs = attachmentRefs;
-    if (refs.isEmpty) {
-      return super.buildTextSpan(
-        context: context,
-        style: style,
-        withComposing: withComposing,
-      );
-    }
+    final refs = builder == null ? const <AttachmentRef>[] : attachmentRefs;
     final base = style ?? const TextStyle();
     final composing = withComposing ? value.composing : TextRange.empty;
     final sel = value.selection;
@@ -1114,7 +1098,13 @@ class TableCellEditingController extends TextEditingController {
         continue; // 与上一区间重叠 / 越界：跳过（防御，不破坏偏移）
       }
       if (ref.start > cursor) {
-        _addRun(out, text.substring(cursor, ref.start), cursor, base, composing);
+        out.addAll(_styledRun(
+          text.substring(cursor, ref.start),
+          cursor,
+          base,
+          composing,
+          context,
+        ));
       }
       final selected = sel.isValid &&
           sel.isCollapsed &&
@@ -1122,7 +1112,7 @@ class TableCellEditingController extends TextEditingController {
           sel.start <= ref.end;
       out.add(WidgetSpan(
         alignment: PlaceholderAlignment.middle,
-        child: builder(
+        child: builder!(
           context,
           text,
           ref,
@@ -1158,9 +1148,135 @@ class TableCellEditingController extends TextEditingController {
       cursor = ref.end;
     }
     if (cursor < text.length) {
-      _addRun(out, text.substring(cursor), cursor, base, composing);
+      out.addAll(_styledRun(
+        text.substring(cursor),
+        cursor,
+        base,
+        composing,
+        context,
+      ));
     }
     return TextSpan(style: base, children: out);
+  }
+
+  /// 渲染一段**非附件引用**文本：行内记号（`**` / `==` / `` ` `` / 链接语法 …）**不可见**，
+  /// 其**内容**按样式呈现（加粗 / 斜体 / 删除线 / 高亮 / 行内代码 / 链接标签），
+  /// 与正文**同源扫描**（[EditorFormat.inlineSyntaxMarkers]，§13.2 / BR-23.7）。
+  ///
+  /// 偏移契约：**等码元**替换（记号被换成零宽透明的同码元文本），`TextSpan.toPlainText()`
+  /// 与控制器文本逐码元等长（BR-27.1）。
+  List<InlineSpan> _styledRun(
+    String run,
+    int runStart,
+    TextStyle base,
+    TextRange composing,
+    BuildContext context,
+  ) {
+    if (run.isEmpty) return const <InlineSpan>[];
+    final markers = EditorFormat.inlineSyntaxMarkers(run);
+    if (markers.isEmpty) {
+      final out = <InlineSpan>[];
+      _addRun(out, run, runStart, base, composing);
+      return out;
+    }
+    final styles = List<TextStyle>.filled(run.length, base);
+    final groups = <int, List<SyntaxMarker>>{};
+    for (final m in markers) {
+      if (m.pairId == null) continue;
+      groups.putIfAbsent(m.pairId!, () => <SyntaxMarker>[]).add(m);
+    }
+    final scheme = Theme.of(context).colorScheme;
+    for (final group in groups.values) {
+      if (group.length < 2) continue;
+      final sorted = [...group]..sort((a, b) => a.start.compareTo(b.start));
+      final open = sorted.first;
+      final close = sorted.last;
+      if (open.end > close.start) continue;
+      final style = _markerContentStyle(open.kind, base, scheme);
+      if (style == null) continue;
+      for (var i = open.end; i < close.start; i++) {
+        styles[i] = style;
+      }
+    }
+    // 记号本身：**等码元**、零宽、透明的替身——空白以 `U+00A0`、换行以 `U+2060` 顶替，
+    // 规避 Flutter「末尾码元为空白分隔符且字形包围盒为空」时的光标锚点断言
+    // （见 [MarkdownEditingController.hiddenFill]）；长度逐码元不变。
+    final hidden = base.copyWith(color: Colors.transparent, fontSize: 0);
+    final chars = run.split('');
+    for (final m in markers) {
+      for (var i = m.start; i < m.end && i < run.length; i++) {
+        chars[i] = switch (run[i]) {
+          ' ' || '\t' => '\u00A0',
+          '\n' || '\r' => '\u2060',
+          _ => run[i],
+        };
+        styles[i] = hidden;
+      }
+    }
+    final display = chars.join();
+    final out = <InlineSpan>[];
+    var i = 0;
+    while (i < display.length) {
+      final style = _withComposing(styles[i], runStart + i, composing);
+      var j = i + 1;
+      while (j < display.length &&
+          _withComposing(styles[j], runStart + j, composing) == style) {
+        j++;
+      }
+      out.add(TextSpan(text: display.substring(i, j), style: style));
+      i = j;
+    }
+    return out;
+  }
+
+  /// 组字（IME）区间加下划线（与 [TextEditingController] 默认行为一致）。
+  static TextStyle _withComposing(
+    TextStyle style,
+    int absoluteOffset,
+    TextRange composing,
+  ) {
+    if (!composing.isValid || composing.isCollapsed) return style;
+    if (absoluteOffset < composing.start || absoluteOffset >= composing.end) {
+      return style;
+    }
+    return style.merge(
+      const TextStyle(decoration: TextDecoration.underline),
+    );
+  }
+
+  /// 记号**内容**的呈现样式（与正文口径一致）；单元格内不适用者返回 null（保持原样式）。
+  static TextStyle? _markerContentStyle(
+    SyntaxMarkerKind kind,
+    TextStyle base,
+    ColorScheme scheme,
+  ) {
+    switch (kind) {
+      case SyntaxMarkerKind.strong:
+        return base.copyWith(fontWeight: FontWeight.w700);
+      case SyntaxMarkerKind.emphasis:
+        return base.copyWith(fontStyle: FontStyle.italic);
+      case SyntaxMarkerKind.strike:
+        return base.copyWith(decoration: TextDecoration.lineThrough);
+      case SyntaxMarkerKind.highlight:
+        return base.copyWith(
+          backgroundColor: scheme.tertiaryContainer,
+          color: scheme.onTertiaryContainer,
+        );
+      case SyntaxMarkerKind.code:
+        return base.copyWith(
+          fontFamily: 'monospace',
+          color: scheme.primary,
+          backgroundColor:
+              scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+        );
+      case SyntaxMarkerKind.link:
+        return base.copyWith(
+          color: scheme.primary,
+          decoration: TextDecoration.underline,
+        );
+      default:
+        return null;
+    }
   }
 
   /// 零宽、禁断行的填充字符（`U+2060` WORD JOINER）：等码元补齐引用区间余下字符，

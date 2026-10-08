@@ -102,13 +102,17 @@ class MarkdownEditingController extends TextEditingController {
         newValue.selection.isValid && newValue.selection.isCollapsed;
     // 仅当「纯光标移动」（文本未变）且格式模式 + 表格启用时做边界吸附；
     // 否则（输入文字 / 程序化改写）不吸附，避免把光标强行拽到表格边界。
-    if (styled &&
-        formatTableBuilder != null &&
-        isCollapsed &&
-        newValue.text == _lastText) {
+    if (styled && isCollapsed && newValue.text == _lastText) {
       final offset = newValue.selection.extentOffset;
-      final snapped =
-          _snapOffsetAroundTables(newValue.text, offset, _lastCollapsedOffset);
+      var snapped = offset;
+      if (formatTableBuilder != null) {
+        snapped =
+            _snapOffsetAroundTables(newValue.text, snapped, _lastCollapsedOffset);
+      }
+      // 记号（`**` / `==` / `` ` `` / `- [ ] ` / `## ` …）**不可落点**：光标吸附到记号的外侧边界，
+      // 使「折叠光标不停在记号内部」（BR-23.8① / §13.2）。
+      snapped =
+          _snapOffsetOutOfMarkers(newValue.text, snapped, _lastCollapsedOffset);
       if (snapped != offset) {
         newValue = newValue.copyWith(
           selection: TextSelection.collapsed(offset: snapped),
@@ -166,6 +170,22 @@ class MarkdownEditingController extends TextEditingController {
     return offset;
   }
 
+  /// 若 [offset] 落在某个**记号区间内部**，返回吸附到记号**外侧边界**的偏移量；否则原样返回。
+  ///
+  /// 记号在格式模式下**不可见**（零宽透明），故光标不得停在记号内部——否则方向键会「看不见地」
+  /// 移动、删除键会逐字符破坏记号（BR-23.8①）。方向口径同表格吸附：右 / 下移 → 记号的**末尾**
+  /// （落到内容侧）、左 / 上移 → 记号的**起点**；无方向信息时就近吸附。
+  static int _snapOffsetOutOfMarkers(String text, int offset, int? prev) {
+    for (final m in EditorFormat.syntaxMarkers(text)) {
+      if (offset <= m.start || offset >= m.end) continue;
+      if (prev != null) return offset >= prev ? m.end : m.start;
+      final distToStart = offset - m.start;
+      final distToEnd = m.end - offset;
+      return distToStart <= distToEnd ? m.start : m.end;
+    }
+    return offset;
+  }
+
   @override
   TextSpan buildTextSpan({
     required BuildContext context,
@@ -208,7 +228,6 @@ class MarkdownEditingController extends TextEditingController {
       value.selection,
     );
     final imageBuilder = formatImageBuilder;
-    final checkboxBuilder = formatTaskCheckboxBuilder;
     final linkBuilder = formatAttachmentLinkBuilder;
     final tableBuilder = formatTableBuilder;
 
@@ -233,9 +252,12 @@ class MarkdownEditingController extends TextEditingController {
         from = spanEnd;
       }
     }
-    if (checkboxBuilder != null) {
-      regions.addAll(_taskCheckboxRegions(text));
-    }
+    // 记号呈现（§13.2 / BR-23.7）：行级前缀（标题 / 无序 / 有序 / 任务 / 引用 / 围栏 / 分割线）
+    // 与行内成对记号（`**` `__` `*` `_` `~~` `==` `` ` ``）及链接语法部分**一律不可见**；
+    // 其中项目符号 / 编号 / 勾选框 / 引用竖条 / 水平线以呈现单元 widget 承载。
+    // 扫描口径与「预览」同源（[EditorFormat.syntaxMarkers]）：围栏内部 / 良构表格内部不扫描、
+    // 缩进越界的行不建立行级前缀记号（BR-23.9②）。
+    regions.addAll(_markerRegions(text));
     if (linkBuilder != null) {
       regions.addAll(_attachmentLinkRegions(text));
     }
@@ -243,12 +265,16 @@ class MarkdownEditingController extends TextEditingController {
     if (tableBuilder != null) {
       regions.addAll(_tableRegions(text));
     }
-    // 有序列表惰性编号：格式模式按序呈现「显示编号」（FR-48 / §12.5）。
-    regions.addAll(_orderedNumberRegions(text));
     if (regions.isEmpty) {
       return _MarkdownStyler.coalesce(text, styles, 0, text.length);
     }
-    regions.sort((a, b) => a.start.compareTo(b.start));
+    // 同起点时**长区间优先**（整块单元优先于其内部的记号片段，如附件链接整块 vs 其链接语法
+    // 记号），避免因排序抖动丢掉整块呈现单元。
+    regions.sort((a, b) {
+      final byStart = a.start.compareTo(b.start);
+      if (byStart != 0) return byStart;
+      return b.end.compareTo(a.end);
+    });
 
     final spans = <InlineSpan>[];
     var cursor = 0;
@@ -275,6 +301,19 @@ class MarkdownEditingController extends TextEditingController {
   /// 不可删的空行**（§12.1.1「表格后占位行」）。以 `U+2060` 顶替 `\n` / `\r` 即可两全。
   static const String _noBreakFill = '\u2060';
 
+  /// 隐藏（零宽透明）文本的**等码元替身**（偏移契约不变，BR-27.1）：
+  ///
+  /// - `\n` / `\r` → [_noBreakFill]（`U+2060` WORD JOINER：零宽、禁断行，不建立额外行盒）；
+  /// - 空格 / `\t` → `U+00A0`（不换行空格）：Flutter 的行尾光标锚点计算在「末尾码元是空白
+  ///   分隔符、但其字形包围盒为空」时会触发 `assert(!glyphBounds.isEmpty)`——零宽隐藏文本的
+  ///   包围盒恰好为空（实测：内容只有 `- ` 的笔记按退格前设光标即断言失败）；`U+00A0` 不在其
+  ///   空白判定内，改用它即可规避，宽度仍为 0、颜色透明、不产生任何可见字符。
+  static String hiddenFill(String raw) => raw
+      .replaceAll('\r', _noBreakFill)
+      .replaceAll('\n', _noBreakFill)
+      .replaceAll('\t', '\u00A0')
+      .replaceAll(' ', '\u00A0');
+
   /// 把单个呈现单元区间替换为对应 widget，并用零宽透明文本补齐剩余码元。
   List<InlineSpan> _regionSpans(
     BuildContext context,
@@ -293,14 +332,6 @@ class MarkdownEditingController extends TextEditingController {
         region.image!,
         block: region.block,
       );
-    } else if (region.kind == _RegionKind.checkbox) {
-      alignment = PlaceholderAlignment.middle;
-      final lineStart = region.lineStart!;
-      child = formatTaskCheckboxBuilder!(
-        context,
-        checked: region.checked!,
-        onToggle: () => onToggleTask?.call(lineStart),
-      );
     } else if (region.kind == _RegionKind.attachmentLink) {
       // 附件链接引用 `[name](sui://<sha256>)`：整块呈现为原子单元（FR-46 / §12.4）。
       // 中部对齐，与任务勾选框一致；偏移由下方零宽透明文本补齐。
@@ -314,13 +345,60 @@ class MarkdownEditingController extends TextEditingController {
       alignment = PlaceholderAlignment.top;
       child = formatTableBuilder!(context, region.table!);
     } else {
-      // 有序列表惰性编号：把正本的字面数字（通常为 `1`）呈现为**显示编号**。
-      // widget 占用 1 个码元，多位数时余下数字位由零宽透明文本补齐（偏移保真）。
-      alignment = PlaceholderAlignment.middle;
-      child = Text(
-        '${region.displayNumber}',
-        style: base.copyWith(color: Theme.of(context).colorScheme.primary),
-      );
+      // —— 记号（§13.2 / BR-23.7）：一律不可见；需要视觉承载者以呈现单元 widget 呈现 ——
+      final marker = region.marker!;
+      final scheme = Theme.of(context).colorScheme;
+      switch (marker.kind) {
+        case SyntaxMarkerKind.bullet:
+          alignment = PlaceholderAlignment.middle;
+          child = Text('• ', style: base.copyWith(color: scheme.primary));
+        case SyntaxMarkerKind.ordered:
+          alignment = PlaceholderAlignment.middle;
+          child = Text(
+            '${marker.displayNumber ?? 1}. ',
+            style: base.copyWith(color: scheme.primary),
+          );
+        case SyntaxMarkerKind.task:
+          alignment = PlaceholderAlignment.middle;
+          final builder = formatTaskCheckboxBuilder;
+          child = builder == null
+              ? const SizedBox.shrink()
+              : builder(
+                  context,
+                  checked: marker.checked,
+                  onToggle: () =>
+                      onToggleTask?.call(marker.lineStart ?? marker.start),
+                );
+        case SyntaxMarkerKind.quote:
+          alignment = PlaceholderAlignment.middle;
+          child = Container(
+            width: 3,
+            height: 18,
+            margin: const EdgeInsets.only(right: 6),
+            color: scheme.outline.withValues(alpha: 0.6),
+          );
+        case SyntaxMarkerKind.rule:
+          alignment = PlaceholderAlignment.top;
+          child = const FormatRuleLine();
+        case SyntaxMarkerKind.heading:
+        case SyntaxMarkerKind.setext:
+        case SyntaxMarkerKind.fence:
+        case SyntaxMarkerKind.strong:
+        case SyntaxMarkerKind.emphasis:
+        case SyntaxMarkerKind.strike:
+        case SyntaxMarkerKind.highlight:
+        case SyntaxMarkerKind.code:
+        case SyntaxMarkerKind.link:
+          // 纯记号：**不可见**（零宽 + 透明），整段一并用零宽文本顶替，不产生 widget。
+          return <InlineSpan>[
+            TextSpan(
+              text: MarkdownEditingController.hiddenFill(
+                text.substring(region.start, region.end),
+              ),
+              style: base.copyWith(color: Colors.transparent, fontSize: 0),
+            ),
+          ];
+      }
     }
     out.add(WidgetSpan(alignment: alignment, child: child));
     // 区间首字符由 WidgetSpan 的 1 个码元占位，其余用零宽透明文本补齐。
@@ -333,10 +411,10 @@ class MarkdownEditingController extends TextEditingController {
       // 顶替为**等码元、零宽、禁断行**的 `U+2060`——既维持 `toPlainText()` 与正本等长
       // （偏移契约，BR-27.1 / §4.1），又不产生任何额外行盒。单行区间（图片 / 勾选框 /
       // 附件链接 / 有序编号）不含换行，保持逐字透传。
-      final raw = text.substring(restStart, region.end);
-      final fill = region.kind == _RegionKind.table
-          ? raw.replaceAll('\r', _noBreakFill).replaceAll('\n', _noBreakFill)
-          : raw;
+      // 补齐文本一律走 [hiddenFill]：换行以 `U+2060` 顶替（表格区间专用，避免撑出空行），
+      // 空白以 `U+00A0` 顶替（规避 Flutter 行尾光标锚点断言），二者均等码元、零宽、不可见。
+      final fill =
+          MarkdownEditingController.hiddenFill(text.substring(restStart, region.end));
       out.add(TextSpan(
         text: fill,
         style: base.copyWith(color: Colors.transparent, fontSize: 0),
@@ -356,30 +434,14 @@ class MarkdownEditingController extends TextEditingController {
     return leftOk && rightOk;
   }
 
-  /// 扫描所有任务项行，返回勾选框 `[ ]` / `[x]`（固定 3 个码元）的区间。
-  static List<_SpanRegion> _taskCheckboxRegions(String text) {
-    final regions = <_SpanRegion>[];
-    final n = text.length;
-    var lineStart = 0;
-    while (lineStart <= n) {
-      var lineEnd = text.indexOf('\n', lineStart);
-      if (lineEnd == -1) lineEnd = n;
-      final m = _taskLinePattern.firstMatch(text.substring(lineStart, lineEnd));
-      if (m != null) {
-        final boxStart = lineStart + m.group(1)!.length;
-        regions.add(_SpanRegion(
-          boxStart,
-          boxStart + 3,
-          _RegionKind.checkbox,
-          checked: m.group(2)!.toLowerCase() == 'x',
-          lineStart: lineStart,
-        ));
-      }
-      if (lineEnd >= n) break;
-      lineStart = lineEnd + 1;
-    }
-    return regions;
-  }
+  /// 收集全部**记号区间**（§13.2 / BR-23.7）。
+  ///
+  /// 记号 = 被 Markdown 解析为**语法**的字符；扫描由 [EditorFormat.syntaxMarkers] 统一承担
+  /// （与预览同源判定：围栏内部 / 良构表格内部不扫描，缩进越界的行不建立行级前缀记号）。
+  static List<_SpanRegion> _markerRegions(String text) =>
+      EditorFormat.syntaxMarkers(text)
+          .map((m) => _SpanRegion(m.start, m.end, _RegionKind.marker, marker: m))
+          .toList();
 
   /// 扫描所有附件**链接**引用 `[name](sui://<sha256>)`，返回其整块区间。
   ///
@@ -434,56 +496,13 @@ class MarkdownEditingController extends TextEditingController {
     return regions;
   }
 
-  /// 有序列表行前缀：组 1 = 行首缩进，组 2 = 字面数字。与 [_MarkdownStyler._orderedLine] 同口径。
-  static final RegExp _orderedPrefixPattern =
-      RegExp(r'^([ \t]*)(\d+)\.[ \t]+(.*)$');
-
-  /// 扫描所有有序列表行，返回「显示编号」需替换的**数字段**区间（FR-48 / §12.5）。
-  ///
-  /// 正本统一写作 `1.`，由 [EditorFormat.orderedListNumbers] 计算每行的显示编号；
-  /// 仅当显示编号与字面数字**不同**时才建立区间（字面即显示时逐字透传，保 §4.1）。
-  /// 本方法只读，绝不改写正本（惰性编号「零正本改写」）。
-  static List<_SpanRegion> _orderedNumberRegions(String text) {
-    final regions = <_SpanRegion>[];
-    final numbers = EditorFormat.orderedListNumbers(text);
-    if (numbers.isEmpty) return regions;
-    final n = text.length;
-    var lineStart = 0;
-    var lineIndex = 0;
-    while (lineStart <= n && lineIndex < numbers.length) {
-      var lineEnd = text.indexOf('\n', lineStart);
-      if (lineEnd == -1) lineEnd = n;
-      final display = numbers[lineIndex];
-      if (display != null) {
-        final m =
-            _orderedPrefixPattern.firstMatch(text.substring(lineStart, lineEnd));
-        if (m != null) {
-          final lead = m.group(1)!.length;
-          final digits = m.group(2)!.length;
-          final literal = text.substring(
-            lineStart + lead,
-            lineStart + lead + digits,
-          );
-          if (literal != '$display') {
-            regions.add(_SpanRegion(
-              lineStart + lead,
-              lineStart + lead + digits,
-              _RegionKind.orderedNumber,
-              displayNumber: display,
-            ));
-          }
-        }
-      }
-      if (lineEnd >= n) break;
-      lineStart = lineEnd + 1;
-      lineIndex++;
-    }
-    return regions;
-  }
 }
 
 /// 呈现单元类型。
-enum _RegionKind { image, checkbox, attachmentLink, orderedNumber, table }
+///
+/// [marker] 为格式模式的**记号区间**：一律不可见（或由 widget 承载项目符号 / 编号 / 勾选框 /
+/// 引用竖条 / 水平线），见 §13.2 / BR-23.7。
+enum _RegionKind { image, marker, attachmentLink, table }
 
 /// 一个「呈现单元」在正本中的字符区间。
 class _SpanRegion {
@@ -497,11 +516,9 @@ class _SpanRegion {
 
   /// 仅表格区间有意义：该 GFM 管道表块的解析结果（FR-44 / §12.1）。
   final ParsedTable? table;
-  final bool? checked;
-  final int? lineStart;
 
-  /// 仅有序列表区间有意义：该行应呈现的**显示编号**（FR-48 惰性编号）。
-  final int? displayNumber;
+  /// 仅记号区间有意义：该记号的扫描结果（§13.2 / BR-23.7）。
+  final SyntaxMarker? marker;
 
   /// 仅图片区间有意义：true 表示该引用独占一块（§5.5），应按块级呈现单元布局。
   final bool block;
@@ -513,9 +530,7 @@ class _SpanRegion {
     this.image,
     this.attachment,
     this.table,
-    this.checked,
-    this.lineStart,
-    this.displayNumber,
+    this.marker,
     this.block = false,
   });
 }
@@ -529,11 +544,17 @@ class _MarkdownStyler {
   _MarkdownStyler._();
 
   static final RegExp _fenceLine = RegExp(r'^[ \t]*(```|~~~)');
-  static final RegExp _headingLine = RegExp(r'^(#{1,6})([ \t]+)(.*)$');
-  static final RegExp _quoteLine = RegExp(r'^([ \t]*>[ \t]?)(.*)$');
+
+  /// 标题前缀（≤3 空格前导，与 CommonMark 同口径）：组 1 缩进 / 组 2 `#` / 组 3 空白。
+  static final RegExp _headingLine = RegExp(r'^([ \t]{0,3})(#{1,6})([ \t]+)(.*)$');
+
+  /// 引用前缀（≤3 空格前导）：组 1 缩进 / 组 2 `>`（含可选空白）。
+  static final RegExp _quoteLine = RegExp(r'^([ \t]{0,3})(>[ \t]?)(.*)$');
   static final RegExp _bulletLine = RegExp(r'^([ \t]*[-*+][ \t]+)(.*)$');
   static final RegExp _orderedLine = RegExp(r'^([ \t]*\d+\.[ \t]+)(.*)$');
-  static final RegExp _ruleLine = RegExp(r'^[ \t]*(-{3,}|\*{3,}|_{3,})[ \t]*$');
+
+  /// 分割线（≤3 空格前导）。
+  static final RegExp _ruleLine = RegExp(r'^([ \t]{0,3})(-{3,}|\*{3,}|_{3,})[ \t]*$');
 
   static final RegExp _inline = RegExp(
     r'(`[^`\n]+`)' // 1 行内代码
@@ -585,6 +606,10 @@ class _MarkdownStyler {
     final n = text.length;
     final styles = List<TextStyle>.filled(n, base);
 
+    // setext 标题（`标题` + 下一行 `===` / `---`）行集合：该行按 h2 呈现，下划线行由记号隐藏
+    // （与预览一致，§13.2 / BR-23.7）。
+    final setextHeadings = _setextHeadingLines(text);
+
     // 逐行扫描；围栏代码块内不做块级 / 行内解析。
     var lineStart = 0;
     var inFence = false;
@@ -612,6 +637,8 @@ class _MarkdownStyler {
           accent,
           quote,
           faint,
+          setext: setextHeadings.contains(lineStart),
+          listOk: EditorFormat.isListLineAt(text, lineStart),
         );
         _inlineSpans(
           styles,
@@ -654,6 +681,30 @@ class _MarkdownStyler {
   // 块级
   // ---------------------------------------------------------------------------
 
+  /// 收集 **setext 标题行**（其后一行是 `===` / `---` 下划线）的行首偏移集合。
+  static Set<int> _setextHeadingLines(String text) {
+    final out = <int>{};
+    final n = text.length;
+    var lineStart = 0;
+    while (lineStart <= n) {
+      final nl = text.indexOf('\n', lineStart);
+      final lineEnd = nl == -1 ? n : nl;
+      if (lineStart > 0 && EditorFormat.isSetextUnderlineAt(text, lineStart)) {
+        final prevNl =
+            lineStart >= 2 ? text.lastIndexOf('\n', lineStart - 2) : -1;
+        out.add(prevNl == -1 ? 0 : prevNl + 1);
+      }
+      if (lineEnd >= n) break;
+      lineStart = lineEnd + 1;
+    }
+    return out;
+  }
+
+  /// 块级样式（内容样式，**记号本身不在此呈现**——记号由记号区间隐藏，§13.2 / BR-23.7）。
+  ///
+  /// [setext] 为 true 表示本行是 setext 标题的**文本行**（按 h2 呈现）；
+  /// [listOk] 为 false 表示本行缩进越界、GFM 不会解析为列表 / 任务项 → 不加列表样式，
+  /// 与「预览」的行级结构判定一致（BR-23.9②）。
   static void _block(
     List<TextStyle> styles,
     int start,
@@ -663,11 +714,23 @@ class _MarkdownStyler {
     TextStyle marker,
     TextStyle accent,
     TextStyle quote,
-    TextStyle faint,
-  ) {
+    TextStyle faint, {
+    bool setext = false,
+    bool listOk = true,
+  }) {
+    if (setext) {
+      final style = base.copyWith(
+        fontSize: (base.fontSize ?? 15) * _headingScale[1],
+        fontWeight: FontWeight.w700,
+        height: 1.3,
+      );
+      _fill(styles, start, end, style);
+      return;
+    }
+
     final heading = _headingLine.firstMatch(line);
     if (heading != null) {
-      final level = heading.group(1)!.length;
+      final level = heading.group(2)!.length;
       final scale =
           _headingScale[(level - 1).clamp(0, _headingScale.length - 1)];
       final style = base.copyWith(
@@ -676,9 +739,6 @@ class _MarkdownStyler {
         height: 1.3,
       );
       _fill(styles, start, end, style);
-      final prefixEnd =
-          start + heading.group(1)!.length + heading.group(2)!.length;
-      _fill(styles, start, prefixEnd, style.copyWith(color: marker.color));
       return;
     }
 
@@ -687,21 +747,19 @@ class _MarkdownStyler {
       return;
     }
 
-    final q = _quoteLine.firstMatch(line);
-    if (q != null) {
+    if (_quoteLine.hasMatch(line)) {
       _fill(styles, start, end, quote);
-      _fill(styles, start, start + q.group(1)!.length, marker);
       return;
     }
+
+    if (!listOk) return;
 
     // 任务项需先于普通列表判定（`- [ ]` 也符合无序列表前缀）。
     final t = _taskLinePattern.firstMatch(line);
     if (t != null) {
       final prefixLen = t.group(1)!.length;
       final checked = t.group(2)!.toLowerCase() == 'x';
-      _fill(styles, start, start + prefixLen, accent);
       final boxEnd = (start + prefixLen + 3).clamp(0, end);
-      _fill(styles, start + prefixLen, boxEnd, accent);
       if (checked) {
         // 勾选态：任务文本**仅视觉淡化 / 加灰**，不加删除线（BR-31.6）。
         _fill(styles, boxEnd, end, faint);
@@ -843,5 +901,30 @@ class _MarkdownStyler {
       i = j;
     }
     return spans;
+  }
+}
+
+/// 格式模式下的**分割线呈现单元**（`---` 记号 → 水平线，§13.2 / BR-23.7）。
+///
+/// 按可用段落宽铺满（`LayoutBuilder`，无界时退回 720），故独占一行、后续文字整体下移
+/// ——与「预览」的 `<hr>` 观感一致。
+class FormatRuleLine extends StatelessWidget {
+  const FormatRuleLine({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 720.0;
+        return Container(
+          width: width,
+          height: 1,
+          margin: const EdgeInsets.symmetric(vertical: 6),
+          color: scheme.outlineVariant,
+        );
+      },
+    );
   }
 }

@@ -679,11 +679,82 @@ abstract final class EditorFormat {
     }
   }
 
+  /// 缩进：只在**合法层级**内加 2 个空格（§13.3 / BR-23.9）。
+  ///
+  /// GFM 中行首缩进 ≥4 且**无父列表项**时该行会变成**缩进代码块**（列表 / 勾选框行退化为字面量
+  /// `- [ ] x`），故这里按「父列表项缩进 + 标记宽度 + 3」推出上限；目标缩进超出上限时**原样不动**
+  /// （即「已在最深合法层级」），绝不产出预览无法解析的结构。
   static FormatResult _indent(String text, int start, int end) {
-    return _mapLines(text, start, end, (line, _) {
-      if (line.isEmpty) return line;
-      return '  $line';
-    });
+    final (blockStart, blockEnd) = _blockRange(text, start, end);
+    final block = text.substring(blockStart, blockEnd);
+    final lines = block.split('\n');
+    final out = <String>[];
+    var offset = blockStart;
+    for (final line in lines) {
+      if (line.isEmpty) {
+        out.add(line);
+      } else {
+        final indent = _leadingWhitespace.firstMatch(line)!.group(0)!.length;
+        final limit = _listIndentLimit(text, offset, line);
+        final target = indent + 2;
+        out.add(target <= limit
+            ? '${' ' * target}${line.substring(indent)}'
+            : line);
+      }
+      offset += line.length + 1;
+    }
+    final transformed = out.join('\n');
+    final newText =
+        text.substring(0, blockStart) + transformed + text.substring(blockEnd);
+    return FormatResult(newText, blockStart, blockStart + transformed.length);
+  }
+
+  /// 该行**允许的最大行首缩进**（§13.3 / BR-23.9①）。
+  ///
+  /// - 非列表行（段落 / 标题 / 引用 …）：上限 **3**（行首 ≥4 空格即缩进代码块）；
+  /// - 列表 / 任务行：向上找最近的非空**父列表项**（缩进小于本行）→ 上限 = 父缩进 + 父标记宽度 + 3；
+  ///   找不到父列表项（首行、上方是普通段落 / 表格行等）时上限同为 **3**。
+  static int _listIndentLimit(String text, int lineStart, String line) {
+    final indent = _leadingWhitespace.firstMatch(line)!.group(0)!.length;
+    if (_listMarkerWidth(line) == 0) return 3;
+    var scan = lineStart;
+    while (scan > 0) {
+      final prevNl = scan >= 2 ? text.lastIndexOf('\n', scan - 2) : -1;
+      final prevStart = prevNl == -1 ? 0 : prevNl + 1;
+      final prevLine = text.substring(prevStart, scan - 1);
+      if (prevLine.trim().isNotEmpty) {
+        final w = _listMarkerWidth(prevLine);
+        if (w == 0) return 3; // 上一非空行不是列表项 → 只能是顶层列表项
+        final pIndent = _leadingWhitespace.firstMatch(prevLine)!.group(0)!.length;
+        if (pIndent < indent) return pIndent + w + 3;
+      }
+      if (prevStart == 0) break;
+      scan = prevStart;
+    }
+    return 3;
+  }
+
+  /// 列表行标记宽度（`- ` = 2、`1. ` = 3、任务项 `- ` = 2）；非列表行返回 0（§13.3）。
+  static int _listMarkerWidth(String line) {
+    if (_taskLine.hasMatch(line)) return 2; // `[ ]` 属项内容，不计入标记宽度
+    final ordered = _orderedPrefixRe.firstMatch(line);
+    if (ordered != null) {
+      return ordered.group(2)!.trimRight().length + 1;
+    }
+    final bullet = _bulletPrefixRe.firstMatch(line);
+    if (bullet != null) return bullet.group(2)!.trimRight().length + 1;
+    return 0;
+  }
+
+  /// 该行是否**被 GFM 解析为列表 / 任务项**（缩进层级合法，§13.3 / BR-23.9②）。
+  ///
+  /// 「格式」模式只对判定为真的行呈现项目符号 / 勾选框，从而与「预览」的行级结构判定一致。
+  static bool isListLineAt(String text, int lineStart) {
+    final line = _lineText(text, lineStart);
+    if (line.trim().isEmpty) return false;
+    if (_listMarkerWidth(line) == 0) return false;
+    final indent = _leadingWhitespace.firstMatch(line)!.group(0)!.length;
+    return indent <= _listIndentLimit(text, lineStart, line);
   }
 
   static FormatResult _outdent(String text, int start, int end) {
@@ -1796,4 +1867,657 @@ abstract final class EditorFormat {
     buf.write(text.substring(cursor));
     return buf.toString();
   }
+  // ---------------------------------------------------------------------------
+  // 格式模式「所见即预览」：记号扫描、原子删除与表格边界保护
+  // （M9 缺陷修复 / editor-formatting.md §13 / BR-23.7~BR-23.9 / BR-44.11）
+  // ---------------------------------------------------------------------------
+
+  /// 行级前缀：标题（允许 ≤3 空格前导，与 CommonMark 一致）。
+  static final RegExp _headingPrefixRe = RegExp(r'^([ \t]{0,3})(#{1,6})([ \t]+)');
+
+  /// 行级前缀：无序列表（缩进合法性另由 [isListLineAt] 判定）。
+  static final RegExp _bulletPrefixRe = RegExp(r'^([ \t]*)([-*+][ \t]+)');
+
+  /// 行级前缀：有序列表（缩进合法性另由 [isListLineAt] 判定）。
+  static final RegExp _orderedPrefixRe = RegExp(r'^([ \t]*)(\d+\.[ \t]+)');
+
+  /// 行级前缀：引用（≤3 空格前导）。
+  static final RegExp _quotePrefixRe = RegExp(r'^([ \t]{0,3})(>[ \t]?)');
+
+  /// 围栏行（``` / ~~~，可带信息串）。
+  static final RegExp _fencePrefixRe = RegExp(r'^([ \t]*)(```|~~~)');
+
+  /// 分割线行（≤3 空格前导）。
+  static final RegExp _rulePrefixRe =
+      RegExp(r'^([ \t]{0,3})(-{3,}|\*{3,}|_{3,})[ \t]*$');
+
+  /// 行内记号（与样式层 `_MarkdownStyler._inline` 同口径）：
+  /// 1 行内代码 / 2 图片 / 3 链接 / 4 `**` / 5 `__` / 6 `~~` / 7 `*` / 8 `_` / 9 `==`。
+  static final RegExp _inlineMarkerRe = RegExp(
+    r'(`[^`\n]+`)'
+    r'|(!\[[^\]\n]*\]\([^)\n]*\))'
+    r'|(\[[^\]\n]*\]\([^)\n]*\))'
+    r'|(\*\*[^*\n]+\*\*)'
+    r'|(__[^_\n]+__)'
+    r'|(~~[^~\n]+~~)'
+    r'|(\*[^*\n]+\*)'
+    r'|(_[^_\n]+_)'
+    r'|(==[^=\n]+==)',
+  );
+
+  /// 行首偏移 [lineStart] 所在行的文本（不含行尾换行）。
+  static String _lineText(String text, int lineStart) {
+    final s = lineStart.clamp(0, text.length);
+    final nl = text.indexOf('\n', s);
+    return text.substring(s, nl == -1 ? text.length : nl);
+  }
+
+  /// 行首偏移 [lineStart] 所在行的**行尾**（不含换行；行尾即换行符下标或文本末尾）。
+  static int _lineEndAt(String text, int lineStart) {
+    final s = lineStart.clamp(0, text.length);
+    final nl = text.indexOf('\n', s);
+    return nl == -1 ? text.length : nl;
+  }
+
+  /// 所有**良构表格**块的区间（`[start, end]`，`end` 为末行末字符下标）。
+  static List<(int, int)> _wellFormedTableRanges(String text) {
+    final ranges = <(int, int)>[];
+    var from = 0;
+    while (from < text.length) {
+      final table = parseTable(text, from);
+      if (table == null) {
+        final nl = text.indexOf('\n', from);
+        if (nl == -1) break;
+        from = nl + 1;
+        continue;
+      }
+      if (table.wellFormed) ranges.add((table.start, table.end));
+      if (table.end >= text.length) break;
+      from = table.end + 1;
+    }
+    return ranges;
+  }
+
+  /// 是否为**行级前缀**类记号（删除时按「整行前缀」处理）。
+  static bool _isPrefixKind(SyntaxMarkerKind kind) =>
+      kind == SyntaxMarkerKind.heading ||
+      kind == SyntaxMarkerKind.bullet ||
+      kind == SyntaxMarkerKind.ordered ||
+      kind == SyntaxMarkerKind.task ||
+      kind == SyntaxMarkerKind.quote;
+
+  /// setext 标题下划线（`===` / `---`，≥1 个字符）。
+  static final RegExp _setextUnderlineRe = RegExp(r'^[ \t]{0,3}(={1,}|-{1,})[ \t]*$');
+
+  /// `---` 是否真是**分割线**（上一行是普通段落时，GFM 视为 setext 标题下划线，不是分割线）。
+  static bool _isThematicBreak(String text, int lineStart) =>
+      !_hasParagraphAbove(text, lineStart);
+
+  /// [lineStart] 行的**上一行**是否为普通段落行（非空、且不是列表 / 引用 / 标题 / 围栏等块级标记行）。
+  static bool _hasParagraphAbove(String text, int lineStart) {
+    if (lineStart == 0) return false;
+    final prevNl = lineStart >= 2 ? text.lastIndexOf('\n', lineStart - 2) : -1;
+    final prevStart = prevNl == -1 ? 0 : prevNl + 1;
+    final prev = text.substring(prevStart, lineStart - 1);
+    if (prev.trim().isEmpty) return false;
+    if (_listMarkerWidth(prev) > 0) return false;
+    if (_quotePrefixRe.hasMatch(prev) || _headingPrefixRe.hasMatch(prev)) {
+      return false;
+    }
+    if (_fencePrefixRe.hasMatch(prev)) return false;
+    return true;
+  }
+
+  /// [lineStart] 行是否为 **setext 标题下划线**（`标题` 的下一行写 `===` / `---`）。
+  ///
+  /// 「格式」模式据此把**上一行**按 h2 呈现、把本行记号隐藏，与「预览」一致（§13.2 / BR-23.7）。
+  static bool isSetextUnderlineAt(String text, int lineStart) {
+    final line = _lineText(text, lineStart);
+    if (!_setextUnderlineRe.hasMatch(line)) return false;
+    return _hasParagraphAbove(text, lineStart);
+  }
+
+  /// 扫描正本中**被 Markdown 解析为语法**的记号区间（§13.2 / BR-23.7）。
+  ///
+  /// 纪律：
+  /// - **围栏代码块内部**不扫描（预览同样不解析其中的 Markdown）；
+  /// - **良构表格块内部**不扫描（整表已是一个「表格呈现单元」，其 Markdown 由表格 UI 承担）；
+  /// - **缩进越界**的行（GFM 会解析为缩进代码块 / 懒续行）**不建立**行级前缀记号——与预览的
+  ///   行级结构判定保持一致（BR-23.9②）；
+  /// - **未识别 / 落单**的记号不进集合（预览也只是原样文本），故两态一致。
+  static List<SyntaxMarker> syntaxMarkers(String text) {
+    final out = <SyntaxMarker>[];
+    final n = text.length;
+    if (n == 0) return out;
+    final tables = _wellFormedTableRanges(text);
+    final ordered = orderedListNumbers(text);
+    var pairId = 0;
+    int nextPair() => pairId++;
+    var lineStart = 0;
+    var lineIndex = 0;
+    var inFence = false;
+    var fencePair = -1;
+    while (lineStart <= n) {
+      final nl = text.indexOf('\n', lineStart);
+      final lineEnd = nl == -1 ? n : nl;
+      final line = text.substring(lineStart, lineEnd);
+      final inTable =
+          tables.any((r) => lineStart >= r.$1 && lineStart <= r.$2);
+      if (inFence) {
+        if (_fencePrefixRe.hasMatch(line)) {
+          out.add(SyntaxMarker(lineStart, lineEnd, SyntaxMarkerKind.fence,
+              lineStart: lineStart, pairId: fencePair));
+          inFence = false;
+          fencePair = -1;
+        }
+      } else if (!inTable && _fencePrefixRe.hasMatch(line)) {
+        inFence = true;
+        fencePair = nextPair();
+        out.add(SyntaxMarker(lineStart, lineEnd, SyntaxMarkerKind.fence,
+            lineStart: lineStart, pairId: fencePair));
+      } else if (!inTable) {
+        _scanLineMarkers(
+            text, lineStart, lineEnd, line, ordered, lineIndex, out, nextPair);
+      }
+      if (lineEnd >= n) break;
+      lineStart = lineEnd + 1;
+      lineIndex++;
+    }
+    out.sort((a, b) => a.start.compareTo(b.start));
+    return out;
+  }
+
+  /// **单元格**（单行文本）内的行内记号扫描（§12.1.2 / §13.2，供单元格富文本控制器复用）。
+  static List<SyntaxMarker> inlineSyntaxMarkers(String text) {
+    final out = <SyntaxMarker>[];
+    if (text.isEmpty) return out;
+    var pairId = 0;
+    _scanInlineMarkers(text, 0, out, () => pairId++);
+    out.sort((a, b) => a.start.compareTo(b.start));
+    return out;
+  }
+
+  /// 单行内的行级前缀 + 行内记号扫描。
+  static void _scanLineMarkers(
+    String text,
+    int lineStart,
+    int lineEnd,
+    String line,
+    List<int?> ordered,
+    int lineIndex,
+    List<SyntaxMarker> out,
+    int Function() nextPair,
+  ) {
+    final indent = _leadingWhitespace.firstMatch(line)!.group(0)!.length;
+    final task = _taskLine.firstMatch(line);
+    final bullet = _bulletPrefixRe.firstMatch(line);
+    final orderedLine = _orderedPrefixRe.firstMatch(line);
+    final heading = _headingPrefixRe.firstMatch(line);
+    final quote = _quotePrefixRe.firstMatch(line);
+    if (task != null && isListLineAt(text, lineStart)) {
+      var end = lineStart + task.group(1)!.length + 3;
+      if (end < lineEnd && (text[end] == ' ' || text[end] == '\t')) end++;
+      out.add(SyntaxMarker(
+        lineStart + indent,
+        end,
+        SyntaxMarkerKind.task,
+        lineStart: lineStart,
+        checked: task.group(2)!.toLowerCase() == 'x',
+      ));
+    } else if (bullet != null && isListLineAt(text, lineStart)) {
+      out.add(SyntaxMarker(
+        lineStart + indent,
+        lineStart + bullet.group(1)!.length + bullet.group(2)!.length,
+        SyntaxMarkerKind.bullet,
+        lineStart: lineStart,
+      ));
+    } else if (orderedLine != null && isListLineAt(text, lineStart)) {
+      final digitsStart = lineStart + indent;
+      final digits = orderedLine.group(2)!.trimRight().length;
+      var end = digitsStart + digits;
+      if (end < lineEnd && (text[end] == ' ' || text[end] == '\t')) end++;
+      final literal = int.tryParse(orderedLine.group(2)!.trimRight().replaceAll('.', '')) ?? 1;
+      final display = (lineIndex >= 0 && lineIndex < ordered.length)
+          ? (ordered[lineIndex] ?? literal)
+          : literal;
+      out.add(SyntaxMarker(
+        digitsStart,
+        end,
+        SyntaxMarkerKind.ordered,
+        lineStart: lineStart,
+        displayNumber: display,
+      ));
+    } else if (heading != null) {
+      out.add(SyntaxMarker(
+        lineStart,
+        lineStart +
+            heading.group(1)!.length +
+            heading.group(2)!.length +
+            heading.group(3)!.length,
+        SyntaxMarkerKind.heading,
+        lineStart: lineStart,
+      ));
+    } else if (quote != null) {
+      out.add(SyntaxMarker(
+        lineStart,
+        lineStart + quote.group(1)!.length + quote.group(2)!.length,
+        SyntaxMarkerKind.quote,
+        lineStart: lineStart,
+      ));
+    } else if (_rulePrefixRe.hasMatch(line) &&
+        _isThematicBreak(text, lineStart)) {
+      out.add(SyntaxMarker(lineStart, lineEnd, SyntaxMarkerKind.rule,
+          lineStart: lineStart));
+    } else if (isSetextUnderlineAt(text, lineStart)) {
+      out.add(SyntaxMarker(lineStart, lineEnd, SyntaxMarkerKind.setext,
+          lineStart: lineStart));
+    }
+    _scanInlineMarkers(line, lineStart, out, nextPair);
+  }
+
+  /// 行内记号扫描（成对记号生成**两个**同 `pairId` 的记号）。
+  static void _scanInlineMarkers(
+    String line,
+    int offset,
+    List<SyntaxMarker> out,
+    int Function() nextPair,
+  ) {
+    for (final m in _inlineMarkerRe.allMatches(line)) {
+      final ls = m.start;
+      final le = m.end;
+      if (m.group(1) != null) {
+        // 行内代码 `x`：开闭单引号各一个记号。
+        final id = nextPair();
+        out.add(SyntaxMarker(
+            offset + ls, offset + ls + 1, SyntaxMarkerKind.code, pairId: id));
+        out.add(SyntaxMarker(
+            offset + le - 1, offset + le, SyntaxMarkerKind.code, pairId: id));
+      } else if (m.group(2) != null) {
+        // 图片引用：整块由**图片呈现单元**承担（此处不产生记号）。
+        continue;
+      } else if (m.group(3) != null) {
+        final rb = line.indexOf(']', ls);
+        final lp = line.indexOf('(', rb);
+        if (rb < 0 || lp < 0) continue;
+        final id = nextPair();
+        out.add(SyntaxMarker(
+            offset + ls, offset + ls + 1, SyntaxMarkerKind.link, pairId: id));
+        out.add(SyntaxMarker(
+            offset + rb, offset + le, SyntaxMarkerKind.link, pairId: id));
+      } else if (m.group(4) != null || m.group(5) != null) {
+        _pairMarkers(out, offset, ls, le, 2, SyntaxMarkerKind.strong, nextPair);
+      } else if (m.group(6) != null) {
+        _pairMarkers(out, offset, ls, le, 2, SyntaxMarkerKind.strike, nextPair);
+      } else if (m.group(9) != null) {
+        _pairMarkers(
+            out, offset, ls, le, 2, SyntaxMarkerKind.highlight, nextPair);
+      } else if (m.group(7) != null || m.group(8) != null) {
+        _pairMarkers(
+            out, offset, ls, le, 1, SyntaxMarkerKind.emphasis, nextPair);
+      }
+    }
+  }
+
+  /// 成对记号的**开 / 闭两侧**各生成一个记号（同 `pairId`）。
+  static void _pairMarkers(
+    List<SyntaxMarker> out,
+    int offset,
+    int ls,
+    int le,
+    int len,
+    SyntaxMarkerKind kind,
+    int Function() nextPair,
+  ) {
+    final id = nextPair();
+    out.add(SyntaxMarker(offset + ls, offset + ls + len, kind, pairId: id));
+    out.add(SyntaxMarker(offset + le - len, offset + le, kind, pairId: id));
+  }
+
+  /// 格式模式的**结构删除**统一入口（§13.2 / §13.4 / BR-23.8 / BR-44.11）。
+  ///
+  /// 返回 `null` 表示「无结构语义」，调用方交默认**逐字符删除**。返回非 `null` 时：
+  /// - `result.text != text` → 按结果写回正本（**一次**可撤销编辑）；
+  /// - `result.text == text` → **吞掉该按键**（表格边界保护：正本与光标均不变）。
+  ///
+  /// 优先级：残缺附件引用自愈 → 附件引用整块删除 → **记号原子删除** → 表格整块删除（BR-44.6）
+  /// → **表格边界保护**（BR-44.11）。
+  static FormatResult? structuralDelete(
+    String text,
+    int selectionStart,
+    int selectionEnd, {
+    required bool backspace,
+  }) {
+    final a = selectionStart.clamp(0, text.length);
+    final b = selectionEnd.clamp(0, text.length);
+    final lo = a <= b ? a : b;
+    final hi = a <= b ? b : a;
+
+    // 1) 附件引用：残缺自愈 → 整块删除（§12.4 既有口径）
+    if (lo == hi) {
+      final at = attachmentRefAt(text, lo);
+      if (at != null && at.corrupt) return repairAttachmentRef(text, at);
+      final ref = attachmentRefForDeletion(text, lo, backspace: backspace);
+      if (ref != null) return deleteAttachmentRef(text, ref);
+    }
+
+    final markers = syntaxMarkers(text);
+    final pairs = <int, List<SyntaxMarker>>{};
+    for (final m in markers) {
+      if (m.pairId == null) continue;
+      pairs.putIfAbsent(m.pairId!, () => <SyntaxMarker>[]).add(m);
+    }
+
+    // 2) 选区删除：记号 / 单元不得被切半（BR-23.8③）
+    if (lo != hi) {
+      final removals = <(int, int)>[(lo, hi)];
+      var touched = false;
+      for (final m in markers) {
+        final intersects = m.start < hi && m.end > lo;
+        final empties = m.pairId != null && _selectionEmptiesPair(m, pairs, lo, hi);
+        if (!intersects && !empties) continue;
+        touched = true;
+        removals.add((m.start, m.end));
+        for (final o in pairs[m.pairId] ?? const <SyntaxMarker>[]) {
+          removals.add((o.start, o.end));
+        }
+      }
+      for (final ref in attachmentRefs(text)) {
+        if (ref.start < hi && ref.end > lo) {
+          touched = true;
+          removals.add((ref.start, ref.end));
+        }
+      }
+      for (final r in _wellFormedTableRanges(text)) {
+        if (r.$1 < hi && r.$2 > lo) {
+          touched = true;
+          removals.add((r.$1, r.$2 < text.length ? r.$2 + 1 : r.$2));
+        }
+      }
+      if (!touched) return null;
+      return _removeRanges(text, removals, lo);
+    }
+
+    // 3) 折叠光标：记号原子删除
+    final pos = lo;
+    final hit = _markerForDeletion(text, markers, pairs, pos,
+        backspace: backspace);
+    if (hit != null) {
+      final removals = _markerRemovals(text, hit, pairs);
+      // 成对记号**仅剩最后一个内容字符**时命中的是内容字符本身 → 连它一并移除（不留空对）
+      final target = backspace ? pos - 1 : pos;
+      if (target >= 0 &&
+          target < text.length &&
+          _isPairLastContentChar(hit, pairs, target)) {
+        removals.add((target, target + 1));
+      }
+      return _removeRanges(text, removals, pos);
+    }
+
+    // 4) 表格整块删除（BR-44.6，口径不变）
+    final table = tableForDeletion(text, pos, backspace: backspace);
+    if (table != null) return deleteTable(text, table);
+
+    // 5) 表格边界保护（BR-44.11）：绝不把表格行与相邻行文字合并
+    final guard = _tableBoundaryGuard(text, pos, backspace: backspace);
+    if (guard != null) return guard;
+
+    return null;
+  }
+
+  /// [target] 是否为某成对记号**仅剩的最后一个内容字符**（此时整对连内容一并移除）。
+  static bool _isPairLastContentChar(
+    SyntaxMarker hit,
+    Map<int, List<SyntaxMarker>> pairs,
+    int target,
+  ) {
+    final group = pairs[hit.pairId];
+    if (group == null || group.length < 2) return false;
+    final sorted = [...group]..sort((a, b) => a.start.compareTo(b.start));
+    final open = sorted.first;
+    final close = sorted.last;
+    return open.end == target && close.start == target + 1;
+  }
+
+  /// 选区是否**恰好覆盖某成对记号的全部内容**（此时若只删内容会留下 `****` 一类空对，须连记号一并去掉）。
+  static bool _selectionEmptiesPair(
+    SyntaxMarker m,
+    Map<int, List<SyntaxMarker>> pairs,
+    int lo,
+    int hi,
+  ) {
+    final group = pairs[m.pairId];
+    if (group == null || group.length < 2) return false;
+    final sorted = [...group]..sort((a, b) => a.start.compareTo(b.start));
+    final open = sorted.first;
+    final close = sorted.last;
+    if (open.end > close.start) return false;
+    return lo <= open.end && hi >= close.start;
+  }
+
+  /// 折叠光标下**命中记号**的判定（§13.2 / BR-23.8）。
+  static SyntaxMarker? _markerForDeletion(
+    String text,
+    List<SyntaxMarker> markers,
+    Map<int, List<SyntaxMarker>> pairs,
+    int pos, {
+    required bool backspace,
+  }) {
+    // ① 目标字符落在记号区间内（Backspace 删光标前一字符、Delete 删光标处字符）
+    final target = backspace ? pos - 1 : pos;
+    if (target >= 0 && target < text.length) {
+      for (final m in markers) {
+        if (target >= m.start && target < m.end) return m;
+      }
+      // ② 目标字符是某成对记号**仅剩的最后一个内容字符** → 连整对一并移除（不留空对）
+      for (final m in markers) {
+        if (m.pairId == null) continue;
+        final group = pairs[m.pairId];
+        if (group == null || group.length < 2) continue;
+        final sorted = [...group]..sort((a, b) => a.start.compareTo(b.start));
+        final open = sorted.first;
+        final close = sorted.last;
+        if (open.end == target && close.start == target + 1) return open;
+      }
+    }
+    // ③ 空前缀行：行首退格 / 行尾删除同样整块移除前缀（BR-23.8②，等价「退出列表」）
+    for (final m in markers) {
+      if (!_isPrefixKind(m.kind)) continue;
+      if (m.end != _lineEndAt(text, m.lineStart ?? m.start)) continue;
+      if (backspace ? pos == m.start : pos == m.end) return m;
+    }
+    return null;
+  }
+
+  /// 命中记号后应移除的区间集合（成对记号同生共死；围栏 / 分割线**连行**移除）。
+  static List<(int, int)> _markerRemovals(
+    String text,
+    SyntaxMarker hit,
+    Map<int, List<SyntaxMarker>> pairs,
+  ) {
+    final removals = <(int, int)>[(hit.start, hit.end)];
+    final group = pairs[hit.pairId] ?? const <SyntaxMarker>[];
+    for (final o in group) {
+      removals.add((o.start, o.end));
+    }
+    if (hit.kind == SyntaxMarkerKind.rule ||
+        hit.kind == SyntaxMarkerKind.fence) {
+      final lineStarts = <int>{hit.lineStart ?? hit.start};
+      for (final o in group) {
+        lineStarts.add(o.lineStart ?? o.start);
+      }
+      for (final lineStart in lineStarts) {
+        var s = lineStart.clamp(0, text.length);
+        var e = _lineEndAt(text, s);
+        if (e < text.length && text[e] == '\n') {
+          e++;
+        } else if (s > 0 && text[s - 1] == '\n') {
+          s--;
+        }
+        removals.add((s, e));
+      }
+    }
+    return removals;
+  }
+
+  /// 按给定区间集合移除字符（区间自动合并），并把 [caretHint] 映射到新文本中的等义位置。
+  static FormatResult _removeRanges(
+    String text,
+    List<(int, int)> ranges,
+    int caretHint,
+  ) {
+    final normalized = <(int, int)>[];
+    for (final r in ranges) {
+      final s = r.$1.clamp(0, text.length);
+      final e = r.$2.clamp(0, text.length);
+      if (e > s) normalized.add((s, e));
+    }
+    normalized.sort((a, b) => a.$1.compareTo(b.$1));
+    final merged = <(int, int)>[];
+    for (final r in normalized) {
+      if (merged.isNotEmpty && r.$1 <= merged.last.$2) {
+        final last = merged.removeLast();
+        merged.add((last.$1, r.$2 > last.$2 ? r.$2 : last.$2));
+      } else {
+        merged.add(r);
+      }
+    }
+    final buf = StringBuffer();
+    var cursor = 0;
+    var removedBefore = 0;
+    for (final r in merged) {
+      buf.write(text.substring(cursor, r.$1));
+      if (caretHint > r.$2) {
+        removedBefore += r.$2 - r.$1;
+      } else if (caretHint > r.$1) {
+        removedBefore += caretHint - r.$1;
+      }
+      cursor = r.$2;
+    }
+    buf.write(text.substring(cursor));
+    final newText = buf.toString();
+    final caret = (caretHint - removedBefore).clamp(0, newText.length);
+    return FormatResult(newText, caret, caret);
+  }
+
+  /// **表格边界保护**（§13.4 / BR-44.11）：绝不把表格行与相邻行文字**合并**。
+  ///
+  /// 返回 `null` 表示允许默认逐字符删除（相邻行是**空行**：合并后表格行字节不变、仍合法）；
+  /// 否则返回应执行的结果——命中相邻行的**块级记号** → 取消该行记号；其余 → **吞掉按键**
+  /// （`text` 不变、光标不动）。表格因此**只会整体保留或整体删除**，绝不退化为原始文本。
+  static FormatResult? _tableBoundaryGuard(
+    String text,
+    int pos, {
+    required bool backspace,
+  }) {
+    for (final r in _wellFormedTableRanges(text)) {
+      final start = r.$1;
+      final end = r.$2;
+      // 表格**首行前**的换行：Backspace 停在表格首字符处 / Delete 停在上一行行尾
+      if (start > 0 &&
+          ((backspace && pos == start) || (!backspace && pos == start - 1))) {
+        final prevNl = start >= 2 ? text.lastIndexOf('\n', start - 2) : -1;
+        final lineAbove = prevNl == -1 ? 0 : prevNl + 1;
+        return _boundaryProtect(text, pos, lineAbove);
+      }
+      // 表格**末行后**的换行：Delete 停在表格末字符处
+      if (end < text.length && !backspace && pos == end) {
+        return _boundaryProtect(text, pos, end + 1);
+      }
+    }
+    return null;
+  }
+
+  /// 边界保护动作（[lineStart] 为紧贴表格的那一行）。
+  static FormatResult? _boundaryProtect(String text, int pos, int lineStart) {
+    final line = _lineText(text, lineStart);
+    if (line.trim().isEmpty) return null; // 空行：合并无损，允许默认删除
+    for (final m in syntaxMarkers(text)) {
+      if (m.lineStart != lineStart) continue;
+      if (!_isPrefixKind(m.kind)) continue;
+      if (m.end != _lineEndAt(text, lineStart)) continue; // 前缀后还有内容
+      return _removeRanges(text, <(int, int)>[(m.start, m.end)], pos);
+    }
+    return FormatResult(text, pos, pos); // 吞掉按键：表格与文字均保持不变
+  }
+}
+
+/// 记号种类：格式模式下**不可见**（或被替换为呈现单元）的语法字符（§13.2 / BR-23.7）。
+enum SyntaxMarkerKind {
+  /// 标题前缀 `#` … `######`（含其后空白）。
+  heading,
+
+  /// 无序列表前缀 `- `（呈现为项目符号）。
+  bullet,
+
+  /// 有序列表前缀 `1. `（呈现为连续编号）。
+  ordered,
+
+  /// 任务项前缀 `- [ ] ` / `- [x] `（呈现为勾选框）。
+  task,
+
+  /// 引用前缀 `> `（呈现为引用竖条）。
+  quote,
+
+  /// 围栏代码块行（不可见；删除时**连行**移除）。
+  fence,
+
+  /// 分割线行（呈现为水平线；删除时**连行**移除）。
+  rule,
+
+  /// setext 标题下划线行（`标题` 的下一行 `===` / `---`）：不可见，且上一行按 h2 呈现。
+  setext,
+
+  /// 行内成对记号：加粗 `**` / `__`。
+  strong,
+
+  /// 行内成对记号：斜体 `*` / `_`。
+  emphasis,
+
+  /// 行内成对记号：删除线 `~~`。
+  strike,
+
+  /// 行内成对记号：高亮 `==`。
+  highlight,
+
+  /// 行内成对记号：行内代码 `` ` ``。
+  code,
+
+  /// 链接语法部分（`[` 与 `](url)`）。
+  link,
+}
+
+/// 一个「记号」在正本中的字符区间（§13.2）。
+class SyntaxMarker {
+  const SyntaxMarker(
+    this.start,
+    this.end,
+    this.kind, {
+    this.lineStart,
+    this.pairId,
+    this.checked = false,
+    this.displayNumber,
+  });
+
+  /// 区间起点（含）。
+  final int start;
+
+  /// 区间终点（不含）。
+  final int end;
+
+  final SyntaxMarkerKind kind;
+
+  /// 所在行行首偏移（行级前缀 / 围栏 / 分割线有值）。
+  final int? lineStart;
+
+  /// 成对记号 / 配对围栏的配对标识：同 id 者**同生共死**（一次删除即取消整处格式）。
+  final int? pairId;
+
+  /// 仅任务项记号有意义：是否已勾选。
+  final bool checked;
+
+  /// 仅有序列表记号有意义：该行应呈现的**显示编号**（FR-48 惰性编号）。
+  final int? displayNumber;
+
+  @override
+  String toString() => 'SyntaxMarker($kind, $start..$end, pair=$pairId)';
 }

@@ -452,36 +452,24 @@ class _NoteEditorState extends State<NoteEditor>
   bool _handleStructuralDelete({required bool backspace}) {
     if (_mode != EditorMode.formatted) return false;
     final sel = _content.value.selection;
-    if (!sel.isValid || !sel.isCollapsed) return false;
+    if (!sel.isValid) return false;
     final text = _content.text;
-    final at = EditorFormat.attachmentRefAt(text, sel.extentOffset);
-    if (at != null && at.corrupt) {
-      _writeBack(EditorFormat.repairAttachmentRef(text, at));
-      return true;
-    }
-    final ref = EditorFormat.attachmentRefForDeletion(
+    // 统一结构删除（§13.2 / §13.4 / BR-23.8 / BR-44.11）：附件整块删除 / 残缺自愈 →
+    // **记号原子删除**（一次取消整处格式、内容保留）→ 表格整块删除 → **表格边界保护**
+    // （绝不把表格行与相邻行文字合并，故表格**永不打回原形**）。选区同样经此入口，
+    // 保证记号与整块单元不被「切半」。
+    final result = EditorFormat.structuralDelete(
       text,
-      sel.extentOffset,
+      sel.start,
+      sel.end,
       backspace: backspace,
     );
-    if (ref != null) {
-      _writeBack(EditorFormat.deleteAttachmentRef(text, ref));
-      return true;
-    }
-    // 表格作为原子单元：把表格看作一个整体——退格落在表格末尾、或落在表格下方
-    // 「默认空行」的行首（`table.end + 1`）/ Delete 落在表格起首时**整块删除**整张表格，
-    // 绝不把删除键落到表格内部字符（如末尾 `|`）导致源码损坏、表格非法回退为原文
-    //（「打回原形」，§12.1.1 ⑥⑦）。
-    final table = EditorFormat.tableForDeletion(
-      text,
-      sel.extentOffset,
-      backspace: backspace,
-    );
-    if (table != null) {
-      _writeBack(EditorFormat.deleteTable(text, table));
-      return true;
-    }
-    return false;
+    if (result == null) return false;
+    // 表格边界保护命中「无法安全合并」的情形：文本未变 = **吞掉该按键**（不写回、
+    // 不产生多余撤销步），表格与文字均保持不变。
+    if (result.text == text) return true;
+    _writeBack(result);
+    return true;
   }
 
   /// 快捷键映射（§9）：与工具栏指令**同源**，仅改写正本、不产生新保存语义。

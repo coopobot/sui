@@ -2,8 +2,8 @@
 ///
 /// - `ShortcutScopeGuard`：快捷键仅在「格式模式 + 正文聚焦」时生效，且不抢占系统 /
 ///   输入法级按键（AC-88 / BR-30.2 / BR-30.5）。
-/// - `FocusMarkerHideFidelity`：聚焦态标记隐藏 / 展开只改显示，正本逐字节不变
-///   （AC-91 / §11.1 / §11.3）。
+/// - `MarkerAlwaysHidden`：记号在格式模式下**任何时刻都不可见**（不再有「聚焦展开 / 失焦淡化」），
+///   只改显示、正本逐字节不变（AC-91 / AC-172 / §11.1 / §13.2）。
 /// - `BlockUnitBehavior`：块级呈现单元的空块交互（空列表项回车退出、任务项回车续行、
 ///   空引用行回车退出），且产出与源码 / 预览两态一致（AC-92 / §11.2）。
 /// - `PreviewHighlightRender`：预览模式同样把 `==高亮==` 渲染为高亮（BR-31.5）。
@@ -45,6 +45,29 @@ TextStyle _styleAt(TextSpan root, int target) {
   return result!;
 }
 
+/// 取 span 树的**可见文本**：跳过零宽透明片段（`fontSize: 0` / 透明色），
+/// 呈现单元取其语义占位文本（`Text` 子项）。
+String _visibleTextOf(InlineSpan span) {
+  final buf = StringBuffer();
+  void walk(InlineSpan s) {
+    if (s is TextSpan) {
+      final style = s.style;
+      final invisible = style != null &&
+          (style.fontSize == 0 || style.color == Colors.transparent);
+      if (!invisible && s.text != null) buf.write(s.text);
+      for (final child in s.children ?? const <InlineSpan>[]) {
+        walk(child);
+      }
+    } else if (s is WidgetSpan) {
+      final child = s.child;
+      if (child is Text && child.data != null) buf.write(child.data);
+    }
+  }
+
+  walk(span);
+  return buf.toString();
+}
+
 /// 在悬挂于 MaterialApp 的 Builder 内构建富样式 span（脱离 UI 的纯呈现测试）。
 Future<TextSpan> _buildSpan(
   WidgetTester tester,
@@ -81,36 +104,31 @@ Future<void> _pressCtrl(
 }
 
 void main() {
-  group('FocusMarkerHideFidelity（聚焦态标记隐藏只改显示，AC-91 / §11.1）', () {
-    testWidgets('聚焦 / 失焦两态下正本逐字节不变，仅标记可见度不同', (tester) async {
+  group('MarkerAlwaysHidden（记号任何时刻都不可见，AC-172 / §13.2）', () {
+    testWidgets('聚焦 / 失焦两态下正本逐字节不变，记号一律零宽透明', (tester) async {
       const source = '**粗体**\n\n尾';
       final controller = MarkdownEditingController(text: source);
       controller.styled = true;
 
-      // 失焦态：光标落在末行，第 1 行的 `**` 标记高度淡化（§11.1）。
+      // 失焦态：光标落在末行。
       controller.selection = const TextSelection.collapsed(offset: 8);
       final unfocusedSpan = await _buildSpan(tester, controller);
-      final unfocusedMarker = _styleAt(unfocusedSpan, 0).color!;
 
-      // 聚焦态：光标进入第 1 行，标记完整展开（BR-32.2）。
-      controller.selection = const TextSelection.collapsed(offset: 1);
+      // 聚焦态：光标进入第 1 行（内容侧——记号为**不可落点**，落在内部会被吸附到外侧边界）。
+      controller.selection = const TextSelection.collapsed(offset: 2);
       final focusedSpan = await _buildSpan(tester, controller);
-      final focusedMarker = _styleAt(focusedSpan, 0).color!;
 
-      // 显示差异：聚焦态标记不透明度更高。
-      expect(
-        unfocusedMarker,
-        isNot(equals(focusedMarker)),
-        reason: '聚焦 / 失焦两态标记可见度必须有别',
-      );
-      expect(
-        unfocusedMarker.a,
-        lessThan(focusedMarker.a),
-        reason: '失焦态标记应比聚焦态更淡（§11.1）',
-      );
+      // 两态都**看不到**记号：可见文本均等于「粗体\n\n尾」。
+      expect(_visibleTextOf(unfocusedSpan), '粗体\n\n尾');
+      expect(_visibleTextOf(focusedSpan), '粗体\n\n尾');
 
-      // 保真：呈现（含隐藏 / 展开）不得改动正本，且 span 树与正本等长。
-      expect(controller.text, source, reason: '聚焦态标记隐藏不得改动正本');
+      // 记号的呈现：零宽（`fontSize: 0`）+ 透明色。
+      expect(_styleAt(unfocusedSpan, 0).fontSize, 0, reason: '记号零宽不可见');
+      expect(_styleAt(focusedSpan, 0).fontSize, 0, reason: '聚焦态同样零宽');
+      expect(_styleAt(focusedSpan, 0).color, Colors.transparent);
+
+      // 保真：呈现（记号隐藏）不得改动正本，且 span 树与正本等长。
+      expect(controller.text, source, reason: '记号隐藏不得改动正本');
       expect(
         focusedSpan.toPlainText().length,
         controller.text.length,

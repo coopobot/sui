@@ -718,8 +718,9 @@ void main() {
           .toList();
       expect(
         numbers,
-        containsAll(['2', '3']),
-        reason: '正本均为 1.，渲染层应显示 2、3 编号（FR-48 / AC-153）',
+        containsAll(['1. ', '2. ', '3. ']),
+        reason: '正本均为 1.，渲染层按序显示 1./2./3. 编号——编号本身也是**记号呈现单元**'
+            '（FR-48 / AC-153 / AC-172）',
       );
 
       // 三态一致
