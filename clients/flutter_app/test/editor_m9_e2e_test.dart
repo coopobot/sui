@@ -942,7 +942,8 @@ Future<void> _pumpUntil(
   Future<bool> Function() condition, {
   required String describe,
   String Function()? onTimeout,
-  Duration timeout = const Duration(seconds: 25),
+  // 等服务端往返 + 文件轮询 + WS 通知；25s 在满载下会偶发不足（B20 残留），放宽到 60s。
+  Duration timeout = const Duration(seconds: 60),
 }) async {
   final deadline = DateTime.now().add(timeout);
   while (DateTime.now().isBefore(deadline)) {

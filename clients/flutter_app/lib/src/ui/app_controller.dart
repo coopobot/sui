@@ -150,10 +150,12 @@ class AppController extends ChangeNotifier {
     String? dataDir,
     NoteWindowManager? windowManager,
     WindowEventHub? windowEventHub,
+    Duration? autoRelockIdle,
   })  : _repository = repository,
         _db = database,
         _dataDir = dataDir,
-        _windowManager = windowManager {
+        _windowManager = windowManager,
+        _autoRelockIdle = autoRelockIdle ?? const Duration(minutes: 15) {
     // 订阅窗口事件枢纽（M8 · 详细设计 §4 / §5.1）。
     //
     // `runMultiApp` 的观察者由 `MultiAppConfig` 先于 `globalScope` 构造，此刻本控制器
@@ -575,10 +577,17 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> createNote({String? notebookId, String title = ''}) async {
-    final note = await _repository.createNote(
-      notebookId: notebookId ?? _selectedNotebookId,
-      title: title,
-    );
+    final target = notebookId ?? _selectedNotebookId;
+    final Note note;
+    try {
+      note = await _repository.createNote(notebookId: target, title: title);
+    } on NotebookDecryptException catch (e) {
+      // M10-T29（§11）：往**未解锁**的加密笔记本新建笔记必须被拒绝，否则就是明文入库。
+      _lockedNotice = '目标笔记本已锁定，无法新建：$e';
+      notifyListeners();
+      return;
+    }
+    _touchUnlockActivity();
     _selectedNoteId = note.id;
     await refreshNotes();
     notifyListeners();
@@ -596,6 +605,16 @@ class AppController extends ChangeNotifier {
     // 与无谓的同步上行；反之，旧笔记原本有内容、被清空后仍应继续保存。
     final current = await _repository.getNote(id);
     if (current == null) return;
+    // M10-T29（§11）：未解锁不得写入——此时 `current` 是**占位**，写下去会把占位当内容
+    // 覆盖密文。最常见的触发场景：编辑过程中被空闲自动回锁。
+    if (current.locked) {
+      _lockedNotice = '加密笔记本已回锁，请重新解锁后再编辑';
+      notifyListeners();
+      return;
+    }
+    // 解锁态编辑算「活动」，续期空闲回锁。
+    _touchUnlockActivity();
+
     final nextTitle = title ?? current.title;
     final nextContent = content ?? current.contentMarkdown;
     final hadContent = current.title.trim().isNotEmpty ||
@@ -1689,10 +1708,89 @@ class AppController extends ChangeNotifier {
     return true;
   }
 
+
+  // ---- 加密笔记本：解锁 / 回锁 / 空闲自动回锁（M10-T29 / FR-51，详细设计 §6.1 / §7） ----
+
+  /// 解锁态的**空闲自动回锁**时限（§7：默认 15 分钟；可注入以便测试）。
+  final Duration _autoRelockIdle;
+
+  Timer? _relockTimer;
+
+  /// 最近一次「因未解锁被拒」的提示（编辑被回锁拦下 / 往锁定笔记本新建被拒）。
+  String? _lockedNotice;
+  String? get lockedNotice => _lockedNotice;
+
+  void clearLockedNotice() {
+    if (_lockedNotice == null) return;
+    _lockedNotice = null;
+    notifyListeners();
+  }
+
+  /// 该笔记本当前是否已解锁（`K_nb` 只在**本端内存**，不持久化，§7）。
+  bool isNotebookUnlocked(String? notebookId) =>
+      notebookId != null && _repository.isNotebookUnlocked(notebookId);
+
+  /// 是否存在任一已解锁的加密笔记本（UI 据此显示「全部锁定」入口）。
+  bool get hasUnlockedNotebook =>
+      _repository.keyStore.unlockedNotebookIds.isNotEmpty;
+
+  /// 解锁加密笔记本。密码错误返回 `false`（不抛异常，由 UI 提示「锁定密码错误」）。
+  Future<bool> unlockNotebook(String notebookId, String password) async {
+    try {
+      await _repository.unlockNotebook(notebookId, password);
+    } on NotebookUnlockException {
+      return false;
+    } on CryptoMetaFormatException catch (e) {
+      // §11：`crypto_meta` 损坏 → 明确提示，**不**当明文处理。
+      _lockedNotice = '加密笔记本元数据损坏：$e';
+      notifyListeners();
+      return false;
+    }
+    _lockedNotice = null;
+    _touchUnlockActivity();
+    // 解锁后列表要立刻从占位换成明文。
+    await refreshNotes();
+    return true;
+  }
+
+  /// 手动回锁单个笔记本（§7「锁定」按钮）。
+  Future<void> lockNotebook(String notebookId) async {
+    _repository.lockNotebook(notebookId);
+    await _afterLockChange();
+  }
+
+  /// 全部回锁（登出 / 关闭应用 / 会话结束 / 空闲超时）。
+  Future<void> lockAllNotebooks() async {
+    _repository.lockAllNotebooks();
+    await _afterLockChange();
+  }
+
+  Future<void> _afterLockChange() async {
+    if (!hasUnlockedNotebook) {
+      _relockTimer?.cancel();
+      _relockTimer = null;
+    }
+    // 内存里已不持有 `K_nb`，界面必须立刻回到占位（不能继续显示刚才的明文）。
+    await refreshNotes();
+    notifyListeners();
+  }
+
+  /// 续期空闲回锁计时：任何「解锁态操作」都算活动（§7）。
+  void _touchUnlockActivity() {
+    if (!hasUnlockedNotebook) return;
+    _relockTimer?.cancel();
+    _relockTimer = Timer(_autoRelockIdle, () {
+      _relockTimer = null;
+      // 自动回锁与手动回锁走同一路径：清内存密钥 + 界面回占位。
+      unawaited(lockAllNotebooks());
+    });
+  }
+
   @override
   void dispose() {
     _syncDebounce?.cancel();
     _syncTicker?.cancel();
+    _relockTimer?.cancel();
     for (final t in _externalWatchers.values) {
       t.cancel();
     }
