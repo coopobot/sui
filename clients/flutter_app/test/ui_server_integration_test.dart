@@ -61,6 +61,10 @@ void main() {
       'SUI_ADDR': '127.0.0.1:$port',
       'SUI_DATA': dataDir,
     });
+    // 排空子进程输出：管道无人读取时，服务端写满缓冲会阻塞在网络循环上，
+    // 表现为「客户端同步完成、服务端毫无反应」（M10 排查记录）。
+    server.stdout.drain<void>();
+    server.stderr.drain<void>();
     await _waitUntilReady(serverUrl);
   });
 
@@ -184,10 +188,12 @@ void main() {
       await db.close();
       await dbB.close();
     });
-    // `disconnect` 已取消 30s 周期兜底同步定时器；这里推进假时钟，让 dart:io
-    // WebSocket 关闭握手产生的内部超时定时器（5s）触发并释放，避免用例结束时
-    // 仍有挂起定时器被 flutter_test 的 `_verifyInvariants` 判定为失败。
-    await tester.pump(const Duration(seconds: 6));
+    // `disconnect` 已取消 30s 周期兜底同步定时器；这里推进假时钟，让 dart:io 的内部
+    // 定时器全部触发并释放，避免用例结束时被 flutter_test 的 `_verifyInvariants`
+    // 判定为「仍有挂起定时器」。实测涉及两个（均在 30s 周期定时器之前）：
+    //   - WebSocket 关闭握手的内部超时：5s
+    //   - HTTP 连接归还连接池后的**空闲定时器**：15s（`_HttpClientConnection.startTimer`）
+    await tester.pump(const Duration(seconds: 20));
   }, timeout: const Timeout(Duration(minutes: 3)));
 }
 

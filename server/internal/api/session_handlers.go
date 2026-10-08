@@ -19,9 +19,6 @@ func tokenResponse(p *store.TokenPair, username string) map[string]any {
 		"access_token":  p.AccessToken,
 		"refresh_token": p.RefreshToken,
 		"expires_in":    p.ExpiresIn(),
-		// TODO(M10-T28)：临时兼容字段（旧客户端读 `token`），值就是**短时访问令牌**。
-		// 客户端切到双令牌后必须删除本行。
-		"token": p.AccessToken,
 	}
 	if username != "" {
 		out["username"] = username

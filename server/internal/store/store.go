@@ -26,7 +26,15 @@ type Store struct {
 
 // Open 打开（必要时创建）服务端数据库。
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// 忙等待：驱动默认 busy_timeout=0（并发写立即 SQLITE_BUSY）。下面的单连接设置
+	// 只保证「一个连接」，并不让并发的写排队等待——等一会儿再失败才是正确语义。
+	// 放在 DSN 上而不是 Open 后 Exec：连接被重建时同样生效。
+	dsn := path
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	db, err := sql.Open("sqlite", dsn+sep+"_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -368,11 +376,12 @@ func (s *Store) Authenticate(accessToken string) (AuthStatus, string, string) {
 	if accessToken == "" {
 		return AuthInvalid, "", ""
 	}
-	var id, username, expiresAt, revokedAt string
+	var id, username, expiresAt, revokedAt, lastUsed string
 	err := s.db.QueryRow(
-		`SELECT id, username, access_expires_at, revoked_at FROM sessions WHERE access_token_hash = ?`,
+		`SELECT id, username, access_expires_at, revoked_at, last_used_at
+		 FROM sessions WHERE access_token_hash = ?`,
 		hashToken(accessToken),
-	).Scan(&id, &username, &expiresAt, &revokedAt)
+	).Scan(&id, &username, &expiresAt, &revokedAt, &lastUsed)
 	if err != nil || revokedAt != "" {
 		// 未命中 / 已吊销：对外一律 invalid_token（§8.5，不区分内部原因）。
 		return AuthInvalid, "", ""
@@ -380,10 +389,17 @@ func (s *Store) Authenticate(accessToken string) (AuthStatus, string, string) {
 	if !parseTime(expiresAt).After(time.Now().UTC()) {
 		return AuthExpired, username, id
 	}
-	_, _ = s.db.Exec(`UPDATE sessions SET last_used_at = ? WHERE id = ?`,
-		time.Now().UTC().Format(time.RFC3339), id)
+	// last_used_at 只做**节流**更新：鉴权是热路径（轮询接口每请求一次），
+	// 每次都写会在单写 SQLite 上与同步事务争用，而审计并不需要秒级精度。
+	if time.Since(parseTime(lastUsed)) >= lastUsedThrottle {
+		_, _ = s.db.Exec(`UPDATE sessions SET last_used_at = ? WHERE id = ?`,
+			time.Now().UTC().Format(time.RFC3339), id)
+	}
 	return AuthOK, username, id
 }
+
+// lastUsedThrottle 是 last_used_at 的最小更新间隔（审计精度 vs 写放大）。
+const lastUsedThrottle = 60 * time.Second
 
 // RefreshSession 以刷新令牌轮换出新的双令牌（§8.3，单次使用 + 重放即吊销）。
 func (s *Store) RefreshSession(refreshToken string) (*TokenPair, error) {
