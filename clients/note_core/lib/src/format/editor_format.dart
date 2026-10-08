@@ -402,6 +402,66 @@ abstract final class EditorFormat {
     return FormatResult(newText, innerStart, innerStart + block.length);
   }
 
+  /// 链接的**文字 / 网址规范化**结果（[renderLink] 与「选中占位符」口径共用同一套规则）。
+  ///
+  /// - 两端空白裁掉；「显示文字」为空时**以网址本身充当**；
+  /// - 网址**未写协议**时补 `https://`（见 [_normalizeUrl]）。
+  static ({String label, String url}) _linkParts({
+    required String label,
+    required String url,
+  }) {
+    final u = _normalizeUrl(url.trim());
+    final l = label.trim().isEmpty ? u : label.trim();
+    return (label: l, url: u);
+  }
+
+  /// 网址规范化：**未写协议时补 `https://`**（BR-23.10④）。
+  ///
+  /// `mailto:` / `tel:` / `data:` 等已带协议者、以及 `#锚点` / `/相对路径` 一律**原样保留**
+  /// ——否则会把它们变成 `https://#锚点` 这类打不开的地址。
+  static String _normalizeUrl(String raw) {
+    if (raw.isEmpty) return raw;
+    if (raw.startsWith('#') || raw.startsWith('/')) return raw;
+    final hasScheme = RegExp(r'^[a-zA-Z][a-zA-Z0-9+.\-]*:').hasMatch(raw);
+    return hasScheme ? raw : 'https://$raw';
+  }
+
+  /// 生成标准 Markdown 超链接 `[显示文字](网址)`（BR-23.2 不变）。
+  ///
+  /// [url] 为空时返回**空串**（调用方据此**不落笔**，正本一字不动，BR-23.10②）。
+  static String renderLink({required String label, required String url}) {
+    if (url.trim().isEmpty) return '';
+    final p = _linkParts(label: label, url: url);
+    return '[${p.label}](${p.url})';
+  }
+
+  /// 在选区处替换 / 光标处插入超链接（**链接录入弹框**的落笔口径，§14.1 / BR-23.10）。
+  ///
+  /// - [url] 为空 → **原样返回**（不落笔，正本一字不动）；
+  /// - 否则按 [renderLink] 生成 `[显示文字](网址)` 并替换选区、**光标落到链接之后**（便于继续输入）。
+  static FormatResult insertLink(
+    String text,
+    int start,
+    int end, {
+    required String label,
+    required String url,
+  }) {
+    final s = start.clamp(0, text.length);
+    final e = end.clamp(0, text.length);
+    final lo = s <= e ? s : e;
+    final hi = s <= e ? e : s;
+    if (url.trim().isEmpty) return FormatResult(text, lo, hi);
+    final md = renderLink(label: label, url: url);
+    final newText = text.substring(0, lo) + md + text.substring(hi);
+    final caret = (lo + md.length).clamp(0, newText.length);
+    return FormatResult(newText, caret, caret);
+  }
+
+  /// 纯指令口径的链接插入（**保留 `FormatCommand.link` 的既有行为**）：`文字` + `url` 占位符，
+  /// 并**选中占位符**便于直接输入地址。
+  ///
+  /// 与弹框口径（[insertLink] / [renderLink]）的区别：此处 `url` 是**占位符而非真实网址**，
+  /// 故**不做协议补全**（否则会变成 `https://url`）。UI 侧工具栏与 `Ctrl+K` 已改为弹框录入。
   static FormatResult _link(String text, int start, int end) {
     final s = start.clamp(0, text.length);
     final e = end.clamp(0, text.length);
@@ -1326,6 +1386,33 @@ abstract final class EditorFormat {
         isImage ? '![$filename](sui://$sha256)' : '[$filename](sui://$sha256)';
     final existing = unescapeTableCell(cells[column]).trim();
     final value = existing.isEmpty ? ref : '$existing<br>$ref';
+    return setTableCell(text, table, rowIndex, column, value);
+  }
+
+  /// 把 **Markdown 超链接**插入表格指定单元格（§12.1.1「单元格内链接」/ BR-44.12）。
+  ///
+  /// 与 [insertTableCellAttachment] **同范式**：取回单元格**字面文本**（[unescapeTableCell]），
+  /// 既有内容为空则直接写入，否则以**软换行 `<br>` 追加**（GFM 管道表不支持多行单元格），
+  /// 再经 [setTableCell] 统一转义 `|` 写回——**其余单元格与表结构逐字不动**（守 BR-44.2 / BR-44.4）。
+  ///
+  /// [url] 为空（[renderLink] 返回空串）或行 / 列越界时**原样返回**（不落笔）。
+  static String insertTableCellLink(
+    String text,
+    ParsedTable table,
+    int rowIndex,
+    int column, {
+    required String label,
+    required String url,
+  }) {
+    final md = renderLink(label: label, url: url);
+    if (md.isEmpty) return text;
+    final lines = _tableLines(text, table);
+    final lineIndex = rowIndex < 0 ? 0 : rowIndex + 2;
+    if (lineIndex < 0 || lineIndex >= lines.length) return text;
+    final cells = _splitRow(lines[lineIndex].text);
+    if (column < 0 || column >= cells.length) return text;
+    final existing = unescapeTableCell(cells[column]).trim();
+    final value = existing.isEmpty ? md : '$existing<br>$md';
     return setTableCell(text, table, rowIndex, column, value);
   }
 

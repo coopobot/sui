@@ -140,7 +140,7 @@ void main() {
       expect(ctrl.text, '', reason: '初始正文为空');
 
       // 点工具栏「表格」→ 默认 3×3 插入
-      final tableBtn = find.byTooltip('表格');
+      final tableBtn = find.byIcon(Icons.table_chart_outlined);
       await tester.ensureVisible(tableBtn);
       await tester.pump();
       await tester.tap(tableBtn);
@@ -408,7 +408,7 @@ void main() {
       ctrl.selection = TextSelection(baseOffset: 0, extentOffset: ctrl.text.length);
       await tester.pump();
 
-      final simplifyBtn = find.byTooltip('简化格式');
+      final simplifyBtn = find.byIcon(Icons.format_clear);
       await tester.ensureVisible(simplifyBtn);
       await tester.pump();
       await tester.tap(simplifyBtn);

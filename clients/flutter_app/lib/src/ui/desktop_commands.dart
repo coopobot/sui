@@ -200,6 +200,8 @@ final Map<DesktopCommandId, DesktopCommand> desktopCommands = {
   ),
   DesktopCommandId.insertTable: DesktopCommand(
     label: '插入表格',
+    // 与格式工具栏「表格」同源；键位与编辑器 `Shortcuts` 表一致（M9 补丁 `v0.10.14` / §14.2）。
+    shortcutLabel: 'Ctrl+Shift+T',
     // 与格式工具栏的「表格」图标同源（M9 / FR-44 / ui-spec §18.1）；预览态只读，
     // 不给排版入口，故与其他排版命令一样受 canEditContent 约束。
     isEnabled: (controller) =>

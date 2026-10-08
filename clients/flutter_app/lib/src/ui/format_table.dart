@@ -96,6 +96,8 @@ class FormatTableView extends StatefulWidget {
     required this.onRemoveColumn,
     required this.onSetAlignment,
     this.onInsertAttachment,
+    this.onInsertLink,
+    this.onActiveCellChanged,
     this.availableWidth,
     this.cellUnitBuilder,
   });
@@ -126,6 +128,12 @@ class FormatTableView extends StatefulWidget {
   /// 由操作栏按钮触发：选文件 → 字节入库 → 引用文本按单元格转义规则**就地回写活动
   /// 单元格**（其余单元格逐字不动）。[rowIndex] `< 0` 为表头行，`>= 0` 为数据行下标。
   final Future<void> Function(int rowIndex, int column)? onInsertAttachment;
+
+  /// 「在单元格内插入链接」回调（携带活动行列）：由上层弹框录入后就地回写（§14.1 / BR-44.12）。
+  final Future<void> Function(int rowIndex, int column)? onInsertLink;
+
+  /// 活动单元格变化回调（回传行 / 列）：上层据此把「正文工具栏的链接」路由到该单元格（BR-44.12）。
+  final void Function(int rowIndex, int column)? onActiveCellChanged;
 
   /// 编辑区可用宽度（按列均分单元格宽度）；缺省 / 非有限时按每列 140 估算。
   final double? availableWidth;
@@ -176,6 +184,8 @@ class _FormatTableViewState extends State<FormatTableView> {
       _activeRow = row;
       _activeCol = col;
     });
+    // 回传活动单元格（行 / 列）：上层据此把工具栏「链接」写入该单元格（BR-44.12）。
+    widget.onActiveCellChanged?.call(row, col);
     // 待本帧构建完成（目标单元格已 mount）后复位标志；目标单元格在 initState 里
     // 依据此标志补一次焦点请求，实现「跳格后焦点跟随」。
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -423,6 +433,11 @@ class _FormatTableViewState extends State<FormatTableView> {
             '在单元格内插入图片 / 附件',
             widget.onInsertAttachment == null ? null : _insertAttachment,
           ),
+          _barButton(
+            Icons.link,
+            '在单元格内插入链接',
+            widget.onInsertLink == null ? null : _insertLink,
+          ),
         ],
       ),
     );
@@ -433,6 +448,13 @@ class _FormatTableViewState extends State<FormatTableView> {
   void _insertAttachment() {
     FocusManager.instance.primaryFocus?.unfocus();
     widget.onInsertAttachment?.call(_activeRow, _activeCol);
+  }
+
+  /// 在**活动单元格**内插入超链接：先让单元格失焦（提交其在编辑内容），再交由上层弹框录入
+  /// 并就地回写（§14.1 / BR-44.12）。
+  void _insertLink() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    widget.onInsertLink?.call(_activeRow, _activeCol);
   }
 
   Widget _barButton(IconData icon, String tooltip, VoidCallback? onPressed) {

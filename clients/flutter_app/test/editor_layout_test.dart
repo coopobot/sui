@@ -73,7 +73,8 @@ void main() {
     expect(find.byTooltip('导出 Markdown'), findsOneWidget);
 
     // 保留格式工具栏：窄屏不砍编辑能力（请求 2）。
-    expect(find.byTooltip('加粗'), findsOneWidget);
+    // 悬浮提示现带**键位说明**（BR-23.11），故按图标定位按钮（与提示文案解耦）。
+    expect(find.byIcon(Icons.format_bold), findsOneWidget);
   });
 
   testWidgets('宽屏：三态保留文本标签', (tester) async {

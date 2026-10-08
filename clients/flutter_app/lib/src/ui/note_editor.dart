@@ -72,6 +72,12 @@ class _NoteEditorState extends State<NoteEditor>
   /// 正文焦点节点：工具栏执行指令后据此把焦点交还正文，便于连贯排版。
   final FocusNode _contentFocus = FocusNode();
 
+  /// 当前**活动单元格**（由 [FormatTableView.onActiveCellChanged] 回传）：正文工具栏的
+  /// 「链接」（含 `Ctrl+K`）在单元格获焦时据此写入**该单元格**（§14.1 / BR-44.12）。
+  ParsedTable? _activeCellTable;
+  int _activeCellRow = -1;
+  int _activeCellCol = 0;
+
   /// 是否有焦点落在嵌套的表格单元格内（含上下文操作按钮）。
   ///
   /// 单元格是 [_contentFocus] 的焦点子树：焦点在单元格时 [_contentFocus] 的
@@ -273,14 +279,14 @@ class _NoteEditorState extends State<NoteEditor>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   IconButton(
-                    tooltip: '撤销',
+                    tooltip: _tooltipWithShortcut('撤销'),
                     icon: const Icon(Icons.undo),
                     onPressed: _undoHistory.value.canUndo
                         ? () => _undoHistory.undo()
                         : null,
                   ),
                   IconButton(
-                    tooltip: '重做',
+                    tooltip: _tooltipWithShortcut('重做'),
                     icon: const Icon(Icons.redo),
                     onPressed: _undoHistory.value.canRedo
                         ? () => _undoHistory.redo()
@@ -324,12 +330,18 @@ class _NoteEditorState extends State<NoteEditor>
             // 表格入口（ui-spec §18.1 / FR-44）：弹出「插入表格」面板，自定义行列数。
             // 与「编辑」菜单的等价项同源（命令单一来源，承 §16.2）。
             IconButton(
-              tooltip: '表格',
+              tooltip: _tooltipWithShortcut('表格'),
               icon: const Icon(Icons.table_chart_outlined),
               onPressed: _openTablePanel,
             ),
             const _ToolbarDivider(),
-            _fmtIcon(Icons.link, '链接', FormatCommand.link),
+            // 链接：弹出**录入框**填「显示文字 + 网址」后回写（§14.1 / BR-23.10）；
+            // **单元格获焦时写入该活动单元格**（BR-44.12），故不再是「纯指令」入口。
+            IconButton(
+              tooltip: _tooltipWithShortcut('链接'),
+              icon: const Icon(Icons.link),
+              onPressed: _handleLinkCommand,
+            ),
             IconButton(
               tooltip: '插入图片',
               icon: const Icon(Icons.image_outlined),
@@ -358,7 +370,8 @@ class _NoteEditorState extends State<NoteEditor>
 
   Widget _fmtIcon(IconData icon, String tooltip, FormatCommand command) {
     return IconButton(
-      tooltip: tooltip,
+      // 悬浮提示带**键位说明**（由快捷键映射反查，单一来源，§14.2 / BR-23.11）。
+      tooltip: _tooltipWithShortcut(tooltip, command: command),
       icon: Icon(icon),
       onPressed: () => _applyCommand(command),
     );
@@ -372,6 +385,143 @@ class _NoteEditorState extends State<NoteEditor>
     final start = sel.isValid ? sel.start : value.text.length;
     final end = sel.isValid ? sel.end : value.text.length;
     _writeBack(EditorFormat.apply(command, value.text, start, end));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 超链接录入（弹框 → 正本；含单元格内，§14.1 / BR-23.10 / BR-44.12）
+  // ---------------------------------------------------------------------------
+
+  /// 「链接」入口的统一处理：**单元格获焦时写入该活动单元格**，否则写入正文选区。
+  ///
+  /// 工具栏按钮与 `Ctrl+K`（[_LinkIntent]）同源走本方法（BR-30.4）。
+  Future<void> _handleLinkCommand() async {
+    final table = _activeCellTable;
+    if (_tableHasFocus && table != null) {
+      await _insertLinkIntoCell(table, _activeCellRow, _activeCellCol);
+      return;
+    }
+    await _openLinkDialog();
+  }
+
+  /// 弹出「插入超链接」录入框；返回 null 表示取消（调用方不改动正本，BR-23.10⑤）。
+  Future<_LinkDialogResult?> _promptLink({String initialLabel = ''}) {
+    return showDialog<_LinkDialogResult>(
+      context: context,
+      builder: (_) => _LinkDialog(initialLabel: initialLabel),
+    );
+  }
+
+  /// 正文：把链接写入**当前选区 / 光标处**（有选区时以选中文字预填「显示文字」）。
+  Future<void> _openLinkDialog() async {
+    final value = _content.value;
+    final text = value.text;
+    final sel = value.selection;
+    final start = (sel.isValid ? sel.start : text.length).clamp(0, text.length);
+    final end = (sel.isValid ? sel.end : start).clamp(0, text.length);
+    final lo = start <= end ? start : end;
+    final hi = start <= end ? end : start;
+    // 「显示文字」保持单行：选区里的换行折叠为空格。
+    final selected = lo < hi
+        ? text.substring(lo, hi).replaceAll(RegExp(r'\s*\n\s*'), ' ')
+        : '';
+    final result = await _promptLink(initialLabel: selected);
+    if (result == null || !mounted) return;
+    final r = EditorFormat.insertLink(
+      _content.text,
+      lo,
+      hi,
+      label: result.label,
+      url: result.url,
+    );
+    if (r.text == _content.text) {
+      _toast('网址为空，未插入链接');
+      return;
+    }
+    _writeBack(r);
+  }
+
+  /// 单元格：把链接写入**活动单元格**（`<br>` 软换行追加，其余单元格逐字不动，BR-44.12）。
+  Future<void> _insertLinkIntoCell(
+    ParsedTable fallback,
+    int rowIndex,
+    int column,
+  ) async {
+    final result = await _promptLink();
+    if (result == null || !mounted) return;
+    // 每次落笔都以**当前正本**重新解析同一表格，拿到最新结构再写入（同单元格附件口径）。
+    final text = _content.text;
+    final parsed = EditorFormat.parseTable(text, fallback.start);
+    final table =
+        (parsed != null && parsed.start == fallback.start) ? parsed : fallback;
+    final newText = EditorFormat.insertTableCellLink(
+      text,
+      table,
+      rowIndex,
+      column,
+      label: result.label,
+      url: result.url,
+    );
+    if (newText == text) {
+      _toast('网址为空，未插入链接');
+      return;
+    }
+    _writeBackTable(newText);
+    _toast('已在单元格插入链接');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 工具栏悬浮提示里的快捷键说明（§14.2 / BR-23.11）
+  // ---------------------------------------------------------------------------
+
+  /// **非格式指令**按钮的键位说明（系统默认文本编辑键 / 弹框类入口）。
+  ///
+  /// 格式指令的键位一律由 [_formatShortcuts] **反查**（见 [_shortcutLabelFor]），本表只收
+  /// 「不在该映射里」的几个入口，避免键位在两处各写一份。
+  static const Map<String, String> _panelShortcutLabels = {
+    '撤销': 'Ctrl+Z',
+    '重做': 'Ctrl+Shift+Z',
+    '链接': 'Ctrl+K',
+    '表格': 'Ctrl+Shift+T',
+  };
+
+  /// 组装 tooltip：`加粗 (Ctrl+B)`；无快捷键时原样返回按钮名称（BR-23.11）。
+  static String _tooltipWithShortcut(String label, {FormatCommand? command}) {
+    final key =
+        command == null ? _panelShortcutLabels[label] : _shortcutLabelFor(command);
+    return key == null || key.isEmpty ? label : '$label ($key)';
+  }
+
+  /// 由 [_formatShortcuts]**反查**该指令的键位说明（**单一来源**：改键位则提示自动跟随）。
+  static String? _shortcutLabelFor(FormatCommand command) {
+    for (final entry in _formatShortcuts.entries) {
+      final intent = entry.value;
+      if (intent is _FormatIntent && intent.command == command) {
+        return _describeActivator(entry.key);
+      }
+    }
+    return null;
+  }
+
+  /// 把单个 [ShortcutActivator] 描述为 `Ctrl+Shift+K` 形式（与本项目菜单 / 文档口径一致：写 `Ctrl`）。
+  static String? _describeActivator(ShortcutActivator activator) {
+    if (activator is! SingleActivator) return null;
+    final parts = <String>[
+      if (activator.control) 'Ctrl',
+      if (activator.alt) 'Alt',
+      if (activator.shift) 'Shift',
+      if (activator.meta && !activator.control) 'Meta',
+      _keyLabel(activator.trigger),
+    ];
+    return parts.where((p) => p.isNotEmpty).join('+');
+  }
+
+  /// 键名的人类可读写法（`keyB` → `B`、`digit1` → `1`、`space` → `Space`、`minus` → `-`）。
+  static String _keyLabel(LogicalKeyboardKey key) {
+    if (key == LogicalKeyboardKey.space) return 'Space';
+    if (key == LogicalKeyboardKey.minus) return '-';
+    if (key == LogicalKeyboardKey.equal) return '=';
+    final label = key.keyLabel.trim();
+    return label.isEmpty ? (key.debugName ?? '?') : label;
   }
 
   /// 格式模式下把任务项勾选框渲染为可点选复选框；点选即原地切换并回写正本。
@@ -498,8 +648,11 @@ class _NoteEditorState extends State<NoteEditor>
         _FormatIntent(FormatCommand.codeBlock),
     SingleActivator(LogicalKeyboardKey.minus, control: true, shift: true):
         _FormatIntent(FormatCommand.divider),
-    SingleActivator(LogicalKeyboardKey.keyK, control: true):
-        _FormatIntent(FormatCommand.link),
+    // `Ctrl+K` 与工具栏「链接」同源：打开**录入弹框**（§14.1 / BR-23.10），不再是纯指令。
+    SingleActivator(LogicalKeyboardKey.keyK, control: true): _LinkIntent(),
+    // `Ctrl+Shift+T`：打开「插入表格」面板（与工具栏「表格」/「编辑」菜单同源，FR-44）。
+    SingleActivator(LogicalKeyboardKey.keyT, control: true, shift: true):
+        _TableIntent(),
     SingleActivator(LogicalKeyboardKey.digit1, control: true, alt: true):
         _FormatIntent(FormatCommand.heading1),
     SingleActivator(LogicalKeyboardKey.digit2, control: true, alt: true):
@@ -525,6 +678,18 @@ class _NoteEditorState extends State<NoteEditor>
         _FormatIntent: CallbackAction<_FormatIntent>(
           onInvoke: (intent) {
             _applyCommand(intent.command);
+            return null;
+          },
+        ),
+        _LinkIntent: CallbackAction<_LinkIntent>(
+          onInvoke: (intent) {
+            _handleLinkCommand();
+            return null;
+          },
+        ),
+        _TableIntent: CallbackAction<_TableIntent>(
+          onInvoke: (intent) {
+            _openTablePanel();
             return null;
           },
         ),
@@ -799,6 +964,14 @@ class _NoteEditorState extends State<NoteEditor>
               },
               onInsertAttachment: (rowIndex, column) =>
                   _attachIntoCell(table, rowIndex, column),
+              // 活动单元格回传：正文工具栏的「链接」据此写入该单元格而非表格外的正文（BR-44.12）。
+              onActiveCellChanged: (rowIndex, column) {
+                _activeCellTable = table;
+                _activeCellRow = rowIndex;
+                _activeCellCol = column;
+              },
+              onInsertLink: (rowIndex, column) =>
+                  _insertLinkIntoCell(table, rowIndex, column),
             ),
           ),
         );
@@ -1648,6 +1821,16 @@ class _FormatIntent extends Intent {
   final FormatCommand command;
 }
 
+/// 「插入超链接」入口的快捷键意图（`Ctrl+K`）：与工具栏按钮同源，走**录入弹框**（§14.1）。
+class _LinkIntent extends Intent {
+  const _LinkIntent();
+}
+
+/// 「插入表格」入口的快捷键意图（`Ctrl+Shift+T`）：与工具栏「表格」/「编辑」菜单同源（FR-44）。
+class _TableIntent extends Intent {
+  const _TableIntent();
+}
+
 /// 携带「粘贴模式」的快捷键意图（FR-45 / §12.2）。
 ///
 /// [rich] 为 true（`Ctrl+V`）时优先读取剪贴板 HTML 表示并转 Markdown；
@@ -1656,6 +1839,95 @@ class _PasteIntent extends Intent {
   const _PasteIntent({required this.rich});
 
   final bool rich;
+}
+
+/// 「插入超链接」录入结果（[showDialog] 的返回值）。
+class _LinkDialogResult {
+  const _LinkDialogResult(this.label, this.url);
+
+  /// 显示文字（可为空 → 以网址充当，BR-23.10③）。
+  final String label;
+
+  /// 网址（非空；未写协议由 [EditorFormat.renderLink] 补 `https://`）。
+  final String url;
+}
+
+/// 「插入超链接」录入弹框（§14.1 / BR-23.10）。
+///
+/// 两个输入框「显示文字」「网址」+「取消 / 插入」：**网址为空时「插入」置灰**（不落笔）；
+/// 任一输入框回车即确认；取消 / 关闭返回 null（调用方不改动正本）。
+class _LinkDialog extends StatefulWidget {
+  const _LinkDialog({this.initialLabel = ''});
+
+  /// 「显示文字」的预填值（有选区时为选中文字）。
+  final String initialLabel;
+
+  @override
+  State<_LinkDialog> createState() => _LinkDialogState();
+}
+
+class _LinkDialogState extends State<_LinkDialog> {
+  late final TextEditingController _label =
+      TextEditingController(text: widget.initialLabel);
+  final TextEditingController _url = TextEditingController();
+
+  @override
+  void dispose() {
+    _label.dispose();
+    _url.dispose();
+    super.dispose();
+  }
+
+  bool get _canInsert => _url.text.trim().isNotEmpty;
+
+  void _submit() {
+    if (!_canInsert) return;
+    Navigator.of(context).pop(_LinkDialogResult(_label.text, _url.text));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('插入超链接'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _label,
+            decoration: const InputDecoration(
+              labelText: '显示文字',
+              hintText: '留空则以网址充当文字',
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey('sui-link-url'),
+            controller: _url,
+            autofocus: true,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: '网址',
+              hintText: 'https://example.com（不写协议会自动补 https://）',
+            ),
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('sui-link-confirm'),
+          onPressed: _canInsert ? _submit : null,
+          child: const Text('插入'),
+        ),
+      ],
+    );
+  }
 }
 
 /// 格式模式内联的任务勾选框：点按即切换 `[ ]` ↔ `[x]`（§10.1 / BR-31.2）。

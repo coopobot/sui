@@ -99,7 +99,7 @@ void main() {
     late AppDatabase db;
 
     Future<void> openPanel(WidgetTester tester) async {
-      final btn = find.byTooltip('表格');
+      final btn = find.byIcon(Icons.table_chart_outlined);
       await tester.ensureVisible(btn);
       await tester.pump();
       await tester.tap(btn);
