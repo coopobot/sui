@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"sui/note-server/internal/blob"
@@ -36,12 +35,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "already-initialized"})
 		return
 	}
-	token, err := s.store.CreateUser(req.Username, req.Password)
+	pair, err := s.store.CreateUser(req.Username, req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "user exists"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token, "username": req.Username})
+	writeJSON(w, http.StatusOK, tokenResponse(pair, req.Username))
 }
 
 // handleLogin 用户登录，返回新 token（简化：密码明文比对）。
@@ -59,26 +58,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 校验 PBKDF2 密码哈希（M4/BR-36.1），成功则签发新会话 token。
-	token, err := s.store.LoginUser(req.Username, req.Password)
+	pair, err := s.store.LoginUser(req.Username, req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid credentials"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token, "username": req.Username})
-}
-
-// handleLogout 吊销当前请求所用 Token 所属会话（不影响该用户其他会话）。
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
-		return
-	}
-	if err := s.store.RevokeToken(token); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "logout failed"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, tokenResponse(pair, req.Username))
 }
 
 // handlePush 处理客户端批量推送（逐条调用 sync.Push，汇总结果）。

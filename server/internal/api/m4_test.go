@@ -75,7 +75,8 @@ func TestLoginRejectsWrongPassword(t *testing.T) {
 	}
 }
 
-// M4/BR-35.x：WS 端点须鉴权；未携带 token → 握手被拒，有效 token → 升级成功。
+// M4/BR-35.x + M10（auth.md §4.5）：WS 端点须鉴权——令牌走**请求头 / 子协议**，
+// 查询串 `?token=` 在 M10 已移除（会进访问日志 / 浏览器历史）。
 func TestWsAuthRequired(t *testing.T) {
 	srv := newTestServer(t)
 	token := register(t, srv)
@@ -84,15 +85,38 @@ func TestWsAuthRequired(t *testing.T) {
 	defer hs.Close()
 	wsBase := "ws" + strings.TrimPrefix(hs.URL, "http")
 
+	// 1) 无令牌 → 握手被拒
 	if c, _, err := websocket.Dial(context.Background(), wsBase+"/api/v1/ws", nil); err == nil {
 		c.Close(websocket.StatusNormalClosure, "")
 		t.Fatal("expected WS handshake rejection without token")
 	}
-	c, _, err := websocket.Dial(context.Background(), wsBase+"/api/v1/ws?token="+token, nil)
+
+	// 2) 查询串承载令牌 → 必须被拒（M10 移除）
+	if c, _, err := websocket.Dial(context.Background(), wsBase+"/api/v1/ws?token="+token, nil); err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("expected WS handshake rejection for ?token= (removed in M10)")
+	}
+
+	// 3) Authorization 头（桌面 / 移动 / 命令行）
+	c, _, err := websocket.Dial(context.Background(), wsBase+"/api/v1/ws",
+		&websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}}})
 	if err != nil {
-		t.Fatalf("expected WS upgrade with valid token, got %v", err)
+		t.Fatalf("expected WS upgrade with Authorization header, got %v", err)
 	}
 	c.Close(websocket.StatusNormalClosure, "")
+
+	// 4) 子协议（浏览器唯一可用通道）：服务端须回选同一子协议，否则浏览器会拒绝握手。
+	//    此处刻意写**字面量** "bearer."：它钉住浏览器端实际使用的线上格式。
+	proto := "bearer." + token
+	c2, resp, err := websocket.Dial(context.Background(), wsBase+"/api/v1/ws",
+		&websocket.DialOptions{Subprotocols: []string{proto}})
+	if err != nil {
+		t.Fatalf("expected WS upgrade via subprotocol, got %v", err)
+	}
+	defer c2.Close(websocket.StatusNormalClosure, "")
+	if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != proto {
+		t.Errorf("服务端应回选子协议 %q，实际 %q", proto, got)
+	}
 }
 
 // M4/FR-34 / AC-98：剪藏 id ≥128 bit，同 URL 幂等复用、异 URL 区分。

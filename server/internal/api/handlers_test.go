@@ -66,12 +66,12 @@ func register(t *testing.T, srv *Server) string {
 		t.Fatalf("register failed: %d %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Token string `json:"token"`
+		AccessToken string `json:"access_token"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatal(err)
 	}
-	return resp.Token
+	return resp.AccessToken
 }
 
 func authReq(srv *Server, token, method, path string, body []byte) *httptest.ResponseRecorder {
@@ -653,12 +653,12 @@ func login(t *testing.T, srv *Server, username, password string) string {
 		t.Fatalf("login failed: %d %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Token string `json:"token"`
+		AccessToken string `json:"access_token"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatal(err)
 	}
-	return resp.Token
+	return resp.AccessToken
 }
 
 // 回归：一个用户可持有多个会话，新登录不使旧会话失效（多 profile 同时在线）。

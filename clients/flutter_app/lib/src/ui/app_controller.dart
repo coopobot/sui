@@ -989,11 +989,13 @@ class AppController extends ChangeNotifier {
     final scheme = base.startsWith('https') ? 'wss' : 'ws';
     final host = base.replaceFirst(RegExp('^https?'), scheme);
     try {
-      // M4/BR-35.x：WS 端点须鉴权；token 走查询串（浏览器 WebSocket 握手
-      // 无法自定义 Authorization 头）。
-      final ch = WebSocketChannel.connect(Uri.parse(
-        '$host/api/v1/ws?token=${Uri.encodeQueryComponent(_config.token)}',
-      ));
+      // M10（auth.md §4.5）：WS 鉴权令牌走**子协议**——WebSocket 握手无法自定义请求头，
+      // 子协议是 Web 端唯一可用通道；查询串 ?token= 已移除（会进访问日志与浏览器历史）。
+      // 服务端会回选同一子协议值，故此处字符串必须与 Go 侧 `ws.SubprotocolPrefix` 一致。
+      final ch = WebSocketChannel.connect(
+        Uri.parse('$host/api/v1/ws'),
+        protocols: ['bearer.${_config.token}'],
+      );
       _ws = ch;
       _wsSub = ch.stream.listen(
         (_) => _onRemoteChange(),

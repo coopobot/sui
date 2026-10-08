@@ -13,9 +13,10 @@ import (
 // 默认值可用环境变量覆盖；取值非法（非数字 / <= 0）一律回落默认值——
 // 不给「配置写错就放行」的余地。
 const (
-	defaultMaxBodyBytes = 8 << 20  // 8 MiB：POST /api/v1/clips、/api/v1/sync/push
-	defaultMaxBlobBytes = 32 << 20 // 32 MiB：单个 blob（PUT /api/v1/blobs/{hash}）
-	defaultMaxPushItems = 500      // sync/push 单次条目数上限
+	defaultMaxBodyBytes    = 8 << 20  // 8 MiB：POST /api/v1/clips、/api/v1/sync/push
+	defaultMaxBlobBytes    = 32 << 20 // 32 MiB：单个 blob（PUT /api/v1/blobs/{hash}）
+	defaultMaxRefreshBytes = 4 << 10  // 4 KiB：POST /api/v1/refresh（只需装一个令牌）
+	defaultMaxPushItems    = 500      // sync/push 单次条目数上限
 )
 
 // maxBodyBytes 返回 clips / sync.push 的请求体上限（SUI_MAX_BODY_BYTES）。
@@ -23,6 +24,9 @@ func maxBodyBytes() int64 { return envInt64("SUI_MAX_BODY_BYTES", defaultMaxBody
 
 // maxBlobBytes 返回单 blob 上限（SUI_MAX_BLOB_BYTES）。
 func maxBlobBytes() int64 { return envInt64("SUI_MAX_BLOB_BYTES", defaultMaxBlobBytes) }
+
+// maxRefreshBodyBytes 返回 /api/v1/refresh 的请求体上限（SUI_MAX_REFRESH_BYTES）。
+func maxRefreshBodyBytes() int64 { return envInt64("SUI_MAX_REFRESH_BYTES", defaultMaxRefreshBytes) }
 
 // maxPushItems 返回 sync/push 单次条目数上限（SUI_MAX_PUSH_ITEMS）。
 func maxPushItems() int { return int(envInt64("SUI_MAX_PUSH_ITEMS", defaultMaxPushItems)) }

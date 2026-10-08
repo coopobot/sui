@@ -48,6 +48,8 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("GET /api/v1/ping", s.handlePing)
 	mux.HandleFunc("POST /api/v1/register", s.handleRegister)
 	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
+	// 刷新端点**不**经 auth 中间件：访问令牌可能已过期，凭刷新令牌本身鉴权（§8.3）。
+	mux.HandleFunc("POST /api/v1/refresh", s.handleRefresh)
 
 	// WebSocket 端点（M4/BR-35.x：须鉴权，未通过 → 401）
 	mux.HandleFunc("GET /api/v1/ws", s.handleWS)
@@ -61,6 +63,7 @@ func (s *Server) Router() http.Handler {
 	mux.Handle("/api/v1/notes/", authWrap)
 	mux.Handle("/api/v1/clips", authWrap)
 	mux.Handle("/api/v1/logout", authWrap)
+	mux.Handle("/api/v1/logout-all", authWrap)
 
 	// CORS 中间件包裹最外层（M4/BR-36.3 + M10-T23：白名单精确匹配；未配置 = 默认拒绝）
 	return cors.Middleware(origins, mux)
@@ -84,25 +87,52 @@ func allowedOrigins() []string {
 	return out
 }
 
-// handleWS 校验 WS 连接鉴权（?token= 或 Bearer），未通过 → 401（M4/BR-35.x）。
+// handleWS 校验 WS 连接鉴权（M10：请求头 / 子协议，见 auth.md §4.5），未通过 → 401 + 错误码。
 //
-// TODO(M10-T26 + M10-T28)：改为只用 Authorization 头 / Sec-WebSocket-Protocol 承载令牌，
-// 移除查询串 ?token=（查询串会进访问日志与浏览器历史）。须与服务端、客户端同步切换，
-// 故与客户端改造（T28）一并落地，避免中间态把现有客户端打断。
+// 不再接受查询串 ?token=（会进访问日志 / 浏览器历史）；连接与会话绑定，会话吊销即关连接。
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
+	token := wsToken(r)
 	if token == "" {
-		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	}
-	if token == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid_token"})
 		return
 	}
-	if ok, _ := s.store.VerifyToken(token); !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
-		return
+	status, _, sessionID := s.store.Authenticate(token)
+	switch status {
+	case store.AuthExpired:
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "token-expired"})
+	case store.AuthOK:
+		s.hub.Serve(w, r, sessionID, wsSubprotocol(r))
+	default:
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid_token"})
 	}
-	s.hub.Serve(w, r)
+}
+
+// wsToken 从请求头 / 子协议取访问令牌（§4.5）。
+func wsToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if strings.HasPrefix(h, "Bearer ") {
+		if t := strings.TrimSpace(strings.TrimPrefix(h, "Bearer ")); t != "" {
+			return t
+		}
+	}
+	if tok, ok := strings.CutPrefix(wsSubprotocol(r), ws.SubprotocolPrefix); ok {
+		return tok
+	}
+	return ""
+}
+
+// wsSubprotocol 返回请求中以 bearer. 前缀承载令牌的子协议。
+//
+// 浏览器 WebSocket API 无法自定义请求头，子协议是 Web 端唯一可用的令牌通道。
+func wsSubprotocol(r *http.Request) string {
+	for _, raw := range r.Header.Values("Sec-WebSocket-Protocol") {
+		for _, p := range strings.Split(raw, ",") {
+			if p = strings.TrimSpace(p); strings.HasPrefix(p, ws.SubprotocolPrefix) {
+				return p
+			}
+		}
+	}
+	return ""
 }
 
 // NewRouter 返回承载受保护 handler 的子路由（供鉴权中间件包裹）。
@@ -117,6 +147,7 @@ func NewRouter(s *Server) *http.ServeMux {
 	sub.HandleFunc("GET /api/v1/notes/{id}/revisions/{version}", s.handleGetRevision)
 	sub.HandleFunc("POST /api/v1/clips", s.handleClip)
 	sub.HandleFunc("POST /api/v1/logout", s.handleLogout)
+	sub.HandleFunc("POST /api/v1/logout-all", s.handleLogoutAll)
 	return sub
 }
 
