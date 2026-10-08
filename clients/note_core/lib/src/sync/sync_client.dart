@@ -546,10 +546,12 @@ class SyncClient {
         if (json) 'Content-Type': 'application/json',
       };
 
-  /// 带鉴权发一次请求；命中「访问令牌过期」时**单飞刷新 + 原样重放一次**（auth.md §8.5）。
+  /// 带鉴权发一次请求；命中**可刷新的 401** 时**单飞刷新 + 原样重放一次**（auth.md §8.5）。
   ///
-  /// 只认服务端的可区分错误码 `token-expired`：`invalid_token` 不触发刷新，
-  /// 以免坏令牌把人拖进「刷新—失败」的死循环（那种情况由服务端 401 语义直接暴露）。
+  /// 可刷新 = `token-expired`（已过期）**或** `invalid_token`（服务端不认识本端令牌，例如会话
+  /// 在别处被轮换、服务端数据回滚）。两者都**只尝试一次**：刷新失败即走 [onAuthExpired]
+  /// 提示重新登录，故不存在「刷新—失败」死循环；反之若拒绝刷新，这些**本可自愈**的情况会退化成
+  /// 必须手动重登（M10-T34 端到端用例暴露的正是这一点）。
   /// 网络类异常不在刷新回调里改登录态，交由下一次同步重试。
   Future<http.Response> _withAuth(
     Future<http.Response> Function(Map<String, String> headers) send, {
@@ -557,15 +559,17 @@ class SyncClient {
   }) async {
     Future<http.Response> once() => send(_headers(json: json));
     final first = await once();
-    if (first.statusCode != 401 || !_isTokenExpired(first.body)) return first;
+    if (first.statusCode != 401 || !_isRefreshable(first.body)) return first;
     if (!await _refreshAccessToken()) return first;
     return once();
   }
 
-  bool _isTokenExpired(String body) {
+  /// 401 响应是否属于「值得尝试一次刷新」的令牌问题。
+  static bool _isRefreshable(String body) {
     try {
       final data = jsonDecode(body) as Map<String, dynamic>;
-      return (data['error'] as String?) == 'token-expired';
+      final code = data['error'] as String?;
+      return code == 'token-expired' || code == 'invalid_token';
     } on FormatException {
       return false;
     }

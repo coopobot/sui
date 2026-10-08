@@ -174,8 +174,9 @@ void main() {
       syncer.close();
     });
 
-    test('invalid_token 不触发刷新（避免坏令牌反复刷新打转）', () async {
+    test('invalid_token 也刷新**恰好一次**（§8.5）：可自愈不必重登，且绝不反复打转', () async {
       var refreshCalls = 0;
+      var dataCalls = 0;
 
       final syncer = newClient((req) async {
         if (req.url.path == '/api/v1/refresh') {
@@ -187,11 +188,31 @@ void main() {
             'expires_in': 1800,
           });
         }
+        dataCalls++;
         return jsonResponse(401, {'ok': false, 'error': 'invalid_token'});
       });
 
+      // 本用例让服务端对**重放**仍判 invalid_token → 一次性重放后即收手并暴露 401。
       await expectLater(syncer.pull(), throwsA(isA<HttpException>()));
-      expect(refreshCalls, 0);
+      expect(refreshCalls, 1, reason: 'invalid_token 应尝试刷新一次（§8.5）');
+      expect(dataCalls, 2, reason: '原请求 + 重放各一次，不做更多重试（无死循环）');
+      syncer.close();
+    });
+
+    test('invalid_token 且无刷新令牌：不尝试刷新，直接暴露 401', () async {
+      var refreshCalls = 0;
+      final syncer = newClient(
+        (req) async {
+          if (req.url.path == '/api/v1/refresh') {
+            refreshCalls++;
+          }
+          return jsonResponse(401, {'ok': false, 'error': 'invalid_token'});
+        },
+        refreshToken: '',
+      );
+
+      await expectLater(syncer.pull(), throwsA(isA<HttpException>()));
+      expect(refreshCalls, 0, reason: '没有刷新令牌就不该尝试刷新');
       syncer.close();
     });
   });
