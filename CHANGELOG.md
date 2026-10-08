@@ -7,7 +7,34 @@
 
 ## [Unreleased]
 
-### 新增 / 变更
+## [0.11.0] - 2026-10-08
+
+M10：认证与笔记安全加固（FR-49 / FR-50 / FR-51）。三条线一起落地：**会话令牌可撤销**、
+`http://` 下笔记内容**传输加密**、笔记本**可单独加密**（端到端，服务端不可解密）。
+架构级改动，决策与详细设计见 SuiDevAgent 的 ADR-014 / ADR-015 与 `auth.md` /
+`encrypted-notebook.md`；跨端密码学互操作由 Spike-003 逐字节验证并固化向量。
+
+### 新增
+
+- **短时访问令牌 + 可撤销刷新令牌（FR-49）**：30 分钟访问令牌 / 30 天刷新令牌；刷新**单次使用 +
+  轮换**，轮换时保留上一代哈希以识别**重放**并吊销整个会话；401 错误码可区分
+  （`token-expired` / `invalid_token`）；客户端**单飞刷新 + 重放一次**（并发去重），
+  `invalid_token` 亦允许一次性刷新；WS 连接与会话绑定，会话吊销即断开。
+- **受保护通道（FR-50）**：`http://` 地址下应用层加密（`https://` 走 TLS，不叠加）。
+  服务端长期 X25519 密钥 + 指纹（TOFU，**指纹变化即阻断**）；逐请求 ECDH → HKDF-SHA256 →
+  AES-256-GCM，`AAD` 绑定「方法 / 路径 / 请求 id」；服务端维护**有界重放缓存**（超过即 409）；
+  客户端接缝在 `http.BaseClient` 包装层，push/pull 与合并逻辑**零改动**。
+- **加密笔记本（FR-51）**：笔记本级端到端加密。`K_nb` 由锁定密码经 Argon2id → HKDF 派生，
+  **只驻内存、不落库、不上行**；字段密文为 `ver|alg|nonce|ct|tag` 自描述封装，
+  AAD 绑定「笔记本 + 笔记 + 字段」（防密文搬运）；服务端**只搬密文、无解密分支**；
+  未解锁时列表占位、不进编辑、不纳入搜索；空闲 **15 分钟自动回锁**（活动续期）；
+  移入 / 移出加密笔记本**就地加解密**（含既有修订，未解锁则拒绝移动）。
+- **P0 安全修复**：请求体 / 条目数上限与大传输超时；响应 `nosniff` 与 `Cache-Control: private`；
+  剪藏出网**拨号期地址闸门**（回环 / 私网 / 链路本地 / CGNAT + 逐跳重定向 + 跳数上限）；
+  blob 落盘路径与摘要校验（落盘 0700/0600）；Markdown 转义；CORS 白名单**默认拒绝**；
+  剪藏扩展改 `chrome.storage.local` 且**站点权限按需申请**。
+
+### 工具链与交付（随本里程碑一并发布）
 
 - **Windows 安装包（Inno Setup 6）**：新增 `clients/flutter_app/installer/sui.iss`，把
   `flutter build windows --release` 的产物整目录打成单文件安装包——支持自定义安装目录、开始菜单 /
@@ -15,7 +42,7 @@
   `clients/flutter_app/dist/sui-setup-<版本>-x64.exe`（不入库）。安装器不写死版本号，
   缺 `/DMyAppVersion` 即编译报错，避免与版本真源漂移。
 - **版本号单一真源**：`clients/flutter_app/pubspec.yaml` 的 `version:` 为**唯一真源**
-  （本次修正为 `0.10.14+1014`；build number 规则 `major*10000+minor*100+patch`，同时充当
+  （本次为 `0.11.0+1100`；build number 规则 `major*10000+minor*100+patch`，同时充当
   Android `versionCode`）。此前该字段停在 `0.1.0`，导致 Windows exe 文件属性与 Android 包版本长期错版。
 - **服务端版本改为构建期注入**：`server/internal/version/version.go` 的 `String` 由 `const` 改 `var`
   （`-ldflags -X` 只对变量生效），`make build-server` 从 pubspec 读版本并注入；此前硬编码在 `0.9.1`。
@@ -23,6 +50,28 @@
   ↔ `CHANGELOG` ↔ git tag，并作为 `make build-server` 的前置门禁（版本漂移则构建失败）。
 - **Makefile** 新增 `version-show` / `version-check` 目标，`build-server` 注入 `-ldflags` 版本。
 - **`.gitignore`** 忽略 `clients/flutter_app/dist/`（安装包产物目录）。
+
+### 修复
+
+- **明文上行**：加密笔记入队时改存**存储形态**，避免把明文放进同步出站队列（库内密文、净荷明文）。
+- **冲突合并损坏**：加密笔记的合并改在**明文层**完成；未解锁端**不就地合并**（保持排队），
+  避免把密文当正文再加密一次。
+- **`invalid_token` 未刷新**：原实现只认 `token-expired`，使「会话在别处被轮换 / 服务端数据回滚」
+  这类**可自愈**情况退化为必须手动重登（由端到端用例暴露）。
+- 大传输路由单独延长读写期限：全局 10s 兜底会**提前切断** 32 MiB 附件。
+- 加密笔记本的旧库迁移：`schemaVersion 6 → 7` 幂等补列（有真实 v6 库升级门禁）。
+- 剪藏指南口径漂移：配置存储更正为 `chrome.storage.local`（原文写 `storage.sync`，
+  会让用户误以为凭证随浏览器账号同步离开本机）。
+
+### 测试
+
+- 服务端：M10 新增 `m10_test.go` / `m10_auth_test.go` / `m10_clip_test.go` /
+  `m10_encnotebook_test.go` / `m10_securechan_test.go` / `m10_transport_test.go` 与
+  `internal/securechan/channel_test.go`（含用 Spike 向量断言封装**逐字节**一致）。
+- `note_core`：**294 项**（含 5 个 e2e：同步链、**受保护通道跨语言**、**加密笔记本跨端**、
+  令牌刷新、既有同步链）。
+- `flutter_app`：**146 项**（含加密笔记本的解锁 / 回锁 / 占位面板 / 立即锁定 / 自动回锁续期）。
+- 跨端密码学：`sui-crypto-v1` 向量在 Go 与 Dart 两侧各自作为回归门禁。
 
 ## [0.10.14] - 2026-10-08
 
@@ -54,7 +103,6 @@ M9 补丁：超链接弹框录入与工具栏快捷键提示。在「Markdown �
 - flutter_app 新增 `editor_toolbar_link_test.dart`（`ToolbarShortcutTooltip` / `LinkDialogBody` / `LinkInCell`，
   共 **9** 项）；受提示文案变更影响的既有用例改按**图标**定位工具栏按钮（`editor_layout_test` /
   `editor_m9_test` / `editor_m9_e2e_test`）；`flutter test` 计 **144** 项全绿。
-
 ## [0.10.13] - 2026-10-08
 
 M9 补丁：格式模式「所见即预览」与表格边界保护。在「Markdown 唯一正本」原则不变的前提下，

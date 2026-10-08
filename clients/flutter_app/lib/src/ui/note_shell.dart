@@ -64,6 +64,7 @@ class _WideLayout extends StatelessWidget {
               )
             : const Text('随手记 Sui'),
         actions: [
+          LockActions(controller: controller),
           SyncActions(controller: controller),
           _newNoteAction(context),
         ],
@@ -90,7 +91,9 @@ class _WideLayout extends StatelessWidget {
             child: Row(
               children: [
                 Expanded(
-                  child: NoteEditor(key: ValueKey(controller.selectedNoteId)),
+                  child: controller.selectedNoteLocked
+                      ? LockedNotePane(controller: controller)
+                      : NoteEditor(key: ValueKey(controller.selectedNoteId)),
                 ),
                 if (controller.showRevisionPanel &&
                     controller.selectedNoteId != null) ...[
@@ -158,6 +161,7 @@ class _NarrowLayout extends StatelessWidget {
                     )
                   : null,
           actions: [
+            LockActions(controller: controller),
             SyncActions(controller: controller),
             // 编辑态不再提供「删除笔记」图标：它与同步/设置同处顶栏、极易误碰（B15）。
             // 删除入口保留在笔记列表的行尾菜单里（需二次确认）。
@@ -178,7 +182,9 @@ class _NarrowLayout extends StatelessWidget {
                 noteId: controller.selectedNoteId!,
               )
             : editorOpen
-                ? NoteEditor(key: ValueKey(controller.selectedNoteId))
+                ? (controller.selectedNoteLocked
+                    ? LockedNotePane(controller: controller)
+                    : NoteEditor(key: ValueKey(controller.selectedNoteId)))
                 : NoteList(controller: controller),
       ),
     );
@@ -239,6 +245,161 @@ class SyncActions extends StatelessWidget {
           onPressed: () => showSyncSettingsDialog(context, controller),
         ),
       ],
+    );
+  }
+}
+
+// ---- 加密笔记本的 UI 呈现（M10-T29 / FR-51，详细设计 §6.3 / §7） ----
+
+/// 未解锁时的**占位面板**：说明 + 解锁入口。
+///
+/// 关键点：此处**不**渲染编辑器——附件面板 / 修订面板 / 格式工具等编辑期入口因此一并不可达，
+/// 既避免误编辑（保存会被拦下），也避免任何侧信道预览。
+class LockedNotePane extends StatelessWidget {
+  const LockedNotePane({super.key, required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final notebookId = controller.selectedNoteNotebookId;
+    // 占位标题由读接缝给出：损坏的密文会显示「⚠️ 加密笔记无法解密」，便于用户区分
+    // 「没解锁」与「内容真的坏了」（§11）。
+    final placeholder = controller.selectedNoteSummary?.note.title;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.lock_outline, size: 48, color: theme.colorScheme.primary),
+            const SizedBox(height: 12),
+            Text('该笔记位于加密笔记本', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 8),
+            Text(
+              placeholder?.isNotEmpty == true
+                  ? placeholder!
+                  : '内容已加密，解锁后可查看与编辑',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '锁定密码只在本机校验，不会上传。',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: notebookId == null
+                  ? null
+                  : () => showUnlockNotebookDialog(context, controller, notebookId),
+              icon: const Icon(Icons.lock_open_outlined),
+              label: const Text('解锁笔记'),
+            ),
+            if (controller.lockedNotice != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                controller.lockedNotice!,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: theme.colorScheme.error),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 弹出解锁对话框。密码错误**就地**提示（不关窗），成功则返回 true。
+///
+/// `crypto_meta` 损坏等异常由控制器写入 `lockedNotice`，此时直接关窗，让占位面板显示具体原因
+/// ——避免把「元数据坏了」误导成「密码错了」。
+Future<bool> showUnlockNotebookDialog(
+  BuildContext context,
+  AppController controller,
+  String notebookId,
+) async {
+  final input = TextEditingController();
+  var busy = false;
+  String? error;
+
+  Future<void> submit(StateSetter setState, BuildContext dialogContext) async {
+    if (busy) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    final ok = await controller.unlockNotebook(notebookId, input.text);
+    if (!dialogContext.mounted) return;
+    if (ok) {
+      Navigator.of(dialogContext).pop(true);
+      return;
+    }
+    if (controller.lockedNotice != null) {
+      // 不是密码问题（如 crypto_meta 损坏）：交给占位面板显示具体原因。
+      Navigator.of(dialogContext).pop(false);
+      return;
+    }
+    setState(() {
+      busy = false;
+      error = '锁定密码错误';
+    });
+  }
+
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (dialogContext, setState) => AlertDialog(
+        title: const Text('解锁加密笔记本'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: input,
+              autofocus: true,
+              obscureText: true,
+              enabled: !busy,
+              decoration: InputDecoration(
+                labelText: '锁定密码',
+                errorText: error,
+              ),
+              onSubmitted: (_) => submit(setState, dialogContext),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: busy ? null : () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: busy ? null : () => submit(setState, dialogContext),
+            child: Text(busy ? '解锁中…' : '解锁'),
+          ),
+        ],
+      ),
+    ),
+  );
+  input.dispose();
+  return ok ?? false;
+}
+
+/// 顶栏「立即锁定」：存在已解锁的加密笔记本时才出现（§7「手动立即回锁」）。
+class LockActions extends StatelessWidget {
+  const LockActions({super.key, required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!controller.hasUnlockedNotebook) return const SizedBox.shrink();
+    return IconButton(
+      tooltip: '立即锁定加密笔记本',
+      icon: const Icon(Icons.lock_outline),
+      onPressed: () => controller.lockAllNotebooks(),
     );
   }
 }

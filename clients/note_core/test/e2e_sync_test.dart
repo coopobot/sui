@@ -43,6 +43,10 @@ void main() {
         'SUI_DATA': dataDir,
       },
     );
+    // 排空子进程输出：管道无人读取时，服务端写满缓冲会阻塞在网络循环上，
+    // 表现为「客户端同步完成、服务端毫无反应」（M10 排查记录）。
+    server.stdout.drain<void>();
+    server.stderr.drain<void>();
     await _waitUntilReady(serverUrl);
 
     // M4/BR-33.2：服务首次启动仅允许创建唯一账号，此后注册网关关闭。
@@ -57,7 +61,7 @@ void main() {
       if (regResp.statusCode != 200) {
         fail('首启注册失败：${regResp.statusCode} ${regResp.body}');
       }
-      token = (jsonDecode(regResp.body) as Map)['token'] as String;
+      token = (jsonDecode(regResp.body) as Map)['access_token'] as String;
     } finally {
       client.close();
     }

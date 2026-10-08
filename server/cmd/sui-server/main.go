@@ -1,4 +1,4 @@
-// Sui server — M0 skeleton.
+// Sui server — 单二进制自托管入口。
 // Assembles the HTTP server and runs it with graceful shutdown.
 package main
 
@@ -14,6 +14,7 @@ import (
 
 	"sui/note-server/internal/api"
 	"sui/note-server/internal/blob"
+	"sui/note-server/internal/securechan"
 	"sui/note-server/internal/store"
 	"sui/note-server/internal/version"
 )
@@ -27,7 +28,7 @@ func main() {
 	if dataDir == "" {
 		dataDir = "./data"
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		log.Fatalf("mkdir data: %v", err)
 	}
 
@@ -42,11 +43,24 @@ func main() {
 		log.Fatalf("init blob store: %v", err)
 	}
 
+	apiSrv := api.New(st, blobs)
+	// M10-T27 / FR-50：受保护通道的长期密钥（首次启动生成并持久化，0600；信任根，TOFU + 指纹）。
+	chanKey, err := securechan.LoadOrCreateKey(dataDir + "/securechan.key")
+	if err != nil {
+		log.Fatalf("init secure channel key: %v", err)
+	}
+	apiSrv.SetChannelKey(chanKey)
+	log.Printf("secure channel ready (fingerprint %s)", chanKey.Fingerprint())
+
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      api.New(st, blobs).Router(),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Addr:    addr,
+		Handler: apiSrv.Router(),
+		// M10-T25 / BR-52.5（input-validation.md §8）：补 ReadHeaderTimeout 防慢速
+		// 请求头攻击、补 IdleTimeout 回收keep-alive 空闲连接；既有 Read/Write 保持不变。
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {

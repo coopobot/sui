@@ -20,6 +20,7 @@ import '../models/note.dart';
 import '../models/notebook.dart';
 import '../models/tag.dart';
 import '../repository/note_repository.dart';
+import '../util/hashes.dart';
 
 /// 同步客户端：协调本地仓储与远端服务。
 ///
@@ -30,18 +31,37 @@ class SyncClient {
     required this.baseUrl,
     required this.deviceId,
     required this.token,
+    this.refreshToken = '',
     this.blobStore,
     http.Client? httpClient,
+    this.onTokensRefreshed,
+    this.onAuthExpired,
   }) : _http = httpClient ?? http.Client();
 
   final NoteRepository repository;
   final String baseUrl;
   final String deviceId;
-  final String token;
+
+  /// 访问令牌（短时有效）。刷新成功后**就地更新**（M10/FR-49）。
+  String token;
+
+  /// 刷新令牌（**单次使用**；刷新成功后就地更新）。为空表示无法透明刷新。
+  String refreshToken;
 
   /// 附件缓存（方案 B：按需拉取 + LRU）。为空表示未启用附件同步。
   final BlobStore? blobStore;
+
+  /// 令牌刷新成功后的回调：上层据此**持久化新令牌并重连 WebSocket**
+  /// （WS 子协议里带的是旧访问令牌，不重连则实时通知静默失效）。
+  final Future<void> Function(String accessToken, String refreshToken)? onTokensRefreshed;
+
+  /// 刷新令牌失效（refresh-expired / refresh-revoked）时的回调：上层提示重新登录。
+  final Future<void> Function()? onAuthExpired;
+
   final http.Client _http;
+
+  /// 进行中的刷新（**单飞**）：刷新令牌单次使用，并发重复刷新会被服务端判为重放并吊销会话。
+  Future<bool>? _refreshInflight;
 
   final List<OutboxItem> _outbox = [];
   DateTime _lastPull = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
@@ -71,10 +91,21 @@ class SyncClient {
     // 成功后精确回填 server_version（sync-protocol §9.5）。
     final pushedRevisionVersion =
         await repository.maxRevisionVersion(note.id);
+    // 加密笔记：Outbox 只放**存储形态**（密文）。编辑器给的是明文（解锁态），若直接入队，
+    // push 就会把明文发到服务端——这是端到端加密最容易被忽视的泄漏点。
+    var title = note.title;
+    var content = note.contentMarkdown;
+    if (note.encrypted) {
+      final stored = await repository.getStoredNote(note.id);
+      if (stored != null) {
+        title = stored.title;
+        content = stored.contentMarkdown;
+      }
+    }
     final item = OutboxItem(
       noteId: note.id,
-      title: note.title,
-      content: note.contentMarkdown,
+      title: title,
+      content: content,
       baseVersion: base,
       version: note.version,
       isDeleted: note.isDeleted,
@@ -126,6 +157,8 @@ class SyncClient {
         'version': e.version,
         'isDeleted': e.isDeleted,
         'archived': e.archived,
+        // M10-T29：加密态随笔记上行（服务端只搬运；正文 / 标题此时为密文）。
+        'encrypted': note?.encrypted ?? false,
         'sourceDevice': deviceId,
         if (note?.notebookId != null) 'notebookId': note!.notebookId,
         if (tags.isNotEmpty) 'tagIds': tags.map((t) => t.id).toList(),
@@ -146,6 +179,9 @@ class SyncClient {
         'baseVersion': _notebookBaseVersion[id] ?? 0,
         'version': nb.version,
         'isDeleted': nb.isDeleted,
+        // M10-T29：加密笔记本标记 + 非敏感加密元数据（名称保持明文，便于辨认该解锁哪个）。
+        'encrypted': nb.encrypted,
+        if (nb.cryptoMeta.isNotEmpty) 'cryptoMeta': nb.cryptoMeta,
         'sourceDevice': deviceId,
       });
     }
@@ -244,7 +280,7 @@ class SyncClient {
   Future<int> pull() async {
     final since = _lastPull.toIso8601String();
     final uri = Uri.parse('$baseUrl/api/v1/sync/pull?since=$since');
-    final resp = await _http.get(uri, headers: _authHeader());
+    final resp = await _withAuth((h) => _http.get(uri, headers: h), json: true);
     if (resp.statusCode != 200) {
       throw HttpException(resp.statusCode, resp.body);
     }
@@ -276,6 +312,8 @@ class SyncClient {
           isDeleted: nb['isDeleted'] as bool? ?? false,
           version: nbVer,
           updatedAt: nbUpdated,
+          encrypted: (nb['encrypted'] as bool?) ?? false,
+          cryptoMeta: nb['cryptoMeta'] as String? ?? '',
         );
         _notebookBaseVersion[nbId] = nbVer;
         count++;
@@ -310,6 +348,8 @@ class SyncClient {
       final id = n['id'] as String;
       final ver = n['version'] as int;
       final isDeleted = n['isDeleted'] as bool;
+      // M10-T29：加密态镜像（未解锁端据此显示占位、并且**不**尝试解析正文）。
+      final remoteEncrypted = (n['encrypted'] as bool?) ?? false;
       final updatedAt = DateTime.parse(n['updatedAt'] as String);
       if (maxUpdated == null || updatedAt.isAfter(maxUpdated)) {
         maxUpdated = updatedAt;
@@ -327,6 +367,9 @@ class SyncClient {
           archived: (n['archived'] as bool?) ?? false,
           sourceDevice: (n['sourceDevice'] as String?) ?? '',
           version: ver,
+          encrypted: remoteEncrypted,
+          // 线上入口：净荷已是**存储形态**（加密笔记本内即密文），**绝不二次加密**。
+          fromWire: true,
         );
         _baseVersion[id] = ver;
         await _applyRemoteTags(id, n);
@@ -363,6 +406,9 @@ class SyncClient {
           remoteArchived,
           updatedAt: updatedAt,
         );
+      }
+      if (remoteEncrypted != local.encrypted) {
+        await repository.applyRemoteEncrypted(id, remoteEncrypted);
       }
       // 应用笔记的 notebookId
       final remoteNotebookId = n['notebookId'] as String?;
@@ -443,19 +489,22 @@ class SyncClient {
   Future<bool> uploadBlob(String sha256) async {
     final store = blobStore;
     if (store == null || sha256.isEmpty) return false;
+    // M10-T30：摘要来自外部（附件映射 / 正文 sui:// 引用），拼 URL 与落盘前先过白名单。
+    if (!isValidSha256(sha256)) return false;
     // exists 走本地物理层，避免 read 未命中时触发一次按需下载。
     if (!await store.exists(sha256)) return false;
     final bytes = await store.read(sha256);
     if (bytes == null || bytes.isEmpty) return false;
 
-    final uri = Uri.parse('$baseUrl/api/v1/blobs/$sha256');
-    final resp = await _http.put(
-      uri,
-      headers: {
-        'Authorization': 'Bearer $token',
-        'Content-Type': 'application/octet-stream',
-      },
-      body: bytes,
+    final uri =
+        Uri.parse('$baseUrl/api/v1/blobs/${Uri.encodeComponent(sha256)}');
+    // 内容寻址上传是幂等的，重放安全。
+    final resp = await _withAuth(
+      (h) => _http.put(
+        uri,
+        headers: {...h, 'Content-Type': 'application/octet-stream'},
+        body: bytes,
+      ),
     );
     if (resp.statusCode != 200) return false;
     if (store is CachedBlobStore) await store.markUploaded(sha256);
@@ -471,12 +520,16 @@ class SyncClient {
     if (store == null) {
       throw StateError('blobStore 未配置，无法按需下载附件');
     }
+    // M10-T30：非白名单摘要直接拒绝（只拒绝、不清洗）。
+    if (!isValidSha256(sha256)) {
+      throw ArgumentError.value(sha256, 'sha256', '不是合法的内容寻址摘要');
+    }
     final cached = await store.read(sha256);
     if (cached != null) return cached;
 
-    final uri = Uri.parse('$baseUrl/api/v1/blobs/$sha256');
-    final resp =
-        await _http.get(uri, headers: {'Authorization': 'Bearer $token'});
+    final uri =
+        Uri.parse('$baseUrl/api/v1/blobs/${Uri.encodeComponent(sha256)}');
+    final resp = await _withAuth((h) => _http.get(uri, headers: h));
     if (resp.statusCode != 200) {
       throw HttpException(resp.statusCode, resp.body);
     }
@@ -487,12 +540,89 @@ class SyncClient {
 
   // ---------- internal ----------
 
-  Map<String, String> _authHeader() =>
-      {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'};
+  /// 请求头：访问令牌 + 可选 JSON 内容类型。
+  Map<String, String> _headers({bool json = false}) => {
+        'Authorization': 'Bearer $token',
+        if (json) 'Content-Type': 'application/json',
+      };
+
+  /// 带鉴权发一次请求；命中**可刷新的 401** 时**单飞刷新 + 原样重放一次**（auth.md §8.5）。
+  ///
+  /// 可刷新 = `token-expired`（已过期）**或** `invalid_token`（服务端不认识本端令牌，例如会话
+  /// 在别处被轮换、服务端数据回滚）。两者都**只尝试一次**：刷新失败即走 [onAuthExpired]
+  /// 提示重新登录，故不存在「刷新—失败」死循环；反之若拒绝刷新，这些**本可自愈**的情况会退化成
+  /// 必须手动重登（M10-T34 端到端用例暴露的正是这一点）。
+  /// 网络类异常不在刷新回调里改登录态，交由下一次同步重试。
+  Future<http.Response> _withAuth(
+    Future<http.Response> Function(Map<String, String> headers) send, {
+    bool json = false,
+  }) async {
+    Future<http.Response> once() => send(_headers(json: json));
+    final first = await once();
+    if (first.statusCode != 401 || !_isRefreshable(first.body)) return first;
+    if (!await _refreshAccessToken()) return first;
+    return once();
+  }
+
+  /// 401 响应是否属于「值得尝试一次刷新」的令牌问题。
+  static bool _isRefreshable(String body) {
+    try {
+      final data = jsonDecode(body) as Map<String, dynamic>;
+      final code = data['error'] as String?;
+      return code == 'token-expired' || code == 'invalid_token';
+    } on FormatException {
+      return false;
+    }
+  }
+
+  /// 单飞刷新：并发请求同时过期时只发一次刷新请求。
+  Future<bool> _refreshAccessToken() {
+    final inflight = _refreshInflight;
+    if (inflight != null) return inflight;
+    final future = _doRefresh();
+    _refreshInflight = future;
+    return future.whenComplete(() => _refreshInflight = null);
+  }
+
+  /// 以刷新令牌换发新的一对令牌，并回调上层持久化 / 重连。
+  Future<bool> _doRefresh() async {
+    if (refreshToken.isEmpty) {
+      await onAuthExpired?.call();
+      return false;
+    }
+    try {
+      final uri = Uri.parse('$baseUrl/api/v1/refresh');
+      final resp = await _http.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'refresh_token': refreshToken}),
+      );
+      if (resp.statusCode != 200) {
+        // refresh-expired / refresh-revoked：须重新登录（服务端可能已吊销整个会话）。
+        await onAuthExpired?.call();
+        return false;
+      }
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final access = (data['access_token'] as String?) ?? '';
+      final refresh = (data['refresh_token'] as String?) ?? '';
+      if (access.isEmpty) {
+        await onAuthExpired?.call();
+        return false;
+      }
+      token = access;
+      if (refresh.isNotEmpty) refreshToken = refresh;
+      await onTokensRefreshed?.call(token, refreshToken);
+      return true;
+    } catch (_) {
+      // 网络异常：不改登录态，等下一次同步重试。
+      return false;
+    }
+  }
 
   Future<String> _authPost(String path, String body) async {
     final uri = Uri.parse('$baseUrl$path');
-    final resp = await _http.post(uri, headers: _authHeader(), body: body);
+    final resp =
+        await _withAuth((h) => _http.post(uri, headers: h, body: body), json: true);
     if (resp.statusCode != 200) {
       throw HttpException(resp.statusCode, resp.body);
     }
@@ -501,8 +631,7 @@ class SyncClient {
 
   Future<String> _authGet(String path) async {
     final uri = Uri.parse('$baseUrl$path');
-    final resp =
-        await _http.get(uri, headers: {'Authorization': 'Bearer $token'});
+    final resp = await _withAuth((h) => _http.get(uri, headers: h));
     if (resp.statusCode != 200) {
       throw HttpException(resp.statusCode, resp.body);
     }
@@ -515,7 +644,7 @@ class SyncClient {
   Future<_ServerNote?> _fetchNoteFromServer(String id) async {
     final uri =
         Uri.parse('$baseUrl/api/v1/sync/pull?since=1970-01-01T00:00:00Z');
-    final resp = await _http.get(uri, headers: _authHeader());
+    final resp = await _withAuth((h) => _http.get(uri, headers: h), json: true);
     if (resp.statusCode != 200) return null;
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     final list = (data['notes'] as List).cast<Map<String, dynamic>>();
@@ -538,15 +667,46 @@ class SyncClient {
   /// 合并结果写为一条本地草稿（独立修订编号），下次 push 以新 base 重发。
   Future<void> _mergeLocalWithServer(
       OutboxItem local, _ServerNote server) async {
-    final localTitle = local.title;
-    final serverTitle = server.title;
+    var localTitle = local.title;
+    var serverTitle = server.title;
+    var localContent = local.content;
+    var serverContent = server.content;
+
+    // M10-T29（§8）：加密笔记的冲突合并必须在**明文层**完成。
+    //  · 已解锁 → 两侧密文各自解密 → 启发式合并 → 由写入接缝重新加密落库；
+    //  · 未解锁 → **不就地合并**：此时两侧都只是密文，合并等于把密文当正文（再被加密一次
+    //    就直接损坏笔记），故保持排队，待解锁端完成合并。
+    final stored = await repository.getStoredNote(local.noteId);
+    if (stored != null && stored.encrypted) {
+      final notebookId = stored.notebookId;
+      if (notebookId == null || !repository.isNotebookUnlocked(notebookId)) {
+        return;
+      }
+      final l = await repository.decryptStoredFields(
+        notebookId: notebookId,
+        noteId: local.noteId,
+        title: localTitle,
+        content: localContent,
+      );
+      final s = await repository.decryptStoredFields(
+        notebookId: notebookId,
+        noteId: local.noteId,
+        title: serverTitle,
+        content: serverContent,
+      );
+      localTitle = l.title;
+      localContent = l.content;
+      serverTitle = s.title;
+      serverContent = s.content;
+    }
+
     final mergedTitle =
         localTitle.length >= serverTitle.length ? localTitle : serverTitle;
 
     // 正文简化合并：两端内容差异的启发式拼接。
     // 若两端差异明显（长度差 >30% 或内容完全不同），则标记冲突，
     // 保存为"服务端内容 + 本地修订"——确保不丢字。
-    final mergedContent = _mergeContent(local.content, server.content);
+    final mergedContent = _mergeContent(localContent, serverContent);
 
     // 写入本地新版本
     final note = await repository.updateNoteContent(

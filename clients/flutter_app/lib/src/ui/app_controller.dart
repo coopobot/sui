@@ -150,10 +150,12 @@ class AppController extends ChangeNotifier {
     String? dataDir,
     NoteWindowManager? windowManager,
     WindowEventHub? windowEventHub,
+    Duration? autoRelockIdle,
   })  : _repository = repository,
         _db = database,
         _dataDir = dataDir,
-        _windowManager = windowManager {
+        _windowManager = windowManager,
+        _autoRelockIdle = autoRelockIdle ?? const Duration(minutes: 15) {
     // 订阅窗口事件枢纽（M8 · 详细设计 §4 / §5.1）。
     //
     // `runMultiApp` 的观察者由 `MultiAppConfig` 先于 `globalScope` 构造，此刻本控制器
@@ -575,10 +577,17 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> createNote({String? notebookId, String title = ''}) async {
-    final note = await _repository.createNote(
-      notebookId: notebookId ?? _selectedNotebookId,
-      title: title,
-    );
+    final target = notebookId ?? _selectedNotebookId;
+    final Note note;
+    try {
+      note = await _repository.createNote(notebookId: target, title: title);
+    } on NotebookDecryptException catch (e) {
+      // M10-T29（§11）：往**未解锁**的加密笔记本新建笔记必须被拒绝，否则就是明文入库。
+      _lockedNotice = '目标笔记本已锁定，无法新建：$e';
+      notifyListeners();
+      return;
+    }
+    _touchUnlockActivity();
     _selectedNoteId = note.id;
     await refreshNotes();
     notifyListeners();
@@ -596,6 +605,16 @@ class AppController extends ChangeNotifier {
     // 与无谓的同步上行；反之，旧笔记原本有内容、被清空后仍应继续保存。
     final current = await _repository.getNote(id);
     if (current == null) return;
+    // M10-T29（§11）：未解锁不得写入——此时 `current` 是**占位**，写下去会把占位当内容
+    // 覆盖密文。最常见的触发场景：编辑过程中被空闲自动回锁。
+    if (current.locked) {
+      _lockedNotice = '加密笔记本已回锁，请重新解锁后再编辑';
+      notifyListeners();
+      return;
+    }
+    // 解锁态编辑算「活动」，续期空闲回锁。
+    _touchUnlockActivity();
+
     final nextTitle = title ?? current.title;
     final nextContent = content ?? current.contentMarkdown;
     final hadContent = current.title.trim().isNotEmpty ||
@@ -800,6 +819,7 @@ class AppController extends ChangeNotifier {
         await _settings.saveSyncConfig(
           baseUrl: normalized.baseUrl,
           token: normalized.token,
+          refreshToken: normalized.refreshToken,
         );
       } catch (error, stackTrace) {
         debugPrint('[AppController] 同步配置写入失败：${normalized.baseUrl} → $error');
@@ -823,7 +843,15 @@ class AppController extends ChangeNotifier {
       baseUrl: normalized.baseUrl,
       deviceId: normalized.deviceId,
       token: normalized.token,
+      refreshToken: normalized.refreshToken,
       blobStore: _blobStore,
+      onTokensRefreshed: _onTokensRefreshed,
+      onAuthExpired: _onAuthExpired,
+      // M10-T27 / FR-50：`http://` 地址自动套**受保护通道**（`https` 走 TLS，不叠加，§9.1）。
+      httpClient: channelAwareClient(
+        baseUrl: normalized.baseUrl,
+        trust: SettingsChannelTrustStore(_settings),
+      ),
     );
     _syncState = SyncState.idle;
     _syncError = null;
@@ -844,7 +872,8 @@ class AppController extends ChangeNotifier {
       debugPrint('[AppController] 同步配置清理失败 → $error');
       debugPrintStack(stackTrace: stackTrace, maxFrames: 8);
     }
-    _config = _config.copyWith(baseUrl: '', token: '');
+    // 刷新令牌一并清掉：断开后不应残留长期凭证（M10/BR-49.4）。
+    _config = _config.copyWith(baseUrl: '', token: '', refreshToken: '');
     await _teardownConnection();
     _syncState = SyncState.unconfigured;
     _syncError = null;
@@ -879,7 +908,7 @@ class AppController extends ChangeNotifier {
 
   /// 探测服务端：版本号 + 是否已完成首启建号（M4/BR-33.4）。
   Future<({String version, bool initialized})> probeServer(String baseUrl) =>
-      _authClient().pingInfo(baseUrl);
+      _authClient(baseUrl).pingInfo(baseUrl);
 
   /// 探测服务端连通性，成功返回服务端版本号，失败抛异常（UI 捕获展示）。
   Future<String> testConnection(String baseUrl) async =>
@@ -892,11 +921,12 @@ class AppController extends ChangeNotifier {
     required String password,
   }) async {
     try {
-      final token = await _authClient()
+      final session = await _authClient(baseUrl)
           .register(baseUrl: baseUrl, username: username, password: password);
       await connect(SyncConfig(
         baseUrl: baseUrl,
-        token: token,
+        token: session.accessToken,
+        refreshToken: session.refreshToken,
         deviceId: _config.deviceId,
       ));
       return null;
@@ -912,11 +942,12 @@ class AppController extends ChangeNotifier {
     required String password,
   }) async {
     try {
-      final token = await _authClient()
+      final session = await _authClient(baseUrl)
           .login(baseUrl: baseUrl, username: username, password: password);
       await connect(SyncConfig(
         baseUrl: baseUrl,
-        token: token,
+        token: session.accessToken,
+        refreshToken: session.refreshToken,
         deviceId: _config.deviceId,
       ));
       return null;
@@ -925,14 +956,19 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// 直接以「地址 + 已有 Token」连接。
+  /// 直接以「地址 + 已有令牌」连接。
+  ///
+  /// [refreshToken] 可选：留空则只能用到访问令牌过期为止（M10 起访问令牌默认 30 分钟），
+  /// 之后须重新登录。
   Future<void> connectWithToken({
     required String baseUrl,
     required String token,
+    String refreshToken = '',
   }) =>
       connect(SyncConfig(
         baseUrl: baseUrl,
         token: token,
+        refreshToken: refreshToken,
         deviceId: _config.deviceId,
       ));
 
@@ -959,7 +995,14 @@ class AppController extends ChangeNotifier {
 
   String _blobRoot() => _dataDir == null ? '' : p.join(_dataDir, 'blobs');
 
-  AuthClient _authClient() => _auth ??= AuthClient();
+  /// 账号客户端（M10-T27 / FR-50）：`http://` 地址自动套**受保护通道**传输接缝
+  /// （握手 + TOFU 指纹核对 + 逐请求 AEAD）；`https` 走 TLS，不叠加。
+  AuthClient _authClient(String baseUrl) => _auth ??= AuthClient(
+        httpClient: channelAwareClient(
+          baseUrl: baseUrl,
+          trust: SettingsChannelTrustStore(_settings),
+        ),
+      );
 
   Future<void> _teardownConnection() async {
     _connGeneration++;
@@ -982,6 +1025,51 @@ class AppController extends ChangeNotifier {
     // 附件缓存不随连接销毁：本地字节与记账都要留着（离线可用）。
   }
 
+  /// 令牌刷新成功（M10/FR-49）：落盘新令牌并**重连 WS**。
+  ///
+  /// 必须重连：WS 子协议里带的是旧访问令牌，不重连则实时通知静默失效（只剩 30s 兜底拉取）。
+  Future<void> _onTokensRefreshed(
+      String accessToken, String refreshToken) async {
+    _config = _config.copyWith(
+      token: accessToken,
+      refreshToken: refreshToken,
+    );
+    try {
+      await _settings.saveSyncConfig(
+        baseUrl: _config.baseUrl,
+        token: accessToken,
+        refreshToken: refreshToken,
+      );
+    } catch (error) {
+      debugPrint('[AppController] 刷新后的令牌写入失败 → $error');
+    }
+    await _reopenWs();
+    notifyListeners();
+  }
+
+  /// 刷新令牌失效（refresh-expired / refresh-revoked）：提示重新登录。
+  ///
+  /// 只置错误态、**不清本地配置与数据**：用户重新登录即可（避免误清丢数据）。
+  Future<void> _onAuthExpired() async {
+    _syncError = '登录已失效，请重新登录';
+    _syncState = SyncState.error;
+    notifyListeners();
+  }
+
+  /// 先关旧连接再用当前令牌重新握手。
+  Future<void> _reopenWs() async {
+    await _wsSub?.cancel();
+    _wsSub = null;
+    final ws = _ws;
+    _ws = null;
+    if (ws != null) {
+      try {
+        await ws.sink.close().timeout(const Duration(milliseconds: 500));
+      } catch (_) {}
+    }
+    _openWs();
+  }
+
   /// 订阅服务端变更广播：收到通知即拉取（多端即时感知）。
   void _openWs() {
     final base = _config.baseUrl;
@@ -989,11 +1077,13 @@ class AppController extends ChangeNotifier {
     final scheme = base.startsWith('https') ? 'wss' : 'ws';
     final host = base.replaceFirst(RegExp('^https?'), scheme);
     try {
-      // M4/BR-35.x：WS 端点须鉴权；token 走查询串（浏览器 WebSocket 握手
-      // 无法自定义 Authorization 头）。
-      final ch = WebSocketChannel.connect(Uri.parse(
-        '$host/api/v1/ws?token=${Uri.encodeQueryComponent(_config.token)}',
-      ));
+      // M10（auth.md §4.5）：WS 鉴权令牌走**子协议**——WebSocket 握手无法自定义请求头，
+      // 子协议是 Web 端唯一可用通道；查询串 ?token= 已移除（会进访问日志与浏览器历史）。
+      // 服务端会回选同一子协议值，故此处字符串必须与 Go 侧 `ws.SubprotocolPrefix` 一致。
+      final ch = WebSocketChannel.connect(
+        Uri.parse('$host/api/v1/ws'),
+        protocols: ['bearer.${_config.token}'],
+      );
       _ws = ch;
       _wsSub = ch.stream.listen(
         (_) => _onRemoteChange(),
@@ -1015,7 +1105,7 @@ class AppController extends ChangeNotifier {
       return switch (e.statusCode) {
         409 => '用户已存在，请改用「登录」',
         403 => '该服务端已初始化（单用户实例），请改用「登录并连接」',
-        401 => '用户名或密码错误',
+        401 => _authErrorText(e.body),
         400 => '请求无效（用户名/密码不能为空）',
         _ => 'HTTP ${e.statusCode}: ${e.body}',
       };
@@ -1029,6 +1119,21 @@ class AppController extends ChangeNotifier {
       return '无法连接服务端，请检查「服务端地址」是否正确、服务是否已启动';
     }
     return msg;
+  }
+
+  /// 401 的文案按服务端**可区分错误码**给出（auth.md §5）：
+  /// 令牌类问题与「用户名 / 密码错误」不是一回事，混为一谈会误导用户反复试密码。
+  String _authErrorText(String body) {
+    if (body.contains('refresh-expired') || body.contains('refresh-revoked')) {
+      return '登录已失效，请重新登录';
+    }
+    if (body.contains('token-expired')) {
+      return '登录状态已过期（正在自动刷新）';
+    }
+    if (body.contains('invalid_token')) {
+      return '登录已失效，请重新登录';
+    }
+    return '用户名或密码错误';
   }
 
   // ---- 修订历史 ----
@@ -1615,10 +1720,106 @@ class AppController extends ChangeNotifier {
     return true;
   }
 
+
+  // ---- 加密笔记本：解锁 / 回锁 / 空闲自动回锁（M10-T29 / FR-51，详细设计 §6.1 / §7） ----
+
+  /// 解锁态的**空闲自动回锁**时限（§7：默认 15 分钟；可注入以便测试）。
+  final Duration _autoRelockIdle;
+
+  Timer? _relockTimer;
+
+  /// 最近一次「因未解锁被拒」的提示（编辑被回锁拦下 / 往锁定笔记本新建被拒）。
+  String? _lockedNotice;
+  String? get lockedNotice => _lockedNotice;
+
+  void clearLockedNotice() {
+    if (_lockedNotice == null) return;
+    _lockedNotice = null;
+    notifyListeners();
+  }
+
+  /// 该笔记本当前是否已解锁（`K_nb` 只在**本端内存**，不持久化，§7）。
+  bool isNotebookUnlocked(String? notebookId) =>
+      notebookId != null && _repository.isNotebookUnlocked(notebookId);
+
+  /// 是否存在任一已解锁的加密笔记本（UI 据此显示「全部锁定」入口）。
+  bool get hasUnlockedNotebook =>
+      _repository.keyStore.unlockedNotebookIds.isNotEmpty;
+
+  /// 当前选中笔记的摘要（未选中 / 不在当前列表时为 null）。
+  NoteSummary? get selectedNoteSummary {
+    final id = _selectedNoteId;
+    if (id == null) return null;
+    for (final s in _notes) {
+      if (s.note.id == id) return s;
+    }
+    return null;
+  }
+
+  /// 选中笔记是否「加密且未解锁」：UI 据此渲染**占位面板**而不是编辑器（§6.3）。
+  bool get selectedNoteLocked => selectedNoteSummary?.note.locked ?? false;
+
+  /// 选中笔记所属笔记本（解锁 / 手动锁定入口用）。
+  String? get selectedNoteNotebookId => selectedNoteSummary?.note.notebookId;
+
+
+  /// 解锁加密笔记本。密码错误返回 `false`（不抛异常，由 UI 提示「锁定密码错误」）。
+  Future<bool> unlockNotebook(String notebookId, String password) async {
+    try {
+      await _repository.unlockNotebook(notebookId, password);
+    } on NotebookUnlockException {
+      return false;
+    } on CryptoMetaFormatException catch (e) {
+      // §11：`crypto_meta` 损坏 → 明确提示，**不**当明文处理。
+      _lockedNotice = '加密笔记本元数据损坏：$e';
+      notifyListeners();
+      return false;
+    }
+    _lockedNotice = null;
+    _touchUnlockActivity();
+    // 解锁后列表要立刻从占位换成明文。
+    await refreshNotes();
+    return true;
+  }
+
+  /// 手动回锁单个笔记本（§7「锁定」按钮）。
+  Future<void> lockNotebook(String notebookId) async {
+    _repository.lockNotebook(notebookId);
+    await _afterLockChange();
+  }
+
+  /// 全部回锁（登出 / 关闭应用 / 会话结束 / 空闲超时）。
+  Future<void> lockAllNotebooks() async {
+    _repository.lockAllNotebooks();
+    await _afterLockChange();
+  }
+
+  Future<void> _afterLockChange() async {
+    if (!hasUnlockedNotebook) {
+      _relockTimer?.cancel();
+      _relockTimer = null;
+    }
+    // 内存里已不持有 `K_nb`，界面必须立刻回到占位（不能继续显示刚才的明文）。
+    await refreshNotes();
+    notifyListeners();
+  }
+
+  /// 续期空闲回锁计时：任何「解锁态操作」都算活动（§7）。
+  void _touchUnlockActivity() {
+    if (!hasUnlockedNotebook) return;
+    _relockTimer?.cancel();
+    _relockTimer = Timer(_autoRelockIdle, () {
+      _relockTimer = null;
+      // 自动回锁与手动回锁走同一路径：清内存密钥 + 界面回占位。
+      unawaited(lockAllNotebooks());
+    });
+  }
+
   @override
   void dispose() {
     _syncDebounce?.cancel();
     _syncTicker?.cancel();
+    _relockTimer?.cancel();
     for (final t in _externalWatchers.values) {
       t.cancel();
     }

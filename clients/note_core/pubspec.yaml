@@ -12,6 +12,10 @@ dependencies:
   path: ^1.9.0
   collection: ^1.18.0
   crypto: ^3.0.0
+  # M10-T29（加密笔记本）/ M10-T27（受保护通道）用：Argon2id、HKDF-SHA256、AES-256-GCM、
+  # ChaCha20-Poly1305、X25519。经用户批准引入（候选比对见
+  # technology/spikes/003-加密跨端互操作可行性.md）；**Spike-003 通过前不进入加密编码**。
+  cryptography: ^2.9.0
   uuid: ^4.0.0
   http: ^1.2.0
 

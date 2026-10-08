@@ -1,5 +1,7 @@
 import 'package:drift/drift.dart';
 
+import '../crypto/notebook_crypto.dart';
+import '../crypto/notebook_key_store.dart';
 import '../db/app_database.dart';
 import '../models/attachment.dart';
 import '../models/note.dart';
@@ -22,7 +24,174 @@ class NoteRepository {
   final AppDatabase db;
   final String deviceId;
 
-  NoteRepository(this.db, {this.deviceId = ''});
+  /// 解锁态的 `K_nb` **内存映射**（M10-T29 / FR-51）：不落库、不上行，回锁即删。
+  final NotebookKeyStore keyStore;
+
+  /// 未解锁时的占位标题（§6.3）。
+  static const lockedPlaceholderTitle = '🔒 加密笔记';
+
+  /// 密文损坏 / 篡改时的占位标题（§11：既**不**当明文，也不让用户误以为是密码错）。
+  static const damagedPlaceholderTitle = '⚠️ 加密笔记无法解密';
+
+  NoteRepository(this.db, {this.deviceId = '', NotebookKeyStore? keyStore})
+      : keyStore = keyStore ?? NotebookKeyStore();
+
+  // ---- 加密笔记本：解锁 / 回锁 / 展示形态（M10-T29 / FR-51） ----
+
+  /// 解锁加密笔记本：读 `crypto_meta` → 派生 `K_nb` → 驻留内存。
+  ///
+  /// 密码错误抛 [NotebookUnlockException]；`crypto_meta` 缺失 / 损坏抛
+  /// [CryptoMetaFormatException]（§11：**不**静默当明文）。
+  Future<void> unlockNotebook(String notebookId, String password) async {
+    final nb = await getNotebook(notebookId);
+    if (nb == null) {
+      throw StateError('笔记本不存在：$notebookId');
+    }
+    if (!nb.encrypted) {
+      throw StateError('该笔记本不是加密笔记本：$notebookId');
+    }
+    final meta = CryptoMeta.fromJson(nb.cryptoMeta);
+    keyStore.unlock(
+      notebookId,
+      await NotebookCrypto.unlock(password: password, meta: meta),
+    );
+  }
+
+  /// 回锁单个笔记本（手动「锁定」按钮 / 切换笔记本时的可选立即回锁）。
+  bool lockNotebook(String notebookId) => keyStore.lock(notebookId);
+
+  /// 全部回锁（登出 / 关闭应用 / 会话结束）。
+  void lockAllNotebooks() => keyStore.lockAll();
+
+  /// 该笔记本当前是否已解锁。
+  bool isNotebookUnlocked(String notebookId) => keyStore.isUnlocked(notebookId);
+
+  /// 把**存储形态**的笔记转成**展示形态**。
+  ///
+  /// * 未加密 → 原样返回；
+  /// * 已加密且已解锁 → 解密为明文（编辑器 / 合并逻辑仍以 Markdown 明文为正本，§6.2）；
+  /// * 已加密但**未解锁** → 返回占位并置 [Note.locked]；
+  /// * 密文**损坏 / 被篡改**（含 AAD 绑定不符）→ 同样占位（用 [damagedPlaceholderTitle] 区分）。
+  ///
+  /// 任何分支都**不会**把密文当作明文交给上层。
+  Future<Note> toDisplayNote(Note stored) async {
+    if (!stored.encrypted) return stored;
+    final key = keyStore.keyFor(stored.notebookId);
+    if (key == null) return _placeholderNote(stored);
+    final cipher = NotebookFieldCipher(key);
+    final nbId = stored.notebookId ?? '';
+    try {
+      return stored.copyWith(
+        title: await _decryptField(
+            cipher, nbId, stored.id, NotebookField.title, stored.title),
+        contentMarkdown: await _decryptField(
+            cipher, nbId, stored.id, NotebookField.content, stored.contentMarkdown),
+      );
+    } on NotebookDecryptException {
+      return _placeholderNote(stored, damaged: true);
+    }
+  }
+
+  static Future<String> _decryptField(NotebookFieldCipher cipher, String notebookId,
+      String noteId, NotebookField field, String stored) async {
+    if (stored.isEmpty) return '';
+    return cipher.decrypt(
+        notebookId: notebookId, noteId: noteId, field: field, envelope: stored);
+  }
+
+  Note _placeholderNote(Note stored, {bool damaged = false}) => stored.copyWith(
+        title: damaged ? damagedPlaceholderTitle : lockedPlaceholderTitle,
+        contentMarkdown: '',
+        locked: true,
+      );
+
+  /// 本地写入时把**明文**字段转成**存储形态**（笔记本加密且已解锁 → 密文；否则原样）。
+  ///
+  /// 未解锁的加密笔记本**拒绝写入**（§11）：否则会把占位文本当成内容覆盖掉密文。
+  /// 空串保持空串（不产出「空明文的封装」）。
+  Future<({String title, String content})> _toStorage({
+    required String? notebookId,
+    required String noteId,
+    required String title,
+    required String content,
+    required bool encrypted,
+  }) async {
+    if (!encrypted) return (title: title, content: content);
+    final key = keyStore.keyFor(notebookId);
+    if (key == null) {
+      throw const NotebookDecryptException('加密笔记本未解锁，拒绝写入（会破坏端到端加密）');
+    }
+    final cipher = NotebookFieldCipher(key);
+    final nbId = notebookId ?? '';
+    return (
+      title: title.isEmpty
+          ? ''
+          : await cipher.encrypt(
+              notebookId: nbId,
+              noteId: noteId,
+              field: NotebookField.title,
+              plaintext: title),
+      content: content.isEmpty
+          ? ''
+          : await cipher.encrypt(
+              notebookId: nbId,
+              noteId: noteId,
+              field: NotebookField.content,
+              plaintext: content),
+    );
+  }
+
+  /// 读取**存储形态**的笔记（不经展示接缝）——仅供同步层使用。
+  ///
+  /// 同步层必须拿密文（净荷与库内都是存储形态）；若误用 [getNote]（解锁态返回明文），
+  /// 就会把**明文推上网络**——这正是「Outbox 存存储形态」这条口径要防的事。
+  Future<Note?> getStoredNote(String id) async {
+    final row = await (db.select(db.notes)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    return row?.toModel();
+  }
+
+  /// 把**存储形态**的标题 / 正文解密为明文——供同步层在**明文层**合并冲突（§8）。
+  ///
+  /// 未解锁时抛 [NotebookDecryptException]：调用方必须据此**放弃就地合并**并保持排队，
+  /// 否则会把密文当正文合并、再被写入接缝加密一次（直接损坏笔记）。
+  Future<({String title, String content})> decryptStoredFields({
+    required String notebookId,
+    required String noteId,
+    required String title,
+    required String content,
+  }) async {
+    final key = keyStore.keyFor(notebookId);
+    if (key == null) {
+      throw const NotebookDecryptException('加密笔记本未解锁，无法在明文层合并');
+    }
+    final cipher = NotebookFieldCipher(key);
+    return (
+      title: title.isEmpty
+          ? ''
+          : await cipher.decrypt(
+              notebookId: notebookId,
+              noteId: noteId,
+              field: NotebookField.title,
+              envelope: title),
+      content: content.isEmpty
+          ? ''
+          : await cipher.decrypt(
+              notebookId: notebookId,
+              noteId: noteId,
+              field: NotebookField.content,
+              envelope: content),
+    );
+  }
+
+  /// 加密行由 Dart 侧对**解密后明文**再判定；明文行的命中已由 SQL 保证。
+  static bool _matchesSearch(Note n, String? search) {
+    if (search == null || search.isEmpty) return true;
+    if (!n.encrypted) return true;
+    final s = search.toLowerCase();
+    return n.title.toLowerCase().contains(s) ||
+        n.contentMarkdown.toLowerCase().contains(s);
+  }
 
   /// 下一条本地修订编号：`max(现存 revision.version) + 1`。
   ///
@@ -50,6 +219,8 @@ class NoteRepository {
     required String name,
     int? sortOrder,
     DateTime? now,
+    bool encrypted = false,
+    String cryptoMeta = '',
   }) async {
     final t = now ?? DateTime.now();
     final nid = id ?? newId();
@@ -61,6 +232,8 @@ class NoteRepository {
           name: name,
           sortOrder: Value(order),
           version: const Value(1),
+          encrypted: Value(encrypted),
+          cryptoMeta: Value(cryptoMeta),
           createdAt: t,
           updatedAt: t,
         ));
@@ -251,10 +424,25 @@ class NoteRepository {
     DateTime? now,
     String? sourceDevice,
     int? version,
+    bool encrypted = false,
+    bool fromWire = false,
   }) async {
     final t = now ?? DateTime.now();
     final nid = id ?? newId();
     final src = sourceDevice ?? deviceId;
+    // 接缝（§6.2）：**本地**入口由所属笔记本派生加密态，输入是明文；**线上**入口
+    // （pull 下行 / 剪藏，`fromWire: true`）输入已是存储形态（密文即是密文），原样落库。
+    final target = notebookId == null ? null : await getNotebook(notebookId);
+    final isEncrypted = fromWire ? encrypted : (target?.encrypted ?? false);
+    final stored = fromWire
+        ? (title: title, content: contentMarkdown)
+        : await _toStorage(
+            notebookId: notebookId,
+            noteId: nid,
+            title: title,
+            content: contentMarkdown,
+            encrypted: isEncrypted,
+          );
     // Notes.version 是服务端基线镜像：本地新建（尚未同步）基线为 0；
     // 由 pull 落库的远端笔记以服务端版本为基线。首条修订独立编号：
     // 新建时为 1，远端落库时沿用服务端版本号（sync-protocol §3）。
@@ -264,11 +452,12 @@ class NoteRepository {
       await db.into(db.notes).insert(NotesCompanion.insert(
             id: nid,
             notebookId: Value(notebookId),
-            title: Value(title),
-            contentMarkdown: Value(contentMarkdown),
+            title: Value(stored.title),
+            contentMarkdown: Value(stored.content),
             pinned: Value(pinned),
             archived: Value(archived),
             version: Value(baseVersion),
+            encrypted: Value(isEncrypted),
             createdAt: t,
             updatedAt: t,
             sourceDevice: Value(src),
@@ -277,12 +466,13 @@ class NoteRepository {
         await _replaceTags(nid, tags);
       }
       // 首条修订：pull 落库时 server_version = 服务端版本；本地新建为 null（§9.4）
+      // 修订与笔记**同形态**：加密笔记本内的历史同样存密文（§6.2）。
       await db.into(db.revisions).insert(RevisionsCompanion.insert(
             id: newId(),
             noteId: nid,
             version: firstRevision,
-            title: Value(title),
-            contentMarkdown: contentMarkdown,
+            title: Value(stored.title),
+            contentMarkdown: stored.content,
             sourceDevice: Value(src),
             serverVersion: version != null ? Value(version) : const Value.absent(),
             createdAt: t,
@@ -296,7 +486,11 @@ class NoteRepository {
   Future<Note?> getNote(String id) async {
     final row = await (db.select(db.notes)..where((t) => t.id.equals(id)))
         .getSingleOrNull();
-    return row?.toModel();
+    if (row == null) return null;
+    // 接缝：存储形态 → 展示形态（解锁则解密；未解锁 / 损坏则占位）。所有返回笔记的
+    // API（createNote / updateNoteContent / moveNoteToNotebook / restoreNote /
+    // restoreRevision）最终都经过这里，故接缝只需一处。
+    return toDisplayNote(row.toModel());
   }
 
   Future<NoteSummary?> getNoteSummary(String id) async {
@@ -328,9 +522,22 @@ class NoteRepository {
     final t = now ?? DateTime.now();
     final note = await getNote(id);
     if (note == null) throw StateError('note not found: $id');
+    if (note.locked) {
+      // §11：未解锁不得写入——此时的 note 是**占位**，写下去等于把占位当内容覆盖密文。
+      throw const NotebookDecryptException('加密笔记本未解锁，拒绝写入');
+    }
 
     final nextTitle = title ?? note.title;
     final nextContent = contentMarkdown ?? note.contentMarkdown;
+    // 接缝（§6.2）：本地编辑入口收到的是**明文**（编辑器以 Markdown 为正本），
+    // 落库前加密为存储形态。
+    final stored = await _toStorage(
+      notebookId: note.notebookId,
+      noteId: id,
+      title: nextTitle,
+      content: nextContent,
+      encrypted: note.encrypted,
+    );
     // 本地修订编号取 max(现存 revision.version) + 1，与「服务端基线镜像」
     // （Notes.version）解耦；本地编辑不得推进 Notes.version（sync-protocol §3）。
     final nextVersion = await _nextRevisionVersion(id);
@@ -342,16 +549,16 @@ class NoteRepository {
               await tagsOfNote(id).then((v) => v.map((e) => e.name).toList()));
       await (db.update(db.notes)..where((n) => n.id.equals(id)))
           .write(NotesCompanion(
-        title: Value(nextTitle),
-        contentMarkdown: Value(nextContent),
+        title: Value(stored.title),
+        contentMarkdown: Value(stored.content),
         updatedAt: Value(t),
       ));
       await db.into(db.revisions).insert(RevisionsCompanion.insert(
             id: newId(),
             noteId: id,
             version: nextVersion,
-            title: Value(nextTitle),
-            contentMarkdown: nextContent,
+            title: Value(stored.title),
+            contentMarkdown: stored.content,
             sourceDevice: Value(deviceId),
             // 本地编辑产生的草稿：server_version = null（§9.4）
             serverVersion: const Value.absent(),
@@ -378,16 +585,18 @@ class NoteRepository {
     }
     if (search != null && search.isNotEmpty) {
       final like = '%${search.toLowerCase()}%';
+      // 加密行的密文不可能匹配明文关键词，故整体取出，稍后对**解密后明文**过滤（§9.2）。
       q.where((n) =>
-          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
     }
     q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
 
-    final rows = await q.get();
-    final notes = rows.map((r) => r.toModel()).toList();
-
     final summaries = <NoteSummary>[];
-    for (final n in notes) {
+    for (final r in await q.get()) {
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
       summaries.add(NoteSummary(
           note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
@@ -452,15 +661,18 @@ class NoteRepository {
     }
     if (search != null && search.isNotEmpty) {
       final like = '%${search.toLowerCase()}%';
+      // 与 listNotes 同口径：加密行整体取出，Dart 侧对**解密后明文**过滤（§9.2）。
       q.where((n) =>
-          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
     }
     q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
 
-    final rows = await q.get();
-    final notes = rows.map((r) => r.toModel()).toList();
     final summaries = <NoteSummary>[];
-    for (final n in notes) {
+    for (final r in await q.get()) {
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
       summaries.add(NoteSummary(
           note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
@@ -566,13 +778,92 @@ class NoteRepository {
   /// 不写 revision：归属变更不属于内容修订，避免污染版本链。
   /// 不改 `version`：它是服务端基线镜像，本地编辑不得推进（sync-protocol §3）。
   Future<Note> moveNoteToNotebook(String id, String? notebookId) async {
-    final note = await getNote(id);
-    if (note == null) throw StateError('note not found: $id');
-    await (db.update(db.notes)..where((n) => n.id.equals(id)))
-        .write(NotesCompanion(
-      notebookId: Value(notebookId),
-      updatedAt: Value(DateTime.now()),
-    ));
+    final stored = await getStoredNote(id);
+    if (stored == null) throw StateError('note not found: $id');
+
+    Future<Note> reparentOnly() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        notebookId: Value(notebookId),
+        updatedAt: Value(DateTime.now()),
+      ));
+      return (await getNote(id))!;
+    }
+
+    // 同本移动（幂等）：形态不变，直接返回——**不**因为未解锁而拒绝，否则 UI 的无害重排会报错。
+    if (stored.notebookId == notebookId) return reparentOnly();
+
+    final target = notebookId == null ? null : await getNotebook(notebookId);
+    final targetEncrypted = target?.encrypted ?? false;
+    final sourceEncrypted = stored.encrypted;
+
+    // 普通 → 普通：未跨加密边界，形态不变。
+    if (!sourceEncrypted && !targetEncrypted) return reparentOnly();
+
+    // 跨加密边界（或加密换本）：**形态必须就地转换**。
+    //  · 移入加密笔记本：明文 → 目标 `K_nb` 加密（AAD 绑定的是**目标** notebookId）；
+    //  · 移出到普通笔记本：密文 → 解密为明文；
+    //  · 加密 → 加密换本：旧密钥解密 → 目标密钥重新加密（密钥与 AAD 都变了）。
+    // 任一侧缺解锁态都会由下面两个调用抛出 [NotebookDecryptException]：既不能把明文留在
+    // 加密笔记本内，也不能把密文留在普通笔记本里（§6.2）。
+    final srcPlain = sourceEncrypted
+        ? await decryptStoredFields(
+            notebookId: stored.notebookId ?? '',
+            noteId: id,
+            title: stored.title,
+            content: stored.contentMarkdown,
+          )
+        : (title: stored.title, content: stored.contentMarkdown);
+    final dest = await _toStorage(
+      notebookId: notebookId,
+      noteId: id,
+      title: srcPlain.title,
+      content: srcPlain.content,
+      encrypted: targetEncrypted,
+    );
+
+    // 既有修订一并转换：否则加密笔记本里会留下**明文历史**（反之亦然）。
+    // 先全部算好再进事务，避免事务内做异步密码学运算。
+    final revRows =
+        await (db.select(db.revisions)..where((r) => r.noteId.equals(id))).get();
+    final converted = <({String id, String title, String content})>[];
+    for (final r in revRows) {
+      final plain = sourceEncrypted
+          ? await decryptStoredFields(
+              notebookId: stored.notebookId ?? '',
+              noteId: id,
+              title: r.title,
+              content: r.contentMarkdown,
+            )
+          : (title: r.title, content: r.contentMarkdown);
+      final conv = await _toStorage(
+        notebookId: notebookId,
+        noteId: id,
+        title: plain.title,
+        content: plain.content,
+        encrypted: targetEncrypted,
+      );
+      converted.add((id: r.id, title: conv.title, content: conv.content));
+    }
+
+    final t = DateTime.now();
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        notebookId: Value(notebookId),
+        title: Value(dest.title),
+        contentMarkdown: Value(dest.content),
+        encrypted: Value(targetEncrypted),
+        updatedAt: Value(t),
+      ));
+      for (final c in converted) {
+        await (db.update(db.revisions)..where((x) => x.id.equals(c.id)))
+            .write(RevisionsCompanion(
+          title: Value(c.title),
+          contentMarkdown: Value(c.content),
+        ));
+      }
+    });
     return (await getNote(id))!;
   }
 
@@ -609,12 +900,15 @@ class NoteRepository {
     if (search != null && search.isNotEmpty) {
       final like = '%${search.toLowerCase()}%';
       q.where((n) =>
-          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
     }
     q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
     final summaries = <NoteSummary>[];
     for (final r in await q.get()) {
-      final n = r.toModel();
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
       summaries.add(NoteSummary(
           note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
@@ -628,12 +922,15 @@ class NoteRepository {
     if (search != null && search.isNotEmpty) {
       final like = '%${search.toLowerCase()}%';
       q.where((n) =>
-          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
     }
     q.orderBy([(n) => OrderingTerm.desc(n.deletedAt)]);
     final summaries = <NoteSummary>[];
     for (final r in await q.get()) {
-      final n = r.toModel();
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
       summaries.add(NoteSummary(
           note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
@@ -991,6 +1288,8 @@ class NoteRepository {
     bool isDeleted = false,
     int version = 0,
     DateTime? updatedAt,
+    bool encrypted = false,
+    String cryptoMeta = '',
   }) async {
     final t = updatedAt ?? DateTime.now();
     final existing = await getNotebook(id);
@@ -1003,6 +1302,8 @@ class NoteRepository {
             sortOrder: Value(sortOrder),
             isDeleted: Value(isDeleted),
             version: Value(version),
+            encrypted: Value(encrypted),
+            cryptoMeta: Value(cryptoMeta),
             createdAt: t,
             updatedAt: t,
           ));
@@ -1014,9 +1315,20 @@ class NoteRepository {
         sortOrder: Value(sortOrder),
         isDeleted: Value(isDeleted),
         version: Value(version),
+        encrypted: Value(encrypted),
+        cryptoMeta: Value(cryptoMeta),
         updatedAt: Value(t),
       ));
     }
+  }
+
+  /// 应用远端的「加密态」镜像（M10-T29）：笔记归属的笔记本是否为加密笔记本。
+  ///
+  /// 与正文 / 标题分开落库：未解锁端也要能正确显示占位，故该标记必须**随 pull 立即生效**，
+  /// 不受「有未提交草稿时不覆盖正文」的约束。
+  Future<void> applyRemoteEncrypted(String noteId, bool encrypted) async {
+    await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
+        .write(NotesCompanion(encrypted: Value(encrypted)));
   }
 
   /// Upsert 远端标签（pull 下行）。
@@ -1091,6 +1403,8 @@ extension _NotebookRowEx on NotebookRow {
         createdAt: createdAt,
         updatedAt: updatedAt,
         version: version,
+        encrypted: encrypted,
+        cryptoMeta: cryptoMeta,
       );
 }
 
@@ -1120,6 +1434,7 @@ extension _NoteRowEx on NoteRow {
         deletedAt: deletedAt,
         version: version,
         sourceDevice: sourceDevice,
+        encrypted: encrypted,
       );
 }
 

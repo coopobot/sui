@@ -2,11 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"strconv"
-	"strings"
+	"os"
 	"time"
 
+	"sui/note-server/internal/blob"
 	"sui/note-server/internal/sync"
 )
 
@@ -34,12 +35,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "already-initialized"})
 		return
 	}
-	token, err := s.store.CreateUser(req.Username, req.Password)
+	pair, err := s.store.CreateUser(req.Username, req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "user exists"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token, "username": req.Username})
+	writeJSON(w, http.StatusOK, tokenResponse(pair, req.Username))
 }
 
 // handleLogin 用户登录，返回新 token（简化：密码明文比对）。
@@ -57,38 +58,36 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 校验 PBKDF2 密码哈希（M4/BR-36.1），成功则签发新会话 token。
-	token, err := s.store.LoginUser(req.Username, req.Password)
+	pair, err := s.store.LoginUser(req.Username, req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid credentials"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": token, "username": req.Username})
-}
-
-// handleLogout 吊销当前请求所用 Token 所属会话（不影响该用户其他会话）。
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
-		return
-	}
-	if err := s.store.RevokeToken(token); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "logout failed"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, tokenResponse(pair, req.Username))
 }
 
 // handlePush 处理客户端批量推送（逐条调用 sync.Push，汇总结果）。
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	// M10：大请求体路由单独延长**读**期限（§8）；须在读 body 之前调用。
+	extendReadDeadline(w)
 	var req struct {
 		ClientID  string              `json:"clientId"`
 		Items     []sync.PushItem     `json:"items"`
 		Notebooks []sync.NotebookItem `json:"notebooks"`
 		Tags      []sync.TagItem      `json:"tags"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// M10-T25：整包读入前先限长（超限 413），并限制单次条目数。
+	body := http.MaxBytesReader(w, r.Body, maxBodyBytes())
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if isTooLarge(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "payload too large"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad request"})
+		return
+	}
+	if len(req.Items) > maxPushItems() || len(req.Notebooks) > maxPushItems() || len(req.Tags) > maxPushItems() {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "too many items"})
 		return
 	}
 	type itemResult struct {
@@ -101,7 +100,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	for _, it := range req.Items {
 		resp, err := s.sync.Push(it)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		results = append(results, itemResult{
@@ -113,7 +112,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	for _, it := range req.Notebooks {
 		resp, err := s.sync.PushNotebook(it)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		notebookResults = append(notebookResults, itemResult{
@@ -125,7 +124,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	for _, it := range req.Tags {
 		resp, err := s.sync.PushTag(it)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		tagResults = append(tagResults, itemResult{
@@ -153,7 +152,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.sync.Pull(since)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	type attOut struct {
@@ -175,6 +174,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		Version      int      `json:"version"`
 		IsDeleted    bool     `json:"isDeleted"`
 		Archived     bool     `json:"archived"`
+		Encrypted    bool     `json:"encrypted"`
 		SourceDevice string   `json:"sourceDevice"`
 		UpdatedAt    string   `json:"updatedAt"`
 		Attachments  []attOut `json:"attachments,omitempty"`
@@ -187,6 +187,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		item := out{
 			ID: rw.ID, Title: rw.Title, Content: rw.ContentMarkdown,
 			Version: rw.Version, IsDeleted: rw.IsDeleted, Archived: rw.Archived,
+			Encrypted:    rw.Encrypted,
 			SourceDevice: rw.SourceDevice,
 			NotebookID:   rw.NotebookID,
 			UpdatedAt:    rw.UpdatedAt.UTC().Format(time.RFC3339),
@@ -212,6 +213,8 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		SortOrder    int    `json:"sortOrder"`
 		Version      int    `json:"version"`
 		IsDeleted    bool   `json:"isDeleted"`
+		Encrypted    bool   `json:"encrypted"`
+		CryptoMeta   string `json:"cryptoMeta,omitempty"`
 		SourceDevice string `json:"sourceDevice"`
 		UpdatedAt    string `json:"updatedAt"`
 	}
@@ -225,7 +228,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 	nbRows, err := s.sync.PullNotebooks(since)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	notebooks := make([]nbOut, 0, len(nbRows))
@@ -233,12 +236,13 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		notebooks = append(notebooks, nbOut{
 			ID: nb.ID, ParentID: nb.ParentID, Name: nb.Name, SortOrder: nb.SortOrder,
 			Version: nb.Version, IsDeleted: nb.IsDeleted, SourceDevice: nb.SourceDevice,
+			Encrypted: nb.Encrypted, CryptoMeta: nb.CryptoMeta,
 			UpdatedAt: nb.UpdatedAt.UTC().Format(time.RFC3339),
 		})
 	}
 	tagRows, err := s.sync.PullTags(since)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	tags := make([]tagOut, 0, len(tagRows))
@@ -256,11 +260,17 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBlobHead 检查 hash 是否存在（内容寻址去重）。
+//
+// M10-T21：hash 先过白名单（非法 → 400，且不查库、不触盘）。
 func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
 	hash := r.PathValue("hash")
+	if !validSHA256(hash) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
+		return
+	}
 	exists, err := s.store.BlobExists(hash)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	if exists {
@@ -272,23 +282,57 @@ func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
 
 // handleBlobPut 上传 hash 对应的字节；已存在则幂等返回。
 //
+// M10-T21/T22（FR-52 / BR-52.2/52.3）：
+//   - hash 先过白名单（非法 → 400，不触盘）；
+//   - 请求体经 http.MaxBytesReader 限长（超限 → 413）；
+//   - 字节摘要由存储层（blob.Local.Put）边写边校验，不一致 → 400 且最终路径不留文件；
+//   - blobs 行以**磁盘实际字节数**记账，不再采信 Content-Length（可伪造成 -1）。
+//
 // 只负责字节与登记，不调整引用计数——refcount 由附件映射（sync/push 携带的
 // attachments）驱动，见 store.SyncAttachments。
 func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
+	// M10：大请求体路由单独延长**读**期限（§8）；须在读 body 之前调用。
+	extendReadDeadline(w)
 	hash := r.PathValue("hash")
-	exists, err := s.store.BlobExists(hash)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+	if !validSHA256(hash) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
 		return
 	}
+	exists, err := s.store.BlobExists(hash)
+	if err != nil {
+		writeInternalError(w, r, err)
+		return
+	}
+	size := int64(0)
 	if !exists {
-		if _, err := s.blobs.Put(hash, r.Body); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		body := http.MaxBytesReader(w, r.Body, maxBlobBytes())
+		n, err := s.blobs.Put(hash, body)
+		switch {
+		case err == nil:
+			size = n
+		case errors.Is(err, blob.ErrDigestMismatch):
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid payload"})
+			return
+		case isTooLarge(err):
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "payload too large"})
+			return
+		case errors.Is(err, blob.ErrOutsideRoot):
+			// 入口白名单已挡在前面；这里命中说明调用方绕过了校验（不泄露路径）。
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
+			return
+		default:
+			writeInternalError(w, r, err)
 			return
 		}
 	}
-	if _, err := s.store.EnsureBlob(hash, int(r.ContentLength)); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+	// 记账口径：以磁盘实际大小为权威（幂等短路时 Put 返回 0，不能据此记 0）。
+	if p, perr := s.blobs.Path(hash); perr == nil {
+		if fi, serr := os.Stat(p); serr == nil {
+			size = fi.Size()
+		}
+	}
+	if _, err := s.store.EnsureBlob(hash, int(size)); err != nil {
+		writeInternalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -296,10 +340,16 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 
 // handleBlobGet 下载 hash 对应的 blob 字节。
 func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
+	// M10：流式下载路由单独延长**写**期限（§8）。
+	extendWriteDeadline(w)
 	hash := r.PathValue("hash")
+	if !validSHA256(hash) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
+		return
+	}
 	exists, err := s.store.BlobExists(hash)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	if !exists {
@@ -308,12 +358,15 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 	}
 	reader, err := s.blobs.Open(hash)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	defer reader.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", "attachment; filename="+hash)
+	// M10-T24：附件内容不该被中间缓存留存。
+	w.Header().Set("Cache-Control", "private")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, hash, time.Time{}, reader)
 }
 
@@ -322,9 +375,13 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 // handleListRevisions 返回指定笔记的修订列表。
 func (s *Server) handleListRevisions(w http.ResponseWriter, r *http.Request) {
 	noteID := r.PathValue("id")
+	if !validID(noteID) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
+		return
+	}
 	revs, err := s.store.ListRevisions(noteID, 50)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	type revOut struct {
@@ -352,15 +409,18 @@ func (s *Server) handleListRevisions(w http.ResponseWriter, r *http.Request) {
 // handleGetRevision 返回指定版本的修订详情。
 func (s *Server) handleGetRevision(w http.ResponseWriter, r *http.Request) {
 	noteID := r.PathValue("id")
-	verStr := r.PathValue("version")
-	version, err := strconv.Atoi(verStr)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid version"})
+	if !validID(noteID) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
+		return
+	}
+	version, ok := validVersion(r.PathValue("version"))
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
 		return
 	}
 	rev, err := s.store.GetRevision(noteID, version)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	if rev == nil {

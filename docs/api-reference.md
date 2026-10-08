@@ -24,6 +24,8 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 
 > 笔记正本 `content`（`content_markdown`）为**原样存储**的 Markdown，服务端不做语义解析：客户端编辑器新增的 GFM 任务项（`- [ ]` / `- [x]`）与高亮（`==文字==`）均作为普通文本随笔记 push/pull 逐字节往返，语义只由客户端呈现层解释。
 
+| GET | `/api/v1/crypto/handshake` | 否 | 受保护通道握手：返回服务端长期 X25519 公钥与指纹（M10 / FR-50） |
+
 ## 健康检查与心跳
 
 ```bash
@@ -47,6 +49,32 @@ curl -X POST http://localhost:8080/api/v1/register \
 ```
 
 `login` 与 `register` 请求 / 响应结构对称，用于重新获取 Token。
+
+## 受保护通道（M10 / FR-50）
+
+`http://` 地址下客户端可启用应用层加密（`https://` 走 TLS，不叠加）。逐请求协商、无服务端状态：
+
+```
+GET /api/v1/crypto/handshake            # 公开；返回 serverPub + fingerprint（TOFU 信任根）
+→ {"ok":true,"alg":"x25519","serverPub":"<base64 32B>","fingerprint":"AB12-CD34-EF56-7890"}
+```
+
+启用后，**每个**请求带三个头，正文为密文；响应同样加密：
+
+| 请求头 | 含义 |
+|--------|------|
+| `X-Sui-Enc: 1` | 声明本请求正文为通道密文 |
+| `X-Sui-Eph` | 客户端本次请求的临时 X25519 公钥（base64 32B） |
+| `X-Sui-Req-Id` | 本次请求的随机 id（base64 16B），用于重放拒绝 |
+
+* `K_chan = HKDF-SHA256(ECDH(客户端临时私钥, 服务端长期公钥), salt=空, info="sui-channel-v1")`
+* 正文 = `base64(ver(1) | alg(1) | nonce(12) | ct | tag(16))`；`alg=0x01` 为 AES-256-GCM
+  （`0x02` ChaCha20-Poly1305 仅保留标识位，服务端不实现）
+* `AAD = utf8(method + "\n" + path + "\n" + reqId)`（请求与响应用同一 AAD）
+* 失败：`400 {"error":"invalid-channel"}`（不区分原因）；请求 id 重复：`409 {"error":"replayed"}`；
+  未启用通道的服务端握手返回 `503 {"error":"channel-disabled"}`
+* **明文请求仍然接受**（通道是加成而非强制）；WS 升级头不在通道内（已知边界，见
+  [architecture.md §8.3](architecture.md#83-未实现的设计项)）
 
 ## push 请求体
 

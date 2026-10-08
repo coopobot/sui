@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"os"
 	"strings"
 	"time"
 
@@ -25,7 +26,15 @@ type Store struct {
 
 // Open 打开（必要时创建）服务端数据库。
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// 忙等待：驱动默认 busy_timeout=0（并发写立即 SQLITE_BUSY）。下面的单连接设置
+	// 只保证「一个连接」，并不让并发的写排队等待——等一会儿再失败才是正确语义。
+	// 放在 DSN 上而不是 Open 后 Exec：连接被重建时同样生效。
+	dsn := path
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	db, err := sql.Open("sqlite", dsn+sep+"_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -39,6 +48,12 @@ func Open(path string) (*Store, error) {
 }
 
 func (s *Store) migrate() error {
+	// M10/ADR-014 决策 8：sessions 由「单一永久 token」演进为「短时访问令牌 + 可撤销刷新令牌」。
+	// 老库（存在 token 列 / 缺 access_token_hash 列）整表重建 = 清空既有会话，用户需重新登录一次；
+	// 重建后不再满足判定条件，故重启不会再次清空（幂等）。必须在建表语句之前执行。
+	if err := s.migrateSessions(); err != nil {
+		return err
+	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
@@ -47,10 +62,18 @@ func (s *Store) migrate() error {
 			password_salt TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
 		)`,
+		// M10/ADR-014：短时访问令牌 + 可撤销刷新令牌（双令牌，只存哈希）。
 		`CREATE TABLE IF NOT EXISTS sessions (
-			token TEXT PRIMARY KEY,
+			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL,
-			created_at TEXT NOT NULL
+			access_token_hash TEXT NOT NULL DEFAULT '',
+			refresh_token_hash TEXT NOT NULL DEFAULT '',
+			prev_refresh_token_hash TEXT NOT NULL DEFAULT '',
+			access_expires_at TEXT NOT NULL DEFAULT '',
+			refresh_expires_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			last_used_at TEXT NOT NULL DEFAULT '',
+			revoked_at TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE TABLE IF NOT EXISTS notes (
 			id TEXT PRIMARY KEY,
@@ -62,6 +85,7 @@ func (s *Store) migrate() error {
 			archived INTEGER NOT NULL DEFAULT 0,  -- 归档状态（FR-25）
 			source_device TEXT NOT NULL DEFAULT '', -- 最近一次修改的来源设备
 			source_url TEXT, -- 剪藏专用幂等键（普通笔记为 NULL，M4/BR-34.3）
+			encrypted INTEGER NOT NULL DEFAULT 0, -- M10-T29：所属笔记本是否为加密笔记本（镜像，FR-51）
 			updated_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS revisions (
@@ -102,6 +126,9 @@ func (s *Store) migrate() error {
 			is_deleted INTEGER NOT NULL DEFAULT 0,
 			version INTEGER NOT NULL DEFAULT 0,
 			source_device TEXT NOT NULL DEFAULT '',
+			-- M10-T29（FR-51）：加密笔记本标记 + **非敏感**加密元数据（JSON；不含任何密钥）。
+			encrypted INTEGER NOT NULL DEFAULT 0,
+			crypto_meta TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -129,6 +156,9 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_note_tags_note ON note_tags(note_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(username)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_access ON sessions(access_token_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_refresh ON sessions(refresh_token_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_prev_refresh ON sessions(prev_refresh_token_hash)`,
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
@@ -148,7 +178,58 @@ func (s *Store) migrate() error {
 	if err := s.ensureColumn("notes", "source_url", "TEXT"); err != nil {
 		return err
 	}
+	// M10-T29（FR-51）：加密笔记本的标记与非敏感元数据（老库幂等补列，不掉数据）。
+	if err := s.ensureColumn("notebooks", "encrypted", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("notebooks", "crypto_meta", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("notes", "encrypted", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	return nil
+}
+
+// migrateSessions 处理 M10 的 sessions 形状演进（ADR-014 决策 8）。
+//
+// 判定：**存在旧列 `token`** 或 **缺少新列 `access_token_hash`** → 命中即整表重建
+// （旧永久 Token 全部失效，用户需重新登录一次）。重建后不再满足判定条件，重复执行安全。
+func (s *Store) migrateSessions() error {
+	hasOld, err := s.hasColumn("sessions", "token")
+	if err != nil {
+		return err
+	}
+	hasNew, err := s.hasColumn("sessions", "access_token_hash")
+	if err != nil {
+		return err
+	}
+	if !hasOld && hasNew {
+		return nil
+	}
+	_, err = s.db.Exec(`DROP TABLE IF EXISTS sessions`)
+	return err
+}
+
+// hasColumn 报告表是否存在指定列（表不存在时返回 false）。
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // ensureColumn 幂等补列：已存在则跳过，否则 ALTER TABLE 追加。
@@ -184,18 +265,262 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // ---- 用户 / 设备鉴权 ----
 
-// VerifyToken 校验 token 并返回 username；无效返回 (false, "").
+// ---- 会话与令牌（M10：短时访问令牌 + 可撤销刷新令牌，ADR-014 / FR-49）----
 //
 // 会话以 sessions 表为唯一真源：一个用户可持有多行会话（多设备 / 多 profile）。
-func (s *Store) VerifyToken(token string) (bool, string) {
-	var username string
-	err := s.db.QueryRow(
-		`SELECT username FROM sessions WHERE token = ?`, token,
-	).Scan(&username)
-	if err != nil {
-		return false, ""
+// 令牌**只存 sha256 哈希**（BR-49.4），明文仅在签发 / 刷新的响应里出现一次。
+
+// AccessTTL 返回访问令牌有效期（SUI_ACCESS_TTL，默认 30 分钟）。
+func AccessTTL() time.Duration { return envDuration("SUI_ACCESS_TTL", 30*time.Minute) }
+
+// RefreshTTL 返回刷新令牌有效期（SUI_REFRESH_TTL，默认 30 天）。
+func RefreshTTL() time.Duration { return envDuration("SUI_REFRESH_TTL", 30*24*time.Hour) }
+
+// envDuration 解析时长环境变量；空值 / 非法值 / 非正数一律回落默认值。
+func envDuration(key string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
 	}
-	return true, username
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+// 刷新失败的两类语义（§5：客户端据 error 字段决策重新登录）。
+var (
+	// ErrRefreshExpired 刷新令牌未命中或已自然过期 → 401 refresh-expired。
+	ErrRefreshExpired = errors.New("refresh-expired")
+	// ErrRefreshRevoked 刷新令牌已被换发（重放）或会话已吊销 → 401 refresh-revoked。
+	ErrRefreshRevoked = errors.New("refresh-revoked")
+)
+
+// RefreshRevokedError 是 ErrRefreshRevoked 的具体形态，额外携带**被吊销的会话 id**，
+// 供上层关闭该会话的 WebSocket 连接（§4.5：撤销即时生效）。
+//
+// 同时满足 errors.Is(err, ErrRefreshRevoked) 与 errors.As(err, &RefreshRevokedError{})。
+type RefreshRevokedError struct{ SessionID string }
+
+func (e *RefreshRevokedError) Error() string { return "refresh-revoked" }
+
+// Is 让 errors.Is(err, ErrRefreshRevoked) 对具体形态同样成立。
+func (e *RefreshRevokedError) Is(target error) bool { return target == ErrRefreshRevoked }
+
+// AuthStatus 是一次访问令牌鉴定的结果（§8.5）。
+type AuthStatus int
+
+const (
+	// AuthOK：命中且未过期、未吊销。
+	AuthOK AuthStatus = iota
+	// AuthExpired：命中但访问令牌已过期（客户端应刷新后重试）。
+	AuthExpired
+	// AuthInvalid：未命中 / 已吊销。
+	AuthInvalid
+)
+
+// TokenPair 是一次签发的结果（明文不落库）。
+type TokenPair struct {
+	SessionID     string
+	AccessToken   string
+	RefreshToken  string
+	AccessExpiry  time.Time
+	RefreshExpiry time.Time
+}
+
+// ExpiresIn 返回访问令牌剩余有效秒数（响应体的 expires_in）。
+func (p *TokenPair) ExpiresIn() int {
+	secs := int(time.Until(p.AccessExpiry).Seconds())
+	if secs < 0 {
+		return 0
+	}
+	return secs
+}
+
+// hashToken 计算令牌在库中的存储形态。
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// CreateSession 为该用户签发一个新会话（登录 / 注册，§8.2）。
+//
+// 只**新增**一行，不影响该用户其他会话（BR-07.1 / BR-33.3）。顺带清理已失效会话行
+// （治理用途，不影响正确性）。
+func (s *Store) CreateSession(username string) (*TokenPair, error) {
+	access, err := NewToken()
+	if err != nil {
+		return nil, err
+	}
+	refresh, err := NewToken()
+	if err != nil {
+		return nil, err
+	}
+	id, err := NewToken()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	pair := &TokenPair{
+		SessionID:     id[:32],
+		AccessToken:   access,
+		RefreshToken:  refresh,
+		AccessExpiry:  now.Add(AccessTTL()),
+		RefreshExpiry: now.Add(RefreshTTL()),
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, username, access_token_hash, refresh_token_hash,
+			prev_refresh_token_hash, access_expires_at, refresh_expires_at, created_at, last_used_at, revoked_at)
+		 VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, '')`,
+		pair.SessionID, username, hashToken(access), hashToken(refresh),
+		pair.AccessExpiry.Format(time.RFC3339), pair.RefreshExpiry.Format(time.RFC3339),
+		now.Format(time.RFC3339), now.Format(time.RFC3339),
+	); err != nil {
+		return nil, err
+	}
+	_ = s.CleanupExpiredSessions()
+	return pair, nil
+}
+
+// Authenticate 以访问令牌鉴定会话（§8.5）：命中且未过期未吊销 → 更新 last_used_at。
+//
+// 返回（结果, 用户名, 会话 id）；后两者仅在 AuthOK 时有效。
+func (s *Store) Authenticate(accessToken string) (AuthStatus, string, string) {
+	if accessToken == "" {
+		return AuthInvalid, "", ""
+	}
+	var id, username, expiresAt, revokedAt, lastUsed string
+	err := s.db.QueryRow(
+		`SELECT id, username, access_expires_at, revoked_at, last_used_at
+		 FROM sessions WHERE access_token_hash = ?`,
+		hashToken(accessToken),
+	).Scan(&id, &username, &expiresAt, &revokedAt, &lastUsed)
+	if err != nil || revokedAt != "" {
+		// 未命中 / 已吊销：对外一律 invalid_token（§8.5，不区分内部原因）。
+		return AuthInvalid, "", ""
+	}
+	if !parseTime(expiresAt).After(time.Now().UTC()) {
+		return AuthExpired, username, id
+	}
+	// last_used_at 只做**节流**更新：鉴权是热路径（轮询接口每请求一次），
+	// 每次都写会在单写 SQLite 上与同步事务争用，而审计并不需要秒级精度。
+	if time.Since(parseTime(lastUsed)) >= lastUsedThrottle {
+		_, _ = s.db.Exec(`UPDATE sessions SET last_used_at = ? WHERE id = ?`,
+			time.Now().UTC().Format(time.RFC3339), id)
+	}
+	return AuthOK, username, id
+}
+
+// lastUsedThrottle 是 last_used_at 的最小更新间隔（审计精度 vs 写放大）。
+const lastUsedThrottle = 60 * time.Second
+
+// RefreshSession 以刷新令牌轮换出新的双令牌（§8.3，单次使用 + 重放即吊销）。
+func (s *Store) RefreshSession(refreshToken string) (*TokenPair, error) {
+	if refreshToken == "" {
+		return nil, ErrRefreshExpired
+	}
+	h := hashToken(refreshToken)
+	var id, username, curHash, prevHash, refreshExp, revokedAt string
+	err := s.db.QueryRow(
+		`SELECT id, username, refresh_token_hash, prev_refresh_token_hash, refresh_expires_at, revoked_at
+		 FROM sessions WHERE refresh_token_hash = ? OR prev_refresh_token_hash = ?`,
+		h, h,
+	).Scan(&id, &username, &curHash, &prevHash, &refreshExp, &revokedAt)
+	if err != nil {
+		// 两个哈希都未命中：不区分「从未存在」与「更早世代」（§8.3 已知边界）。
+		return nil, ErrRefreshExpired
+	}
+	if revokedAt != "" || (prevHash != "" && prevHash == h) {
+		// 已吊销，或该令牌**已被换发过**（重放 = 凭证泄漏）→ 吊销整个会话（fail-safe）。
+		if _, err := s.db.Exec(`UPDATE sessions SET revoked_at = ? WHERE id = ?`,
+			time.Now().UTC().Format(time.RFC3339), id); err != nil {
+			return nil, err
+		}
+		return nil, &RefreshRevokedError{SessionID: id}
+	}
+	if !parseTime(refreshExp).After(time.Now().UTC()) {
+		// 自然过期：不额外吊销（该会话已不可用）。
+		return nil, ErrRefreshExpired
+	}
+	newAccess, err := NewToken()
+	if err != nil {
+		return nil, err
+	}
+	newRefresh, err := NewToken()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	pair := &TokenPair{
+		SessionID:     id,
+		AccessToken:   newAccess,
+		RefreshToken:  newRefresh,
+		AccessExpiry:  now.Add(AccessTTL()),
+		RefreshExpiry: now.Add(RefreshTTL()),
+	}
+	if _, err := s.db.Exec(
+		`UPDATE sessions SET access_token_hash = ?, refresh_token_hash = ?,
+			prev_refresh_token_hash = ?, access_expires_at = ?, refresh_expires_at = ?, last_used_at = ?
+		 WHERE id = ?`,
+		hashToken(newAccess), hashToken(newRefresh), curHash,
+		pair.AccessExpiry.Format(time.RFC3339), pair.RefreshExpiry.Format(time.RFC3339),
+		now.Format(time.RFC3339), id,
+	); err != nil {
+		return nil, err
+	}
+	return pair, nil
+}
+
+// RevokeSessionByAccess 登出：吊销当前访问令牌所属会话，返回其 sessionID（供关闭 WS 连接）。
+//
+// 未命中（令牌本就无效）时返回空 id 且不报错——登出是幂等的。
+func (s *Store) RevokeSessionByAccess(accessToken string) (string, error) {
+	if accessToken == "" {
+		return "", nil
+	}
+	var id string
+	if err := s.db.QueryRow(`SELECT id FROM sessions WHERE access_token_hash = ?`,
+		hashToken(accessToken)).Scan(&id); err != nil {
+		return "", nil
+	}
+	_, err := s.db.Exec(`UPDATE sessions SET revoked_at = ? WHERE id = ?`,
+		time.Now().UTC().Format(time.RFC3339), id)
+	return id, err
+}
+
+// RevokeAllSessions 吊销该用户全部会话（logout-all，§8.4），返回被吊销的 sessionID。
+func (s *Store) RevokeAllSessions(username string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM sessions WHERE username = ? AND revoked_at = ''`, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	for _, id := range ids {
+		if _, err := s.db.Exec(`UPDATE sessions SET revoked_at = ? WHERE id = ?`, ts, id); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+
+// CleanupExpiredSessions 删除刷新令牌已过期的历史会话行（治理，非正确性所需）。
+func (s *Store) CleanupExpiredSessions() error {
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE refresh_expires_at != '' AND refresh_expires_at < ?`,
+		time.Now().UTC().Format(time.RFC3339))
+	return err
 }
 
 // passwordIterations 为 PBKDF2 迭代次数（M4/BR-36.1）。
@@ -241,52 +566,40 @@ func (s *Store) HasAnyUser() (bool, error) {
 	return n > 0, nil
 }
 
-// CreateUser 创建用户并签发首个会话 token（密码以 PBKDF2 哈希存储）。
-func (s *Store) CreateUser(username, password string) (token string, err error) {
+// CreateUser 创建用户并签发首个会话（密码以 PBKDF2 哈希存储；M10 起返回双令牌，§8.2）。
+//
+// 用户行单条 INSERT 自身即原子；会话行在用户落库后创建——若会话创建失败，用户仍可正常登录。
+func (s *Store) CreateUser(username, password string) (*TokenPair, error) {
 	salt, hash, err := HashPassword(password)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	tok, _ := NewToken()
+	id, _ := NewToken()
 	ts := time.Now().UTC().Format(time.RFC3339)
-	tx, err := s.db.Begin()
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback()
-	if _, err = tx.Exec(
+	if _, err = s.db.Exec(
 		`INSERT INTO users (id, username, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?, ?)`,
-		tok[:16], username, hash, salt, ts,
+		id[:16], username, hash, salt, ts,
 	); err != nil {
-		return "", err
+		return nil, err
 	}
-	if _, err = tx.Exec(
-		`INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)`,
-		tok, username, ts,
-	); err != nil {
-		return "", err
-	}
-	if err = tx.Commit(); err != nil {
-		return "", err
-	}
-	return tok, nil
+	return s.CreateSession(username)
 }
 
-// LoginUser 验证用户名密码，成功则新增一个独立会话并返回新 token。
+// LoginUser 验证用户名密码，成功则新增一个独立会话并返回新令牌对（§8.2）。
 //
 // 登录只追加会话行，不影响该用户其他已登录会话（多设备 / 多 profile 可同时在线）。
 // M4/BR-36.2：若命中旧明文前缀实现（"plain:"），校验通过后顺手幂等升级为 PBKDF2 哈希。
-func (s *Store) LoginUser(username, password string) (string, error) {
+func (s *Store) LoginUser(username, password string) (*TokenPair, error) {
 	var storedHash, salt string
 	err := s.db.QueryRow(
 		`SELECT password_hash, password_salt FROM users WHERE username = ?`, username,
 	).Scan(&storedHash, &salt)
 	if err != nil {
-		return "", errors.New("user not found")
+		return nil, errors.New("user not found")
 	}
 	if strings.HasPrefix(storedHash, "plain:") {
 		if storedHash != "plain:"+password {
-			return "", errors.New("wrong password")
+			return nil, errors.New("wrong password")
 		}
 		if newSalt, newHash, herr := HashPassword(password); herr == nil {
 			_, _ = s.db.Exec(
@@ -295,22 +608,9 @@ func (s *Store) LoginUser(username, password string) (string, error) {
 			)
 		}
 	} else if !verifyPassword(password, salt, storedHash) {
-		return "", errors.New("wrong password")
+		return nil, errors.New("wrong password")
 	}
-	tok, _ := NewToken()
-	if _, err = s.db.Exec(
-		`INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)`,
-		tok, username, time.Now().UTC().Format(time.RFC3339),
-	); err != nil {
-		return "", err
-	}
-	return tok, nil
-}
-
-// RevokeToken 吊销指定会话 token（登出）。
-func (s *Store) RevokeToken(token string) error {
-	_, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token)
-	return err
+	return s.CreateSession(username)
 }
 
 // NewToken 生成一个伪随机 token（hex 编码 32 字节）。
@@ -333,15 +633,17 @@ type NoteRow struct {
 	Version         int
 	IsDeleted       bool
 	Archived        bool
-	SourceDevice    string
-	SourceURL       string
-	UpdatedAt       time.Time
+	// Encrypted 表示该笔记所属笔记本是否为加密笔记本（M10-T29；正文 / 标题届时为密文）。
+	Encrypted    bool
+	SourceDevice string
+	SourceURL    string
+	UpdatedAt    time.Time
 }
 
 // UpdatedSince 返回 updated_at > since 的所有笔记（增量拉取）。
 func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, updated_at
+		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, encrypted, source_device, updated_at
 		 FROM notes WHERE updated_at > ? ORDER BY updated_at`,
 		since.UTC().Format(time.RFC3339),
 	)
@@ -352,13 +654,14 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 	var out []NoteRow
 	for rows.Next() {
 		var r NoteRow
-		var del, arch int
+		var del, arch, enc int
 		var ts string
-		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &r.SourceDevice, &ts); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &enc, &r.SourceDevice, &ts); err != nil {
 			return nil, err
 		}
 		r.IsDeleted = del != 0
 		r.Archived = arch != 0
+		r.Encrypted = enc != 0
 		r.UpdatedAt = parseTime(ts)
 		out = append(out, r)
 	}
@@ -368,13 +671,13 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 // GetNote 返回指定笔记的服务端状态。
 func (s *Store) GetNote(id string) (*NoteRow, error) {
 	var r NoteRow
-	var del, arch int
+	var del, arch, enc int
 	var srcURL sql.NullString
 	var ts string
 	err := s.db.QueryRow(
-		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, source_url, updated_at
+		`SELECT id, title, content_markdown, notebook_id, version, is_deleted, archived, encrypted, source_device, source_url, updated_at
 		 FROM notes WHERE id = ?`, id,
-	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &r.SourceDevice, &srcURL, &ts)
+	).Scan(&r.ID, &r.Title, &r.ContentMarkdown, &r.NotebookID, &r.Version, &del, &arch, &enc, &r.SourceDevice, &srcURL, &ts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -383,6 +686,7 @@ func (s *Store) GetNote(id string) (*NoteRow, error) {
 	}
 	r.IsDeleted = del != 0
 	r.Archived = arch != 0
+	r.Encrypted = enc != 0
 	r.SourceURL = srcURL.String
 	r.UpdatedAt = parseTime(ts)
 	return &r, nil
@@ -419,7 +723,7 @@ func (s *Store) SetNoteSourceURL(noteID, sourceURL string) error {
 }
 
 // UpsertNote 落库笔记（增量），同时记录一条修订。返回新版本号。
-func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted, archived bool, sourceDevice string, version int) (int, error) {
+func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted, archived, encrypted bool, sourceDevice string, version int) (int, error) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -428,16 +732,17 @@ func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted,
 	defer tx.Rollback()
 
 	if err := upsert(tx,
-		`INSERT INTO notes (id, title, content_markdown, notebook_id, version, is_deleted, archived, source_device, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO notes (id, title, content_markdown, notebook_id, version, is_deleted, archived, encrypted, source_device, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   title=excluded.title, content_markdown=excluded.content_markdown,
 		   notebook_id=excluded.notebook_id,
 		   version=excluded.version, is_deleted=excluded.is_deleted,
 		   archived=excluded.archived,
+		   encrypted=excluded.encrypted,
 		   source_device=excluded.source_device,
 		   updated_at=excluded.updated_at`,
-		noteID, title, content, notebookID, version, b2i(isDeleted), b2i(archived), sourceDevice, ts,
+		noteID, title, content, notebookID, version, b2i(isDeleted), b2i(archived), b2i(encrypted), sourceDevice, ts,
 	); err != nil {
 		return 0, err
 	}
@@ -463,12 +768,15 @@ func (s *Store) UpsertNote(noteID, title, content, notebookID string, isDeleted,
 // 与笔记共用同一套版本线语义：version 为服务端权威版本，is_deleted 为墓碑，
 // source_device 记录最近一次修改的来源设备，用于跨端增量收敛。
 type NotebookRow struct {
-	ID           string
-	ParentID     string
-	Name         string
-	SortOrder    int
-	IsDeleted    bool
-	Version      int
+	ID        string
+	ParentID  string
+	Name      string
+	SortOrder int
+	IsDeleted bool
+	Version   int
+	// M10-T29（FR-51）：是否加密笔记本 + **非敏感**加密元数据（JSON，服务端不解析）。
+	Encrypted    bool
+	CryptoMeta   string
 	SourceDevice string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -488,7 +796,7 @@ type TagRow struct {
 // UpdatedNotebooksSince 返回 updated_at > since 的笔记本分组（增量拉取，含墓碑）。
 func (s *Store) UpdatedNotebooksSince(since time.Time) ([]NotebookRow, error) {
 	rows, err := s.db.Query(
-		`SELECT id, parent_id, name, sort_order, is_deleted, version, source_device, created_at, updated_at
+		`SELECT id, parent_id, name, sort_order, is_deleted, version, encrypted, crypto_meta, source_device, created_at, updated_at
 		 FROM notebooks WHERE updated_at > ? ORDER BY updated_at`,
 		since.UTC().Format(time.RFC3339),
 	)
@@ -499,12 +807,13 @@ func (s *Store) UpdatedNotebooksSince(since time.Time) ([]NotebookRow, error) {
 	var out []NotebookRow
 	for rows.Next() {
 		var r NotebookRow
-		var del int
+		var del, enc int
 		var created, updated string
-		if err := rows.Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &r.SourceDevice, &created, &updated); err != nil {
+		if err := rows.Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &enc, &r.CryptoMeta, &r.SourceDevice, &created, &updated); err != nil {
 			return nil, err
 		}
 		r.IsDeleted = del != 0
+		r.Encrypted = enc != 0
 		r.CreatedAt = parseTime(created)
 		r.UpdatedAt = parseTime(updated)
 		out = append(out, r)
@@ -515,12 +824,12 @@ func (s *Store) UpdatedNotebooksSince(since time.Time) ([]NotebookRow, error) {
 // GetNotebook 返回指定笔记本分组的服务端状态（不存在返回 nil, nil）。
 func (s *Store) GetNotebook(id string) (*NotebookRow, error) {
 	var r NotebookRow
-	var del int
+	var del, enc int
 	var created, updated string
 	err := s.db.QueryRow(
-		`SELECT id, parent_id, name, sort_order, is_deleted, version, source_device, created_at, updated_at
+		`SELECT id, parent_id, name, sort_order, is_deleted, version, encrypted, crypto_meta, source_device, created_at, updated_at
 		 FROM notebooks WHERE id = ?`, id,
-	).Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &r.SourceDevice, &created, &updated)
+	).Scan(&r.ID, &r.ParentID, &r.Name, &r.SortOrder, &del, &r.Version, &enc, &r.CryptoMeta, &r.SourceDevice, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -528,6 +837,7 @@ func (s *Store) GetNotebook(id string) (*NotebookRow, error) {
 		return nil, err
 	}
 	r.IsDeleted = del != 0
+	r.Encrypted = enc != 0
 	r.CreatedAt = parseTime(created)
 	r.UpdatedAt = parseTime(updated)
 	return &r, nil
@@ -535,16 +845,17 @@ func (s *Store) GetNotebook(id string) (*NotebookRow, error) {
 
 // UpsertNotebook 落库笔记本分组（增量）。created_at 只在首次插入时写入，
 // 冲突更新时不覆盖，保持分组创建时间稳定。
-func (s *Store) UpsertNotebook(id, parentID, name string, sortOrder int, isDeleted bool, sourceDevice string, version int) error {
+func (s *Store) UpsertNotebook(id, parentID, name string, sortOrder int, isDeleted bool, encrypted bool, cryptoMeta string, sourceDevice string, version int) error {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	return upsert(s.db,
-		`INSERT INTO notebooks (id, parent_id, name, sort_order, is_deleted, version, source_device, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO notebooks (id, parent_id, name, sort_order, is_deleted, version, encrypted, crypto_meta, source_device, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   parent_id=excluded.parent_id, name=excluded.name, sort_order=excluded.sort_order,
 		   is_deleted=excluded.is_deleted, version=excluded.version,
+		   encrypted=excluded.encrypted, crypto_meta=excluded.crypto_meta,
 		   source_device=excluded.source_device, updated_at=excluded.updated_at`,
-		id, parentID, name, sortOrder, b2i(isDeleted), version, sourceDevice, ts, ts,
+		id, parentID, name, sortOrder, b2i(isDeleted), version, b2i(encrypted), cryptoMeta, sourceDevice, ts, ts,
 	)
 }
 

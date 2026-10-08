@@ -219,7 +219,15 @@ class _NotebookNode extends StatelessWidget {
       children: [
         ListTile(
           dense: true,
-          leading: const Icon(Icons.folder_outlined, size: 20),
+          // M10-T29（FR-51）：加密笔记本用锁图标区分（未解锁时上锁，已解锁时开锁）。
+          leading: Icon(
+            nb.encrypted
+                ? (controller.isNotebookUnlocked(nb.id)
+                    ? Icons.lock_open_outlined
+                    : Icons.lock_outline)
+                : Icons.folder_outlined,
+            size: 20,
+          ),
           title: Text(nb.name),
           subtitle: noteCount > 0 ? Text('$noteCount篇') : null,
           selected: controller.selectedNotebookId == nb.id,

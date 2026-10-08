@@ -15,6 +15,9 @@ class Notebooks extends Table {
   DateTimeColumn get createdAt => dateTime()();
   DateTimeColumn get updatedAt => dateTime()();
   IntColumn get version => integer().withDefault(const Constant(0))();
+  // M10-T29（FR-51）：是否加密笔记本 + 非敏感加密元数据（算法 / KDF 参数 / salt / verifier）。
+  BoolColumn get encrypted => boolean().withDefault(const Constant(false))();
+  TextColumn get cryptoMeta => text().withDefault(const Constant(''))();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -51,6 +54,8 @@ class Notes extends Table {
   // 同步相关：version 是服务端基线镜像（仅由同步层回写）；本地草稿编号见 revisions.version
   IntColumn get version => integer().withDefault(const Constant(0))();
   TextColumn get sourceDevice => text().withDefault(const Constant(''))();
+  // M10-T29（FR-51）：镜像所属笔记本的加密状态（供列表占位与不解密搬运，避免联表）。
+  BoolColumn get encrypted => boolean().withDefault(const Constant(false))();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -157,7 +162,7 @@ class AppDatabase extends _$AppDatabase {
       AppDatabase(openConnection(basePath: basePath));
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 7;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -179,6 +184,9 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(revisions, revisions.serverVersion);
             await _migrateToV6();
           }
+          if (from <= 6) {
+            await _migrateToV7(m);
+          }
         },
       );
 
@@ -196,6 +204,16 @@ class AppDatabase extends _$AppDatabase {
         '(SELECT COUNT(*) FROM revisions WHERE revisions.note_id = notes.id), 0)');
     await customStatement('UPDATE notes SET version = COALESCE('
         '(SELECT MAX(version) FROM revisions WHERE revisions.note_id = notes.id), 0)');
+  }
+
+  /// v6 -> v7：加密笔记本（M10-T29 / FR-51）——**幂等补列**，不改动既有数据。
+  ///
+  /// 三列均有默认值（`false` / `''`）：升级前的老库、以及**未解锁端**照旧把密文当不透明
+  /// 字符串搬运与展示占位，不解析、不解密。
+  Future<void> _migrateToV7(Migrator m) async {
+    await m.addColumn(notebooks, notebooks.encrypted);
+    await m.addColumn(notebooks, notebooks.cryptoMeta);
+    await m.addColumn(notes, notes.encrypted);
   }
 
   /// 便捷：硬删除某笔记及其所有关联（测试/清理用）。

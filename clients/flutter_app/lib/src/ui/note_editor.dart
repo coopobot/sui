@@ -1217,17 +1217,21 @@ class _NoteEditorState extends State<NoteEditor>
     ];
   }
 
-  /// 预览里的图片：`sui://<sha256>` 走附件缓存（本地命中或按需下载），
-  /// 其余交给默认的 `Image.network`。
+  /// 预览里的图片（M10-T30）：
+  ///   - `sui://<sha256>` 走**附件缓存**（本地命中或按需下载）——这是唯一会取图的来源；
+  ///   - 其余（外链）**一律不取图**，只显示占位与主机名。
+  ///
+  /// 为什么外链图不出网：剪藏正文里的图片来自被剪藏页面，预览时自动取图会把**本机 IP
+  /// 与访问行为**暴露给第三方宿主（input-validation.md §9）。
   Widget _buildImage(MarkdownImageConfig config) {
     final uri = config.uri;
     final label = config.alt ?? config.title ?? uri.toString();
     if (uri.scheme != 'sui') {
-      return Image.network(
-        uri.toString(),
+      return _ExternalImagePlaceholder(
+        label: label,
+        uri: uri.toString(),
         width: config.width,
         height: config.height,
-        errorBuilder: (_, __, ___) => _AttachmentPlaceholder(label: label),
       );
     }
     return _SuiAttachmentImage(
@@ -2134,12 +2138,13 @@ class _FormatImageUnit extends StatelessWidget {
                 height: dims.$2,
               );
             } else {
-              imageWidget = Image.network(
-                image.url,
+              // M10-T30：外链图片**不取图**（与预览同一口径，见 _buildImage 注释）。
+              // 两态都显示同一占位，顺带守住「格式与预览一致」的口径。
+              imageWidget = _ExternalImagePlaceholder(
+                label: label,
+                uri: image.url,
                 width: dims.$1,
                 height: dims.$2,
-                errorBuilder: (_, __, ___) =>
-                    _AttachmentPlaceholder(label: label),
               );
             }
             if (!block) return _sized(imageWidget);
@@ -2718,6 +2723,71 @@ class _SuiAttachmentImageState extends State<_SuiAttachmentImage> {
 }
 
 /// 附件在预览里加载中 / 加载失败时的统一占位。
+/// 预览 / 格式模式里的**外链图片**占位（M10-T30）。
+///
+/// 刻意**不取图**：剪藏正文中的外链图片来自被剪藏页面，自动加载会把本机 IP 与访问行为
+/// 暴露给第三方宿主（input-validation.md §9）。只展示文件名与主机名，正本一字不动。
+class _ExternalImagePlaceholder extends StatelessWidget {
+  const _ExternalImagePlaceholder({
+    required this.label,
+    required this.uri,
+    this.width,
+    this.height,
+  });
+
+  final String label;
+  final String uri;
+  final double? width;
+  final double? height;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final host = Uri.tryParse(uri)?.host ?? '';
+    return Container(
+      width: width,
+      height: height,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.image_not_supported_outlined,
+                  size: 18, color: theme.colorScheme.outline),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  softWrap: false,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(
+            host.isEmpty ? '外链图片未加载（避免预览出网）' : '外链图片未加载（$host）',
+            maxLines: 1,
+            softWrap: false,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall
+                ?.copyWith(color: theme.colorScheme.outline),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _AttachmentPlaceholder extends StatelessWidget {
   const _AttachmentPlaceholder({required this.label, this.loading = false});
 

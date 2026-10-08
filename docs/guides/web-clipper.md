@@ -21,7 +21,10 @@
    - **访问 Token**：注册账号时获得的 token
 3. 点击保存，自动验证连接；显示「✓ 设置已保存」即可使用。
 
-> 配置保存在浏览器 `storage.sync`，同一浏览器账号多台设备间自动同步。
+> **M10 起**：服务端地址与令牌保存在 `chrome.storage.local`——**不再随浏览器账号同步离开本机**。
+>
+> 站点访问权限也改为**按需申请**：首次对某个站点剪藏时会弹出授权提示，授予后该站点长期可用；
+> 未授予时扩展不会也无法读取页面内容（不再申请「所有站点」的静态权限）。
 
 ## 3. 使用剪藏
 
@@ -81,10 +84,10 @@
 
 | 文件 | 职责 |
 |------|------|
-| `manifest.json` | MV3 清单：权限（activeTab / storage / scripting / contextMenus） |
+| `manifest.json` | MV3 清单：权限（activeTab / storage / scripting / contextMenus）+ **`optional_host_permissions`（`http/https`，按需申请）** |
 | `shared.js` | 共享逻辑：设置读取、模式记忆、整页采集（懒加载触发）、剪藏请求与结果文案（popup 与 service worker 共用） |
 | `popup.html/js` | 弹窗：模式分段控件 + 当前页信息 + 剪藏按钮 + 状态反馈 |
-| `options.html/js` | 设置页：serverUrl + token 配置 + 连接验证（`storage.sync`） |
+| `options.html/js` | 设置页：serverUrl + token 配置 + 连接验证（`chrome.storage.local`） |
 | `background.js` | service worker：右键菜单创建 + 菜单剪藏（沿用上次模式）+ badge 状态 |
 
 ### 4.3 剪藏数据流

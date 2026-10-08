@@ -8,7 +8,9 @@ const SUI_DEFAULT_MODE = 'article';
 // getSettings 读取服务端地址与 Token（缺省回落本地默认值）。
 async function suiGetSettings() {
   const defaults = { serverUrl: 'http://localhost:8080', token: '' };
-  const stored = await chrome.storage.sync.get(['serverUrl', 'token']);
+  // M10-T30：Token 属长期凭证——`storage.sync` 会随浏览器账号同步到其他设备
+  // （等于把凭证带出本机），故与 lastMode 一样改用 `storage.local`。
+  const stored = await chrome.storage.local.get(['serverUrl', 'token']);
   return { ...defaults, ...stored };
 }
 

@@ -14,19 +14,35 @@ import (
 //
 // 幂等键为 notes.source_url（M4/BR-34.2），与 mode 无关（BR-37.5）。
 func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
+	// M10：大请求体路由单独延长**读**期限（§8）；须在读 body 之前调用。
+	extendReadDeadline(w)
 	var req struct {
 		URL   string `json:"url"`
 		Title string `json:"title"`
 		HTML  string `json:"html"`
 		Mode  string `json:"mode"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// M10-T25：整包读入前先限长（超限 413）。
+	body := http.MaxBytesReader(w, r.Body, maxBodyBytes())
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if isTooLarge(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "payload too large"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad request"})
 		return
 	}
 	if req.URL == "" && req.HTML == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "url or html required"})
 		return
+	}
+	// M10-T27：剪藏来源**只校验 scheme**——服务端从不向它发起请求，故不做地址拦截
+	// （否则「剪藏内网页」会被整篇拒绝）；出网地址闸门在媒体本地化处（clip/guard.go）。
+	if req.URL != "" {
+		if err := clip.ValidateSourceURL(req.URL); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
+			return
+		}
 	}
 
 	// 净化 HTML → Markdown（按 mode 分支），并就地本地化页面图片。
@@ -41,9 +57,10 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 			PageURL: req.URL,
 			Mode:    req.Mode,
 			Blobs:   s.blobs,
+			Client:  s.mediaClient, // nil → clip 包的带闸门默认客户端（M10-T27）
 		})
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "purify failed: " + err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		title = result.Title
@@ -61,8 +78,12 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		title = "未命名剪藏"
 	}
 
-	// 正文开头附上来源链接
-	sourceLine := "> 来源：[" + req.URL + "](" + req.URL + ")\n\n"
+	// 正文开头附上来源链接。
+	//
+	// M10-T30：来源 URL 是外部输入，直接拼进 Markdown 会被 `]` / `)` 截断链接、
+	// 把剩余内容漏成正文（甚至注入结构），故文本位与目标位分别转义。
+	sourceLine := "> 来源：[" + clip.EscapeMarkdownText(req.URL) + "](" +
+		clip.EscapeMarkdownURL(req.URL) + ")\n\n"
 	fullContent := sourceLine + content
 
 	// 幂等判定（M4/BR-34.2/34.3）：非空 URL 命中 notes.source_url → 复用库内既有 id；
@@ -71,7 +92,7 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	if req.URL != "" {
 		existing, err := s.store.GetNoteBySourceURL(req.URL)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		if existing != "" {
@@ -88,7 +109,7 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	attachments := make([]sync.AttachmentItem, 0, len(assets))
 	for _, a := range assets {
 		attachments = append(attachments, sync.AttachmentItem{
-			ID:         "att-" + store.HashBytes([]byte(noteID+"|"+a.SHA256))[:32],
+			ID:         "att-" + store.HashBytes([]byte(noteID + "|" + a.SHA256))[:32],
 			Filename:   a.Filename,
 			MimeKind:   a.MimeKind,
 			ByteSize:   a.ByteSize,
@@ -100,7 +121,7 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	// 通过 sync 协议写入（先获取当前版本，再 push）
 	current, err := s.store.GetNote(noteID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	baseVer := 0
@@ -118,14 +139,14 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		Attachments:  attachments,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 
 	// 登记剪藏幂等键（普通笔记不写该列，M4/BR-34.3）
 	if req.URL != "" {
 		if err := s.store.SetNoteSourceURL(noteID, req.URL); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 	}

@@ -10,9 +10,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---- M6 共用测试辅助（FR-37 / FR-38 / FR-39）----
+
+// testMediaClient 返回**不带出网地址闸门**的媒体客户端，仅供本文件的本地化用例使用。
+//
+// 这些用例用 127.0.0.1 的 httptest 服务器提供图片，而生产默认客户端会在拨号时拒绝回环 /
+// 私网地址（M10-T27，clip/guard.go）。闸门与生产默认路径由 clip/guard_test.go 与
+// api/m10_clip_test.go 覆盖，这里只是把本地服务器让进来。
+func testMediaClient() *http.Client {
+	return &http.Client{Timeout: 5 * time.Second}
+}
 
 type clipResp struct {
 	OK                bool   `json:"ok"`
@@ -125,6 +135,7 @@ func sha256Hex(b []byte) string {
 // article 缺省向后兼容（FR-37 / AC-102 / AC-103）。
 func TestClipSnapshotMode(t *testing.T) {
 	srv := newTestServer(t)
+	srv.SetMediaClient(testMediaClient())
 	token := register(t, srv)
 
 	html := `<!DOCTYPE html><html><head><title>快照测试页</title></head><body>
@@ -192,6 +203,7 @@ func TestClipSnapshotMode(t *testing.T) {
 // 同图去重；data-src / srcset / 相对 URL 解析（FR-38 / AC-105~107）。
 func TestClipMediaLocalization(t *testing.T) {
 	srv := newTestServer(t)
+	srv.SetMediaClient(testMediaClient())
 	token := register(t, srv)
 
 	pngA := []byte("\x89PNG\r\n\x1a\nAAAA-localization-a")
@@ -265,6 +277,7 @@ func TestClipMediaLocalization(t *testing.T) {
 // TestClipMediaFailureDegrade：单图失败保留绝对 URL + 整篇仍入库 + 「未本地化」计数（FR-38 / AC-108）。
 func TestClipMediaFailureDegrade(t *testing.T) {
 	srv := newTestServer(t)
+	srv.SetMediaClient(testMediaClient())
 	token := register(t, srv)
 
 	pngOK := []byte("\x89PNG\r\n\x1a\nOK-degrade")
@@ -307,6 +320,7 @@ func TestClipMediaFailureDegrade(t *testing.T) {
 // TestClipOfflineReadable：原站 / 图片 URL 不可达后，笔记正文与图片仍可读（FR-39 / AC-110）。
 func TestClipOfflineReadable(t *testing.T) {
 	srv := newTestServer(t)
+	srv.SetMediaClient(testMediaClient())
 	token := register(t, srv)
 
 	png := []byte("\x89PNG\r\n\x1a\nOFFLINE-self-contained")
