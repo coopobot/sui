@@ -63,9 +63,37 @@ class $NotebooksTable extends Notebooks
       type: DriftSqlType.int,
       requiredDuringInsert: false,
       defaultValue: const Constant(0));
+  static const VerificationMeta _encryptedMeta =
+      const VerificationMeta('encrypted');
   @override
-  List<GeneratedColumn> get $columns =>
-      [id, parentId, name, sortOrder, isDeleted, createdAt, updatedAt, version];
+  late final GeneratedColumn<bool> encrypted = GeneratedColumn<bool>(
+      'encrypted', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("encrypted" IN (0, 1))'),
+      defaultValue: const Constant(false));
+  static const VerificationMeta _cryptoMetaMeta =
+      const VerificationMeta('cryptoMeta');
+  @override
+  late final GeneratedColumn<String> cryptoMeta = GeneratedColumn<String>(
+      'crypto_meta', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        parentId,
+        name,
+        sortOrder,
+        isDeleted,
+        createdAt,
+        updatedAt,
+        version,
+        encrypted,
+        cryptoMeta
+      ];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -115,6 +143,16 @@ class $NotebooksTable extends Notebooks
       context.handle(_versionMeta,
           version.isAcceptableOrUnknown(data['version']!, _versionMeta));
     }
+    if (data.containsKey('encrypted')) {
+      context.handle(_encryptedMeta,
+          encrypted.isAcceptableOrUnknown(data['encrypted']!, _encryptedMeta));
+    }
+    if (data.containsKey('crypto_meta')) {
+      context.handle(
+          _cryptoMetaMeta,
+          cryptoMeta.isAcceptableOrUnknown(
+              data['crypto_meta']!, _cryptoMetaMeta));
+    }
     return context;
   }
 
@@ -140,6 +178,10 @@ class $NotebooksTable extends Notebooks
           .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at'])!,
       version: attachedDatabase.typeMapping
           .read(DriftSqlType.int, data['${effectivePrefix}version'])!,
+      encrypted: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}encrypted'])!,
+      cryptoMeta: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}crypto_meta'])!,
     );
   }
 
@@ -158,6 +200,8 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
   final DateTime createdAt;
   final DateTime updatedAt;
   final int version;
+  final bool encrypted;
+  final String cryptoMeta;
   const NotebookRow(
       {required this.id,
       this.parentId,
@@ -166,7 +210,9 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       required this.isDeleted,
       required this.createdAt,
       required this.updatedAt,
-      required this.version});
+      required this.version,
+      required this.encrypted,
+      required this.cryptoMeta});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -180,6 +226,8 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
     map['created_at'] = Variable<DateTime>(createdAt);
     map['updated_at'] = Variable<DateTime>(updatedAt);
     map['version'] = Variable<int>(version);
+    map['encrypted'] = Variable<bool>(encrypted);
+    map['crypto_meta'] = Variable<String>(cryptoMeta);
     return map;
   }
 
@@ -195,6 +243,8 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
       version: Value(version),
+      encrypted: Value(encrypted),
+      cryptoMeta: Value(cryptoMeta),
     );
   }
 
@@ -210,6 +260,8 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
       version: serializer.fromJson<int>(json['version']),
+      encrypted: serializer.fromJson<bool>(json['encrypted']),
+      cryptoMeta: serializer.fromJson<String>(json['cryptoMeta']),
     );
   }
   @override
@@ -224,6 +276,8 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
       'version': serializer.toJson<int>(version),
+      'encrypted': serializer.toJson<bool>(encrypted),
+      'cryptoMeta': serializer.toJson<String>(cryptoMeta),
     };
   }
 
@@ -235,7 +289,9 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
           bool? isDeleted,
           DateTime? createdAt,
           DateTime? updatedAt,
-          int? version}) =>
+          int? version,
+          bool? encrypted,
+          String? cryptoMeta}) =>
       NotebookRow(
         id: id ?? this.id,
         parentId: parentId.present ? parentId.value : this.parentId,
@@ -245,6 +301,8 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
         createdAt: createdAt ?? this.createdAt,
         updatedAt: updatedAt ?? this.updatedAt,
         version: version ?? this.version,
+        encrypted: encrypted ?? this.encrypted,
+        cryptoMeta: cryptoMeta ?? this.cryptoMeta,
       );
   NotebookRow copyWithCompanion(NotebooksCompanion data) {
     return NotebookRow(
@@ -256,6 +314,9 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
       version: data.version.present ? data.version.value : this.version,
+      encrypted: data.encrypted.present ? data.encrypted.value : this.encrypted,
+      cryptoMeta:
+          data.cryptoMeta.present ? data.cryptoMeta.value : this.cryptoMeta,
     );
   }
 
@@ -269,14 +330,16 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
           ..write('isDeleted: $isDeleted, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
-          ..write('version: $version')
+          ..write('version: $version, ')
+          ..write('encrypted: $encrypted, ')
+          ..write('cryptoMeta: $cryptoMeta')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(
-      id, parentId, name, sortOrder, isDeleted, createdAt, updatedAt, version);
+  int get hashCode => Object.hash(id, parentId, name, sortOrder, isDeleted,
+      createdAt, updatedAt, version, encrypted, cryptoMeta);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -288,7 +351,9 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
           other.isDeleted == this.isDeleted &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt &&
-          other.version == this.version);
+          other.version == this.version &&
+          other.encrypted == this.encrypted &&
+          other.cryptoMeta == this.cryptoMeta);
 }
 
 class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
@@ -300,6 +365,8 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
   final Value<DateTime> createdAt;
   final Value<DateTime> updatedAt;
   final Value<int> version;
+  final Value<bool> encrypted;
+  final Value<String> cryptoMeta;
   final Value<int> rowid;
   const NotebooksCompanion({
     this.id = const Value.absent(),
@@ -310,6 +377,8 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.version = const Value.absent(),
+    this.encrypted = const Value.absent(),
+    this.cryptoMeta = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   NotebooksCompanion.insert({
@@ -321,6 +390,8 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     required DateTime createdAt,
     required DateTime updatedAt,
     this.version = const Value.absent(),
+    this.encrypted = const Value.absent(),
+    this.cryptoMeta = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         name = Value(name),
@@ -335,6 +406,8 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
     Expression<int>? version,
+    Expression<bool>? encrypted,
+    Expression<String>? cryptoMeta,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -346,6 +419,8 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
       if (version != null) 'version': version,
+      if (encrypted != null) 'encrypted': encrypted,
+      if (cryptoMeta != null) 'crypto_meta': cryptoMeta,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -359,6 +434,8 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
       Value<DateTime>? createdAt,
       Value<DateTime>? updatedAt,
       Value<int>? version,
+      Value<bool>? encrypted,
+      Value<String>? cryptoMeta,
       Value<int>? rowid}) {
     return NotebooksCompanion(
       id: id ?? this.id,
@@ -369,6 +446,8 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       version: version ?? this.version,
+      encrypted: encrypted ?? this.encrypted,
+      cryptoMeta: cryptoMeta ?? this.cryptoMeta,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -400,6 +479,12 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     if (version.present) {
       map['version'] = Variable<int>(version.value);
     }
+    if (encrypted.present) {
+      map['encrypted'] = Variable<bool>(encrypted.value);
+    }
+    if (cryptoMeta.present) {
+      map['crypto_meta'] = Variable<String>(cryptoMeta.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -417,6 +502,8 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('version: $version, ')
+          ..write('encrypted: $encrypted, ')
+          ..write('cryptoMeta: $cryptoMeta, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -870,6 +957,16 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
       type: DriftSqlType.string,
       requiredDuringInsert: false,
       defaultValue: const Constant(''));
+  static const VerificationMeta _encryptedMeta =
+      const VerificationMeta('encrypted');
+  @override
+  late final GeneratedColumn<bool> encrypted = GeneratedColumn<bool>(
+      'encrypted', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("encrypted" IN (0, 1))'),
+      defaultValue: const Constant(false));
   @override
   List<GeneratedColumn> get $columns => [
         id,
@@ -884,7 +981,8 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
         updatedAt,
         deletedAt,
         version,
-        sourceDevice
+        sourceDevice,
+        encrypted
       ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -961,6 +1059,10 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
           sourceDevice.isAcceptableOrUnknown(
               data['source_device']!, _sourceDeviceMeta));
     }
+    if (data.containsKey('encrypted')) {
+      context.handle(_encryptedMeta,
+          encrypted.isAcceptableOrUnknown(data['encrypted']!, _encryptedMeta));
+    }
     return context;
   }
 
@@ -996,6 +1098,8 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
           .read(DriftSqlType.int, data['${effectivePrefix}version'])!,
       sourceDevice: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}source_device'])!,
+      encrypted: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}encrypted'])!,
     );
   }
 
@@ -1019,6 +1123,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
   final DateTime? deletedAt;
   final int version;
   final String sourceDevice;
+  final bool encrypted;
   const NoteRow(
       {required this.id,
       this.notebookId,
@@ -1032,7 +1137,8 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       required this.updatedAt,
       this.deletedAt,
       required this.version,
-      required this.sourceDevice});
+      required this.sourceDevice,
+      required this.encrypted});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -1053,6 +1159,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
     }
     map['version'] = Variable<int>(version);
     map['source_device'] = Variable<String>(sourceDevice);
+    map['encrypted'] = Variable<bool>(encrypted);
     return map;
   }
 
@@ -1075,6 +1182,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           : Value(deletedAt),
       version: Value(version),
       sourceDevice: Value(sourceDevice),
+      encrypted: Value(encrypted),
     );
   }
 
@@ -1095,6 +1203,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       deletedAt: serializer.fromJson<DateTime?>(json['deletedAt']),
       version: serializer.fromJson<int>(json['version']),
       sourceDevice: serializer.fromJson<String>(json['sourceDevice']),
+      encrypted: serializer.fromJson<bool>(json['encrypted']),
     );
   }
   @override
@@ -1114,6 +1223,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       'deletedAt': serializer.toJson<DateTime?>(deletedAt),
       'version': serializer.toJson<int>(version),
       'sourceDevice': serializer.toJson<String>(sourceDevice),
+      'encrypted': serializer.toJson<bool>(encrypted),
     };
   }
 
@@ -1130,7 +1240,8 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           DateTime? updatedAt,
           Value<DateTime?> deletedAt = const Value.absent(),
           int? version,
-          String? sourceDevice}) =>
+          String? sourceDevice,
+          bool? encrypted}) =>
       NoteRow(
         id: id ?? this.id,
         notebookId: notebookId.present ? notebookId.value : this.notebookId,
@@ -1145,6 +1256,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
         deletedAt: deletedAt.present ? deletedAt.value : this.deletedAt,
         version: version ?? this.version,
         sourceDevice: sourceDevice ?? this.sourceDevice,
+        encrypted: encrypted ?? this.encrypted,
       );
   NoteRow copyWithCompanion(NotesCompanion data) {
     return NoteRow(
@@ -1168,6 +1280,7 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       sourceDevice: data.sourceDevice.present
           ? data.sourceDevice.value
           : this.sourceDevice,
+      encrypted: data.encrypted.present ? data.encrypted.value : this.encrypted,
     );
   }
 
@@ -1186,7 +1299,8 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           ..write('updatedAt: $updatedAt, ')
           ..write('deletedAt: $deletedAt, ')
           ..write('version: $version, ')
-          ..write('sourceDevice: $sourceDevice')
+          ..write('sourceDevice: $sourceDevice, ')
+          ..write('encrypted: $encrypted')
           ..write(')'))
         .toString();
   }
@@ -1205,7 +1319,8 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       updatedAt,
       deletedAt,
       version,
-      sourceDevice);
+      sourceDevice,
+      encrypted);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1222,7 +1337,8 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           other.updatedAt == this.updatedAt &&
           other.deletedAt == this.deletedAt &&
           other.version == this.version &&
-          other.sourceDevice == this.sourceDevice);
+          other.sourceDevice == this.sourceDevice &&
+          other.encrypted == this.encrypted);
 }
 
 class NotesCompanion extends UpdateCompanion<NoteRow> {
@@ -1239,6 +1355,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
   final Value<DateTime?> deletedAt;
   final Value<int> version;
   final Value<String> sourceDevice;
+  final Value<bool> encrypted;
   final Value<int> rowid;
   const NotesCompanion({
     this.id = const Value.absent(),
@@ -1254,6 +1371,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     this.deletedAt = const Value.absent(),
     this.version = const Value.absent(),
     this.sourceDevice = const Value.absent(),
+    this.encrypted = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   NotesCompanion.insert({
@@ -1270,6 +1388,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     this.deletedAt = const Value.absent(),
     this.version = const Value.absent(),
     this.sourceDevice = const Value.absent(),
+    this.encrypted = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         createdAt = Value(createdAt),
@@ -1288,6 +1407,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     Expression<DateTime>? deletedAt,
     Expression<int>? version,
     Expression<String>? sourceDevice,
+    Expression<bool>? encrypted,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1304,6 +1424,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
       if (deletedAt != null) 'deleted_at': deletedAt,
       if (version != null) 'version': version,
       if (sourceDevice != null) 'source_device': sourceDevice,
+      if (encrypted != null) 'encrypted': encrypted,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1322,6 +1443,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
       Value<DateTime?>? deletedAt,
       Value<int>? version,
       Value<String>? sourceDevice,
+      Value<bool>? encrypted,
       Value<int>? rowid}) {
     return NotesCompanion(
       id: id ?? this.id,
@@ -1337,6 +1459,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
       deletedAt: deletedAt ?? this.deletedAt,
       version: version ?? this.version,
       sourceDevice: sourceDevice ?? this.sourceDevice,
+      encrypted: encrypted ?? this.encrypted,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1383,6 +1506,9 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     if (sourceDevice.present) {
       map['source_device'] = Variable<String>(sourceDevice.value);
     }
+    if (encrypted.present) {
+      map['encrypted'] = Variable<bool>(encrypted.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1405,6 +1531,7 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
           ..write('deletedAt: $deletedAt, ')
           ..write('version: $version, ')
           ..write('sourceDevice: $sourceDevice, ')
+          ..write('encrypted: $encrypted, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -3216,6 +3343,8 @@ typedef $$NotebooksTableCreateCompanionBuilder = NotebooksCompanion Function({
   required DateTime createdAt,
   required DateTime updatedAt,
   Value<int> version,
+  Value<bool> encrypted,
+  Value<String> cryptoMeta,
   Value<int> rowid,
 });
 typedef $$NotebooksTableUpdateCompanionBuilder = NotebooksCompanion Function({
@@ -3227,6 +3356,8 @@ typedef $$NotebooksTableUpdateCompanionBuilder = NotebooksCompanion Function({
   Value<DateTime> createdAt,
   Value<DateTime> updatedAt,
   Value<int> version,
+  Value<bool> encrypted,
+  Value<String> cryptoMeta,
   Value<int> rowid,
 });
 
@@ -3262,6 +3393,12 @@ class $$NotebooksTableFilterComposer
 
   ColumnFilters<int> get version => $composableBuilder(
       column: $table.version, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<bool> get encrypted => $composableBuilder(
+      column: $table.encrypted, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get cryptoMeta => $composableBuilder(
+      column: $table.cryptoMeta, builder: (column) => ColumnFilters(column));
 }
 
 class $$NotebooksTableOrderingComposer
@@ -3296,6 +3433,12 @@ class $$NotebooksTableOrderingComposer
 
   ColumnOrderings<int> get version => $composableBuilder(
       column: $table.version, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<bool> get encrypted => $composableBuilder(
+      column: $table.encrypted, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get cryptoMeta => $composableBuilder(
+      column: $table.cryptoMeta, builder: (column) => ColumnOrderings(column));
 }
 
 class $$NotebooksTableAnnotationComposer
@@ -3330,6 +3473,12 @@ class $$NotebooksTableAnnotationComposer
 
   GeneratedColumn<int> get version =>
       $composableBuilder(column: $table.version, builder: (column) => column);
+
+  GeneratedColumn<bool> get encrypted =>
+      $composableBuilder(column: $table.encrypted, builder: (column) => column);
+
+  GeneratedColumn<String> get cryptoMeta => $composableBuilder(
+      column: $table.cryptoMeta, builder: (column) => column);
 }
 
 class $$NotebooksTableTableManager extends RootTableManager<
@@ -3363,6 +3512,8 @@ class $$NotebooksTableTableManager extends RootTableManager<
             Value<DateTime> createdAt = const Value.absent(),
             Value<DateTime> updatedAt = const Value.absent(),
             Value<int> version = const Value.absent(),
+            Value<bool> encrypted = const Value.absent(),
+            Value<String> cryptoMeta = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               NotebooksCompanion(
@@ -3374,6 +3525,8 @@ class $$NotebooksTableTableManager extends RootTableManager<
             createdAt: createdAt,
             updatedAt: updatedAt,
             version: version,
+            encrypted: encrypted,
+            cryptoMeta: cryptoMeta,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -3385,6 +3538,8 @@ class $$NotebooksTableTableManager extends RootTableManager<
             required DateTime createdAt,
             required DateTime updatedAt,
             Value<int> version = const Value.absent(),
+            Value<bool> encrypted = const Value.absent(),
+            Value<String> cryptoMeta = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               NotebooksCompanion.insert(
@@ -3396,6 +3551,8 @@ class $$NotebooksTableTableManager extends RootTableManager<
             createdAt: createdAt,
             updatedAt: updatedAt,
             version: version,
+            encrypted: encrypted,
+            cryptoMeta: cryptoMeta,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0
@@ -3609,6 +3766,7 @@ typedef $$NotesTableCreateCompanionBuilder = NotesCompanion Function({
   Value<DateTime?> deletedAt,
   Value<int> version,
   Value<String> sourceDevice,
+  Value<bool> encrypted,
   Value<int> rowid,
 });
 typedef $$NotesTableUpdateCompanionBuilder = NotesCompanion Function({
@@ -3625,6 +3783,7 @@ typedef $$NotesTableUpdateCompanionBuilder = NotesCompanion Function({
   Value<DateTime?> deletedAt,
   Value<int> version,
   Value<String> sourceDevice,
+  Value<bool> encrypted,
   Value<int> rowid,
 });
 
@@ -3675,6 +3834,9 @@ class $$NotesTableFilterComposer extends Composer<_$AppDatabase, $NotesTable> {
 
   ColumnFilters<String> get sourceDevice => $composableBuilder(
       column: $table.sourceDevice, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<bool> get encrypted => $composableBuilder(
+      column: $table.encrypted, builder: (column) => ColumnFilters(column));
 }
 
 class $$NotesTableOrderingComposer
@@ -3727,6 +3889,9 @@ class $$NotesTableOrderingComposer
   ColumnOrderings<String> get sourceDevice => $composableBuilder(
       column: $table.sourceDevice,
       builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<bool> get encrypted => $composableBuilder(
+      column: $table.encrypted, builder: (column) => ColumnOrderings(column));
 }
 
 class $$NotesTableAnnotationComposer
@@ -3776,6 +3941,9 @@ class $$NotesTableAnnotationComposer
 
   GeneratedColumn<String> get sourceDevice => $composableBuilder(
       column: $table.sourceDevice, builder: (column) => column);
+
+  GeneratedColumn<bool> get encrypted =>
+      $composableBuilder(column: $table.encrypted, builder: (column) => column);
 }
 
 class $$NotesTableTableManager extends RootTableManager<
@@ -3814,6 +3982,7 @@ class $$NotesTableTableManager extends RootTableManager<
             Value<DateTime?> deletedAt = const Value.absent(),
             Value<int> version = const Value.absent(),
             Value<String> sourceDevice = const Value.absent(),
+            Value<bool> encrypted = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               NotesCompanion(
@@ -3830,6 +3999,7 @@ class $$NotesTableTableManager extends RootTableManager<
             deletedAt: deletedAt,
             version: version,
             sourceDevice: sourceDevice,
+            encrypted: encrypted,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -3846,6 +4016,7 @@ class $$NotesTableTableManager extends RootTableManager<
             Value<DateTime?> deletedAt = const Value.absent(),
             Value<int> version = const Value.absent(),
             Value<String> sourceDevice = const Value.absent(),
+            Value<bool> encrypted = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               NotesCompanion.insert(
@@ -3862,6 +4033,7 @@ class $$NotesTableTableManager extends RootTableManager<
             deletedAt: deletedAt,
             version: version,
             sourceDevice: sourceDevice,
+            encrypted: encrypted,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0

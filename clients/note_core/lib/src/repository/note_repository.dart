@@ -50,6 +50,8 @@ class NoteRepository {
     required String name,
     int? sortOrder,
     DateTime? now,
+    bool encrypted = false,
+    String cryptoMeta = '',
   }) async {
     final t = now ?? DateTime.now();
     final nid = id ?? newId();
@@ -61,6 +63,8 @@ class NoteRepository {
           name: name,
           sortOrder: Value(order),
           version: const Value(1),
+          encrypted: Value(encrypted),
+          cryptoMeta: Value(cryptoMeta),
           createdAt: t,
           updatedAt: t,
         ));
@@ -251,6 +255,7 @@ class NoteRepository {
     DateTime? now,
     String? sourceDevice,
     int? version,
+    bool encrypted = false,
   }) async {
     final t = now ?? DateTime.now();
     final nid = id ?? newId();
@@ -269,6 +274,7 @@ class NoteRepository {
             pinned: Value(pinned),
             archived: Value(archived),
             version: Value(baseVersion),
+            encrypted: Value(encrypted),
             createdAt: t,
             updatedAt: t,
             sourceDevice: Value(src),
@@ -991,6 +997,8 @@ class NoteRepository {
     bool isDeleted = false,
     int version = 0,
     DateTime? updatedAt,
+    bool encrypted = false,
+    String cryptoMeta = '',
   }) async {
     final t = updatedAt ?? DateTime.now();
     final existing = await getNotebook(id);
@@ -1003,6 +1011,8 @@ class NoteRepository {
             sortOrder: Value(sortOrder),
             isDeleted: Value(isDeleted),
             version: Value(version),
+            encrypted: Value(encrypted),
+            cryptoMeta: Value(cryptoMeta),
             createdAt: t,
             updatedAt: t,
           ));
@@ -1014,9 +1024,20 @@ class NoteRepository {
         sortOrder: Value(sortOrder),
         isDeleted: Value(isDeleted),
         version: Value(version),
+        encrypted: Value(encrypted),
+        cryptoMeta: Value(cryptoMeta),
         updatedAt: Value(t),
       ));
     }
+  }
+
+  /// 应用远端的「加密态」镜像（M10-T29）：笔记归属的笔记本是否为加密笔记本。
+  ///
+  /// 与正文 / 标题分开落库：未解锁端也要能正确显示占位，故该标记必须**随 pull 立即生效**，
+  /// 不受「有未提交草稿时不覆盖正文」的约束。
+  Future<void> applyRemoteEncrypted(String noteId, bool encrypted) async {
+    await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
+        .write(NotesCompanion(encrypted: Value(encrypted)));
   }
 
   /// Upsert 远端标签（pull 下行）。
@@ -1091,6 +1112,8 @@ extension _NotebookRowEx on NotebookRow {
         createdAt: createdAt,
         updatedAt: updatedAt,
         version: version,
+        encrypted: encrypted,
+        cryptoMeta: cryptoMeta,
       );
 }
 
@@ -1120,6 +1143,7 @@ extension _NoteRowEx on NoteRow {
         deletedAt: deletedAt,
         version: version,
         sourceDevice: sourceDevice,
+        encrypted: encrypted,
       );
 }
 

@@ -9,6 +9,12 @@ class Notebook {
   final DateTime updatedAt;
   final int version;
 
+  /// M10-T29：是否为加密笔记本（其内笔记的标题 / 正文为**端到端密文**，服务端不可解密）。
+  final bool encrypted;
+
+  /// M10-T29：**非敏感**加密元数据（算法 / KDF 参数 / `salt` / `verifier` 的 JSON）；空串 = 未设置。
+  final String cryptoMeta;
+
   const Notebook({
     required this.id,
     this.parentId,
@@ -18,6 +24,8 @@ class Notebook {
     required this.createdAt,
     required this.updatedAt,
     this.version = 0,
+    this.encrypted = false,
+    this.cryptoMeta = '',
   });
 
   copyWith({
@@ -27,6 +35,8 @@ class Notebook {
     bool? isDeleted,
     DateTime? updatedAt,
     int? version,
+    bool? encrypted,
+    String? cryptoMeta,
   }) {
     return Notebook(
       id: id,
@@ -37,6 +47,8 @@ class Notebook {
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       version: version ?? this.version,
+      encrypted: encrypted ?? this.encrypted,
+      cryptoMeta: cryptoMeta ?? this.cryptoMeta,
     );
   }
 }

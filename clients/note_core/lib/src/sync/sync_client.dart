@@ -146,6 +146,8 @@ class SyncClient {
         'version': e.version,
         'isDeleted': e.isDeleted,
         'archived': e.archived,
+        // M10-T29：加密态随笔记上行（服务端只搬运；正文 / 标题此时为密文）。
+        'encrypted': note?.encrypted ?? false,
         'sourceDevice': deviceId,
         if (note?.notebookId != null) 'notebookId': note!.notebookId,
         if (tags.isNotEmpty) 'tagIds': tags.map((t) => t.id).toList(),
@@ -166,6 +168,9 @@ class SyncClient {
         'baseVersion': _notebookBaseVersion[id] ?? 0,
         'version': nb.version,
         'isDeleted': nb.isDeleted,
+        // M10-T29：加密笔记本标记 + 非敏感加密元数据（名称保持明文，便于辨认该解锁哪个）。
+        'encrypted': nb.encrypted,
+        if (nb.cryptoMeta.isNotEmpty) 'cryptoMeta': nb.cryptoMeta,
         'sourceDevice': deviceId,
       });
     }
@@ -296,6 +301,8 @@ class SyncClient {
           isDeleted: nb['isDeleted'] as bool? ?? false,
           version: nbVer,
           updatedAt: nbUpdated,
+          encrypted: (nb['encrypted'] as bool?) ?? false,
+          cryptoMeta: nb['cryptoMeta'] as String? ?? '',
         );
         _notebookBaseVersion[nbId] = nbVer;
         count++;
@@ -330,6 +337,8 @@ class SyncClient {
       final id = n['id'] as String;
       final ver = n['version'] as int;
       final isDeleted = n['isDeleted'] as bool;
+      // M10-T29：加密态镜像（未解锁端据此显示占位、并且**不**尝试解析正文）。
+      final remoteEncrypted = (n['encrypted'] as bool?) ?? false;
       final updatedAt = DateTime.parse(n['updatedAt'] as String);
       if (maxUpdated == null || updatedAt.isAfter(maxUpdated)) {
         maxUpdated = updatedAt;
@@ -347,6 +356,7 @@ class SyncClient {
           archived: (n['archived'] as bool?) ?? false,
           sourceDevice: (n['sourceDevice'] as String?) ?? '',
           version: ver,
+          encrypted: remoteEncrypted,
         );
         _baseVersion[id] = ver;
         await _applyRemoteTags(id, n);
@@ -383,6 +393,9 @@ class SyncClient {
           remoteArchived,
           updatedAt: updatedAt,
         );
+      }
+      if (remoteEncrypted != local.encrypted) {
+        await repository.applyRemoteEncrypted(id, remoteEncrypted);
       }
       // 应用笔记的 notebookId
       final remoteNotebookId = n['notebookId'] as String?;

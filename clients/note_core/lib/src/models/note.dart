@@ -14,6 +14,9 @@ class Note {
   final int version;
   final String sourceDevice;
 
+  /// M10-T29：镜像所属笔记本的加密状态；为真时 [title] / [contentMarkdown] 是**密文**。
+  final bool encrypted;
+
   const Note({
     required this.id,
     this.notebookId,
@@ -28,6 +31,7 @@ class Note {
     this.deletedAt,
     this.version = 0,
     this.sourceDevice = '',
+    this.encrypted = false,
   });
 
   Note copyWith({
@@ -44,6 +48,7 @@ class Note {
     Object? deletedAt = _unset,
     int? version,
     String? sourceDevice,
+    bool? encrypted,
   }) {
     return Note(
       id: id ?? this.id,
@@ -59,6 +64,7 @@ class Note {
       deletedAt: deletedAt == _unset ? this.deletedAt : deletedAt as DateTime?,
       version: version ?? this.version,
       sourceDevice: sourceDevice ?? this.sourceDevice,
+      encrypted: encrypted ?? this.encrypted,
     );
   }
 
