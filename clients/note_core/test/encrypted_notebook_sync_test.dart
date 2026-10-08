@@ -20,17 +20,24 @@ void main() {
     late AppDatabase db;
     late NoteRepository repo;
 
-    setUp(() {
+    /// 真实密钥与 `crypto_meta`：本地写入加密笔记本必须处于**解锁态**（写入接缝）。
+    late String meta;
+    const password = 'pw';
+
+    setUp(() async {
       db = AppDatabase.memory();
       repo = NoteRepository(db, deviceId: 'dev-a');
+      meta = (await NotebookCrypto.create(
+        password: password,
+        salt: List<int>.filled(16, 5),
+      ))
+          .meta
+          .toJson();
     });
 
     tearDown(() => db.close());
 
-    // 一段真实形态的 crypto_meta（**非敏感**元数据：无 K_nb、无锁定密码）。
-    const meta = '{"v":1,"kdf":"argon2id","m":65536,"t":3,"p":1,'
-        '"salt":"AAECAwQFBgcICQoLDA0ODw==",'
-        '"verifier":"qrvM3e7/AAECAwQFBgcICQoLDA0ODw=="}';
+    // crypto_meta 由 setUp 用真实密钥生成（见上）。
 
     test('笔记本 encrypted / cryptoMeta 本地往返', () async {
       final nb = await repo.createNotebook(
@@ -53,7 +60,12 @@ void main() {
     });
 
     test('笔记 encrypted 镜像本地往返（默认为普通）', () async {
-      final nb = await repo.createNotebook(name: '私密', encrypted: true);
+      final nb = await repo.createNotebook(
+        name: '私密',
+        encrypted: true,
+        cryptoMeta: meta,
+      );
+      await repo.unlockNotebook(nb.id, password);
       final enc = await repo.createNote(
         notebookId: nb.id,
         title: 'AQEAAAA=',
@@ -145,11 +157,11 @@ void main() {
         encrypted: true,
         cryptoMeta: meta,
       );
+      await repo.unlockNotebook(nb.id, password);
       final note = await repo.createNote(
         notebookId: nb.id,
-        title: 'AQEAAAA=',
-        contentMarkdown: 'AQEAAAA=',
-        encrypted: true,
+        title: '秘密标题',
+        contentMarkdown: '秘密正文',
       );
       await syncer.enqueue(note);
       syncer.enqueueNotebook(nb);
@@ -163,6 +175,8 @@ void main() {
       final items = (pushed.first['items'] as List).cast<Map<String, dynamic>>();
       expect(items.single['encrypted'], isTrue);
 
+      // 回锁后再拉：验证「未解锁端只拿密文、展示为占位」。
+      repo.lockNotebook(nb.id);
       await syncer.pull();
       // 存储层：密文**原样落库**（不经任何解密 / 改写）——故直接读行来断言。
       final row = await (db.select(db.notes)..where((n) => n.id.equals('note-remote')))

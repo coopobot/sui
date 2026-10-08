@@ -105,6 +105,85 @@ class NoteRepository {
         locked: true,
       );
 
+  /// 本地写入时把**明文**字段转成**存储形态**（笔记本加密且已解锁 → 密文；否则原样）。
+  ///
+  /// 未解锁的加密笔记本**拒绝写入**（§11）：否则会把占位文本当成内容覆盖掉密文。
+  /// 空串保持空串（不产出「空明文的封装」）。
+  Future<({String title, String content})> _toStorage({
+    required String? notebookId,
+    required String noteId,
+    required String title,
+    required String content,
+    required bool encrypted,
+  }) async {
+    if (!encrypted) return (title: title, content: content);
+    final key = keyStore.keyFor(notebookId);
+    if (key == null) {
+      throw const NotebookDecryptException('加密笔记本未解锁，拒绝写入（会破坏端到端加密）');
+    }
+    final cipher = NotebookFieldCipher(key);
+    final nbId = notebookId ?? '';
+    return (
+      title: title.isEmpty
+          ? ''
+          : await cipher.encrypt(
+              notebookId: nbId,
+              noteId: noteId,
+              field: NotebookField.title,
+              plaintext: title),
+      content: content.isEmpty
+          ? ''
+          : await cipher.encrypt(
+              notebookId: nbId,
+              noteId: noteId,
+              field: NotebookField.content,
+              plaintext: content),
+    );
+  }
+
+  /// 读取**存储形态**的笔记（不经展示接缝）——仅供同步层使用。
+  ///
+  /// 同步层必须拿密文（净荷与库内都是存储形态）；若误用 [getNote]（解锁态返回明文），
+  /// 就会把**明文推上网络**——这正是「Outbox 存存储形态」这条口径要防的事。
+  Future<Note?> getStoredNote(String id) async {
+    final row = await (db.select(db.notes)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    return row?.toModel();
+  }
+
+  /// 把**存储形态**的标题 / 正文解密为明文——供同步层在**明文层**合并冲突（§8）。
+  ///
+  /// 未解锁时抛 [NotebookDecryptException]：调用方必须据此**放弃就地合并**并保持排队，
+  /// 否则会把密文当正文合并、再被写入接缝加密一次（直接损坏笔记）。
+  Future<({String title, String content})> decryptStoredFields({
+    required String notebookId,
+    required String noteId,
+    required String title,
+    required String content,
+  }) async {
+    final key = keyStore.keyFor(notebookId);
+    if (key == null) {
+      throw const NotebookDecryptException('加密笔记本未解锁，无法在明文层合并');
+    }
+    final cipher = NotebookFieldCipher(key);
+    return (
+      title: title.isEmpty
+          ? ''
+          : await cipher.decrypt(
+              notebookId: notebookId,
+              noteId: noteId,
+              field: NotebookField.title,
+              envelope: title),
+      content: content.isEmpty
+          ? ''
+          : await cipher.decrypt(
+              notebookId: notebookId,
+              noteId: noteId,
+              field: NotebookField.content,
+              envelope: content),
+    );
+  }
+
   /// 加密行由 Dart 侧对**解密后明文**再判定；明文行的命中已由 SQL 保证。
   static bool _matchesSearch(Note n, String? search) {
     if (search == null || search.isEmpty) return true;
@@ -346,10 +425,24 @@ class NoteRepository {
     String? sourceDevice,
     int? version,
     bool encrypted = false,
+    bool fromWire = false,
   }) async {
     final t = now ?? DateTime.now();
     final nid = id ?? newId();
     final src = sourceDevice ?? deviceId;
+    // 接缝（§6.2）：**本地**入口由所属笔记本派生加密态，输入是明文；**线上**入口
+    // （pull 下行 / 剪藏，`fromWire: true`）输入已是存储形态（密文即是密文），原样落库。
+    final target = notebookId == null ? null : await getNotebook(notebookId);
+    final isEncrypted = fromWire ? encrypted : (target?.encrypted ?? false);
+    final stored = fromWire
+        ? (title: title, content: contentMarkdown)
+        : await _toStorage(
+            notebookId: notebookId,
+            noteId: nid,
+            title: title,
+            content: contentMarkdown,
+            encrypted: isEncrypted,
+          );
     // Notes.version 是服务端基线镜像：本地新建（尚未同步）基线为 0；
     // 由 pull 落库的远端笔记以服务端版本为基线。首条修订独立编号：
     // 新建时为 1，远端落库时沿用服务端版本号（sync-protocol §3）。
@@ -359,12 +452,12 @@ class NoteRepository {
       await db.into(db.notes).insert(NotesCompanion.insert(
             id: nid,
             notebookId: Value(notebookId),
-            title: Value(title),
-            contentMarkdown: Value(contentMarkdown),
+            title: Value(stored.title),
+            contentMarkdown: Value(stored.content),
             pinned: Value(pinned),
             archived: Value(archived),
             version: Value(baseVersion),
-            encrypted: Value(encrypted),
+            encrypted: Value(isEncrypted),
             createdAt: t,
             updatedAt: t,
             sourceDevice: Value(src),
@@ -373,12 +466,13 @@ class NoteRepository {
         await _replaceTags(nid, tags);
       }
       // 首条修订：pull 落库时 server_version = 服务端版本；本地新建为 null（§9.4）
+      // 修订与笔记**同形态**：加密笔记本内的历史同样存密文（§6.2）。
       await db.into(db.revisions).insert(RevisionsCompanion.insert(
             id: newId(),
             noteId: nid,
             version: firstRevision,
-            title: Value(title),
-            contentMarkdown: contentMarkdown,
+            title: Value(stored.title),
+            contentMarkdown: stored.content,
             sourceDevice: Value(src),
             serverVersion: version != null ? Value(version) : const Value.absent(),
             createdAt: t,
@@ -428,9 +522,22 @@ class NoteRepository {
     final t = now ?? DateTime.now();
     final note = await getNote(id);
     if (note == null) throw StateError('note not found: $id');
+    if (note.locked) {
+      // §11：未解锁不得写入——此时的 note 是**占位**，写下去等于把占位当内容覆盖密文。
+      throw const NotebookDecryptException('加密笔记本未解锁，拒绝写入');
+    }
 
     final nextTitle = title ?? note.title;
     final nextContent = contentMarkdown ?? note.contentMarkdown;
+    // 接缝（§6.2）：本地编辑入口收到的是**明文**（编辑器以 Markdown 为正本），
+    // 落库前加密为存储形态。
+    final stored = await _toStorage(
+      notebookId: note.notebookId,
+      noteId: id,
+      title: nextTitle,
+      content: nextContent,
+      encrypted: note.encrypted,
+    );
     // 本地修订编号取 max(现存 revision.version) + 1，与「服务端基线镜像」
     // （Notes.version）解耦；本地编辑不得推进 Notes.version（sync-protocol §3）。
     final nextVersion = await _nextRevisionVersion(id);
@@ -442,16 +549,16 @@ class NoteRepository {
               await tagsOfNote(id).then((v) => v.map((e) => e.name).toList()));
       await (db.update(db.notes)..where((n) => n.id.equals(id)))
           .write(NotesCompanion(
-        title: Value(nextTitle),
-        contentMarkdown: Value(nextContent),
+        title: Value(stored.title),
+        contentMarkdown: Value(stored.content),
         updatedAt: Value(t),
       ));
       await db.into(db.revisions).insert(RevisionsCompanion.insert(
             id: newId(),
             noteId: id,
             version: nextVersion,
-            title: Value(nextTitle),
-            contentMarkdown: nextContent,
+            title: Value(stored.title),
+            contentMarkdown: stored.content,
             sourceDevice: Value(deviceId),
             // 本地编辑产生的草稿：server_version = null（§9.4）
             serverVersion: const Value.absent(),

@@ -38,31 +38,29 @@ void main() {
         cryptoMeta: created.meta.toJson(),
       );
       nbId = nb.id;
-      final note = await repo.createNote(
-        notebookId: nbId,
-        title: 'seed',
-        contentMarkdown: 'seed',
-      );
-      noteId = note.id;
+      noteId = 'note-1';
 
-      // 改写成存储形态（密文）——模拟真实的库内状态。
+      // 夹具：直接以**存储形态**（密文）落库——这正是「本机保存 / 对端下行」之后的真实状态。
+      // 走 `fromWire` 入口：未解锁时**本地**写入按设计会被拒绝（写入接缝），故不能先用明文建再改写。
       final cipher = NotebookFieldCipher(key);
-      await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
-          .write(NotesCompanion(
-        title: Value(await cipher.encrypt(
+      await repo.createNote(
+        id: noteId,
+        notebookId: nbId,
+        title: await cipher.encrypt(
           notebookId: nbId,
           noteId: noteId,
           field: NotebookField.title,
           plaintext: secretTitle,
-        )),
-        contentMarkdown: Value(await cipher.encrypt(
+        ),
+        contentMarkdown: await cipher.encrypt(
           notebookId: nbId,
           noteId: noteId,
           field: NotebookField.content,
           plaintext: secretBody,
-        )),
-        encrypted: Value(true),
-      ));
+        ),
+        encrypted: true,
+        fromWire: true,
+      );
     });
 
     tearDown(() => db.close());
@@ -141,6 +139,7 @@ void main() {
     });
 
     test('AAD 绑定：把密文搬到另一条笔记 → 解不开（占位）', () async {
+      await repo.unlockNotebook(nbId, password); // 本地写入需解锁态（写入接缝）
       final other = await repo.createNote(
         notebookId: nbId,
         title: 'o',

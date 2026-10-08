@@ -91,10 +91,21 @@ class SyncClient {
     // 成功后精确回填 server_version（sync-protocol §9.5）。
     final pushedRevisionVersion =
         await repository.maxRevisionVersion(note.id);
+    // 加密笔记：Outbox 只放**存储形态**（密文）。编辑器给的是明文（解锁态），若直接入队，
+    // push 就会把明文发到服务端——这是端到端加密最容易被忽视的泄漏点。
+    var title = note.title;
+    var content = note.contentMarkdown;
+    if (note.encrypted) {
+      final stored = await repository.getStoredNote(note.id);
+      if (stored != null) {
+        title = stored.title;
+        content = stored.contentMarkdown;
+      }
+    }
     final item = OutboxItem(
       noteId: note.id,
-      title: note.title,
-      content: note.contentMarkdown,
+      title: title,
+      content: content,
       baseVersion: base,
       version: note.version,
       isDeleted: note.isDeleted,
@@ -357,6 +368,8 @@ class SyncClient {
           sourceDevice: (n['sourceDevice'] as String?) ?? '',
           version: ver,
           encrypted: remoteEncrypted,
+          // 线上入口：净荷已是**存储形态**（加密笔记本内即密文），**绝不二次加密**。
+          fromWire: true,
         );
         _baseVersion[id] = ver;
         await _applyRemoteTags(id, n);
@@ -650,15 +663,46 @@ class SyncClient {
   /// 合并结果写为一条本地草稿（独立修订编号），下次 push 以新 base 重发。
   Future<void> _mergeLocalWithServer(
       OutboxItem local, _ServerNote server) async {
-    final localTitle = local.title;
-    final serverTitle = server.title;
+    var localTitle = local.title;
+    var serverTitle = server.title;
+    var localContent = local.content;
+    var serverContent = server.content;
+
+    // M10-T29（§8）：加密笔记的冲突合并必须在**明文层**完成。
+    //  · 已解锁 → 两侧密文各自解密 → 启发式合并 → 由写入接缝重新加密落库；
+    //  · 未解锁 → **不就地合并**：此时两侧都只是密文，合并等于把密文当正文（再被加密一次
+    //    就直接损坏笔记），故保持排队，待解锁端完成合并。
+    final stored = await repository.getStoredNote(local.noteId);
+    if (stored != null && stored.encrypted) {
+      final notebookId = stored.notebookId;
+      if (notebookId == null || !repository.isNotebookUnlocked(notebookId)) {
+        return;
+      }
+      final l = await repository.decryptStoredFields(
+        notebookId: notebookId,
+        noteId: local.noteId,
+        title: localTitle,
+        content: localContent,
+      );
+      final s = await repository.decryptStoredFields(
+        notebookId: notebookId,
+        noteId: local.noteId,
+        title: serverTitle,
+        content: serverContent,
+      );
+      localTitle = l.title;
+      localContent = l.content;
+      serverTitle = s.title;
+      serverContent = s.content;
+    }
+
     final mergedTitle =
         localTitle.length >= serverTitle.length ? localTitle : serverTitle;
 
     // 正文简化合并：两端内容差异的启发式拼接。
     // 若两端差异明显（长度差 >30% 或内容完全不同），则标记冲突，
     // 保存为"服务端内容 + 本地修订"——确保不丢字。
-    final mergedContent = _mergeContent(local.content, server.content);
+    final mergedContent = _mergeContent(localContent, serverContent);
 
     // 写入本地新版本
     final note = await repository.updateNoteContent(
