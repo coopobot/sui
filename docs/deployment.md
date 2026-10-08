@@ -480,13 +480,14 @@ sui.example.com {
 
 | # | 项 | 现状 | 建议 |
 |---|----|------|------|
-| 1 | 密码存储 | `store.LoginUser` 以明文前缀比对 | 改为 bcrypt / argon2 哈希 |
-| 2 | Token 轮换 | 登录即换 token | 客户端支持重新获取；建议加 Token 过期时间 |
-| 3 | HTTPS | 无内置 TLS | 生产环境强制 TLS（反代或服务端直接 TLS） |
+| 1 | 密码存储 | **PBKDF2 加盐哈希**（M4 落地） | 保持；后续可评估 Argon2id |
+| 2 | 令牌与会话 | **30 分钟访问令牌 + 可撤销刷新令牌**（M10 / FR-49；单次使用轮换、重放即吊销会话、与 WS 连接绑定） | — |
+| 3 | HTTPS | 无内置 TLS；`http://` 下客户端启用**应用层受保护通道**（M10 / FR-50，TOFU + 逐请求 AEAD） | 公网仍**建议强制 TLS**：通道保护内容，TLS 另外提供服务器身份与合规性 |
 | 4 | 限流 | 无 | `register` / `login` 加速率限制，防爆破 |
-| 5 | WebSocket 鉴权 | `/api/v1/ws` 不校验 | 建议通过查询参数或子协议携带 token |
-| 6 | CORS | 开发模式全允许 | 生产配置具体来源白名单（`cors.Middleware` 的 `allowedOrigins` 参数） |
-| 7 | 数据备份 | 手动 | 定期备份数据目录（`sui.db` + `blobs/` + `securechan.key`） |
+| 5 | WebSocket 鉴权 | **请求头 / 子协议携带令牌且与会话绑定**（M4 + M10 §4.5；会话吊销即断开） | 升级头不在通道内 → 可改为经通道换取**一次性短时 ticket** |
+| 6 | CORS | **来源白名单精确匹配，未配置 = 默认拒绝**（M10-T23） | 生产配置具体来源 |
+| 7 | 资源上限 | 请求体 / 单 blob / 条目数上限与**大传输路由单独延长读写期限**（M10-T25） | nginx `client_max_body_size` 与上表对齐（双层限长） |
+| 8 | 数据备份 | 手动 | 定期备份数据目录（`sui.db` + `blobs/` + `securechan.key`） |
 
 源码位置：`server/internal/api` 与 `server/internal/store`。
 

@@ -1,7 +1,7 @@
 name: sui_flutter_app
 description: 随手记 Sui — 多端客户端（离线优先笔记：本地 SQLite + 多端同步）
 publish_to: "none"
-version: 0.1.0
+version: 0.11.0+1100
 
 environment:
   sdk: ^3.3.0
