@@ -661,15 +661,18 @@ class NoteRepository {
     }
     if (search != null && search.isNotEmpty) {
       final like = '%${search.toLowerCase()}%';
+      // 与 listNotes 同口径：加密行整体取出，Dart 侧对**解密后明文**过滤（§9.2）。
       q.where((n) =>
-          n.title.lower().like(like) | n.contentMarkdown.lower().like(like));
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
     }
     q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
 
-    final rows = await q.get();
-    final notes = rows.map((r) => r.toModel()).toList();
     final summaries = <NoteSummary>[];
-    for (final n in notes) {
+    for (final r in await q.get()) {
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
       summaries.add(NoteSummary(
           note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
     }
@@ -775,13 +778,92 @@ class NoteRepository {
   /// 不写 revision：归属变更不属于内容修订，避免污染版本链。
   /// 不改 `version`：它是服务端基线镜像，本地编辑不得推进（sync-protocol §3）。
   Future<Note> moveNoteToNotebook(String id, String? notebookId) async {
-    final note = await getNote(id);
-    if (note == null) throw StateError('note not found: $id');
-    await (db.update(db.notes)..where((n) => n.id.equals(id)))
-        .write(NotesCompanion(
-      notebookId: Value(notebookId),
-      updatedAt: Value(DateTime.now()),
-    ));
+    final stored = await getStoredNote(id);
+    if (stored == null) throw StateError('note not found: $id');
+
+    Future<Note> reparentOnly() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        notebookId: Value(notebookId),
+        updatedAt: Value(DateTime.now()),
+      ));
+      return (await getNote(id))!;
+    }
+
+    // 同本移动（幂等）：形态不变，直接返回——**不**因为未解锁而拒绝，否则 UI 的无害重排会报错。
+    if (stored.notebookId == notebookId) return reparentOnly();
+
+    final target = notebookId == null ? null : await getNotebook(notebookId);
+    final targetEncrypted = target?.encrypted ?? false;
+    final sourceEncrypted = stored.encrypted;
+
+    // 普通 → 普通：未跨加密边界，形态不变。
+    if (!sourceEncrypted && !targetEncrypted) return reparentOnly();
+
+    // 跨加密边界（或加密换本）：**形态必须就地转换**。
+    //  · 移入加密笔记本：明文 → 目标 `K_nb` 加密（AAD 绑定的是**目标** notebookId）；
+    //  · 移出到普通笔记本：密文 → 解密为明文；
+    //  · 加密 → 加密换本：旧密钥解密 → 目标密钥重新加密（密钥与 AAD 都变了）。
+    // 任一侧缺解锁态都会由下面两个调用抛出 [NotebookDecryptException]：既不能把明文留在
+    // 加密笔记本内，也不能把密文留在普通笔记本里（§6.2）。
+    final srcPlain = sourceEncrypted
+        ? await decryptStoredFields(
+            notebookId: stored.notebookId ?? '',
+            noteId: id,
+            title: stored.title,
+            content: stored.contentMarkdown,
+          )
+        : (title: stored.title, content: stored.contentMarkdown);
+    final dest = await _toStorage(
+      notebookId: notebookId,
+      noteId: id,
+      title: srcPlain.title,
+      content: srcPlain.content,
+      encrypted: targetEncrypted,
+    );
+
+    // 既有修订一并转换：否则加密笔记本里会留下**明文历史**（反之亦然）。
+    // 先全部算好再进事务，避免事务内做异步密码学运算。
+    final revRows =
+        await (db.select(db.revisions)..where((r) => r.noteId.equals(id))).get();
+    final converted = <({String id, String title, String content})>[];
+    for (final r in revRows) {
+      final plain = sourceEncrypted
+          ? await decryptStoredFields(
+              notebookId: stored.notebookId ?? '',
+              noteId: id,
+              title: r.title,
+              content: r.contentMarkdown,
+            )
+          : (title: r.title, content: r.contentMarkdown);
+      final conv = await _toStorage(
+        notebookId: notebookId,
+        noteId: id,
+        title: plain.title,
+        content: plain.content,
+        encrypted: targetEncrypted,
+      );
+      converted.add((id: r.id, title: conv.title, content: conv.content));
+    }
+
+    final t = DateTime.now();
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        notebookId: Value(notebookId),
+        title: Value(dest.title),
+        contentMarkdown: Value(dest.content),
+        encrypted: Value(targetEncrypted),
+        updatedAt: Value(t),
+      ));
+      for (final c in converted) {
+        await (db.update(db.revisions)..where((x) => x.id.equals(c.id)))
+            .write(RevisionsCompanion(
+          title: Value(c.title),
+          contentMarkdown: Value(c.content),
+        ));
+      }
+    });
     return (await getNote(id))!;
   }
 
