@@ -34,6 +34,14 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "url or html required"})
 		return
 	}
+	// M10-T27：剪藏来源**只校验 scheme**——服务端从不向它发起请求，故不做地址拦截
+	// （否则「剪藏内网页」会被整篇拒绝）；出网地址闸门在媒体本地化处（clip/guard.go）。
+	if req.URL != "" {
+		if err := clip.ValidateSourceURL(req.URL); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
+			return
+		}
+	}
 
 	// 净化 HTML → Markdown（按 mode 分支），并就地本地化页面图片。
 	var (
@@ -47,6 +55,7 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 			PageURL: req.URL,
 			Mode:    req.Mode,
 			Blobs:   s.blobs,
+			Client:  s.mediaClient, // nil → clip 包的带闸门默认客户端（M10-T27）
 		})
 		if err != nil {
 			writeInternalError(w, r, err)

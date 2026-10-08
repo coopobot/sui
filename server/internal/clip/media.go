@@ -101,7 +101,8 @@ type MediaAsset struct {
 }
 
 // defaultMediaClient 是共享的默认下载客户端（复用连接池）。
-var defaultMediaClient = &http.Client{Timeout: defaultImageTimeout}
+// M10-T27：默认客户端带**出网地址闸门**（拨号时校验目标 IP，见 guard.go）。
+var defaultMediaClient = newGuardedClient(defaultImageTimeout)
 
 // localizeImages 遍历 doc 中全部 <img>，就地改写可下载图片的 src 为
 // `sui://<sha256>`，并把字节写入内容寻址存储（FR-38）。
@@ -255,12 +256,10 @@ func largestFromSrcset(srcset string) string {
 func fetchAndStore(
 	client *http.Client, blobs blob.Store, rawURL string, maxBytes int64, deadline time.Time,
 ) (MediaAsset, error) {
-	u, err := url.Parse(rawURL)
+	// M10-T27：仅 http(s)；IP 字面量落在禁止范围时直接失败，主机名交给拨号闸门判定。
+	u, err := ValidateOutboundURL(rawURL)
 	if err != nil {
-		return MediaAsset{}, fmt.Errorf("clip: 解析图片地址失败: %w", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return MediaAsset{}, fmt.Errorf("clip: 不支持的协议 %q", u.Scheme)
+		return MediaAsset{}, err
 	}
 
 	timeout := defaultImageTimeout

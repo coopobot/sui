@@ -21,6 +21,9 @@ type Server struct {
 	blobs blob.Store
 	sync  *sync.Protocol
 	hub   *ws.Hub
+	// mediaClient 供剪藏媒体本地化使用；nil → 由 clip 包使用带**出网地址闸门**的默认客户端
+	// （M10-T27）。仅测试会注入不带闸门的客户端。
+	mediaClient *http.Client
 }
 
 // New 创建带依赖的 API Server。
@@ -35,6 +38,12 @@ func New(st *store.Store, blobs blob.Store) *Server {
 
 // Hub 返回 WebSocket 集线器（供内部触发通知用）。
 func (s *Server) Hub() *ws.Hub { return s.hub }
+
+// SetMediaClient 注入剪藏媒体下载客户端。
+//
+// **仅供测试**：生产默认走 clip 包内带出网地址闸门的客户端（M10-T27 / clip/guard.go），
+// 既有媒体用例用 127.0.0.1 的 httptest 服务器供图，必须显式注入不带闸门的客户端。
+func (s *Server) SetMediaClient(c *http.Client) { s.mediaClient = c }
 
 // Router 返回根 mux：CORS 包裹 + 公开路由 + 受保护路由。
 func (s *Server) Router() http.Handler {
