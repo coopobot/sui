@@ -17,8 +17,9 @@ import (
 
 // Hub 管理所有 WebSocket 连接并广播消息。
 type Hub struct {
-	mu      sync.RWMutex
-	clients map[*websocket.Conn]bool
+	mu       sync.RWMutex
+	clients  map[*websocket.Conn]bool
+	patterns []string
 }
 
 // NewHub 创建一个新的 Hub。
@@ -28,13 +29,28 @@ func NewHub() *Hub {
 	}
 }
 
+// SetOriginPatterns 设置可接受的跨域 Origin 模式（M10-T23 / BR-52.5）。
+//
+// 必须在开始监听前调用（Router 组装期）。空列表 = **只接受同源 Origin**
+// （nhooyr/websocket 在 OriginPatterns 为空时按请求 Host 做同源校验），
+// 即「未配置白名单时不接受跨域 Origin」。
+func (h *Hub) SetOriginPatterns(patterns []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.patterns = patterns
+}
+
 // Serve 处理 WebSocket 升级与连接生命周期。
 //
 // M4/BR-35.x：鉴权由上层（api.handleWS）在升级前完成，故进入 Serve 的连接均视为
 // 已鉴权，广播只发往此集合。
 func (h *Hub) Serve(w http.ResponseWriter, r *http.Request) {
+	h.mu.RLock()
+	patterns := h.patterns
+	h.mu.RUnlock()
+
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"}, // 允许跨域（鉴权由上层保证）
+		OriginPatterns: patterns,
 	})
 	if err != nil {
 		log.Printf("ws accept error: %v", err)

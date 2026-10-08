@@ -1,11 +1,16 @@
 // Package cors 提供简单的 CORS 中间件。
+//
+// M10-T23 / BR-52.5：**默认拒绝**——SUI_ALLOWED_ORIGINS 未配置时不再回显任意
+// Origin（v0.10.x 的「开发模式全放行」已注销）。不带 Origin 的调用（同源 /
+// 桌面端 / 移动端 / 浏览器扩展 / curl）不受影响。
 package cors
 
 import "net/http"
 
-// Middleware 返回一个 CORS 中间件，允许指定来源（或 *）。
+// Middleware 返回 CORS 中间件：Allow-Origin 仅来自**精确匹配**的白名单。
 //
-// 处理预检（OPTIONS）请求，以及给正常响应加 CORS 头。
+// allowedOrigins 为空 → 不写任何 Access-Control-Allow-* 头（预检仍回 204，
+// 但浏览器因缺少 Allow-Origin 而拒绝跨域请求）。
 func Middleware(allowedOrigins []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -16,10 +21,6 @@ func Middleware(allowedOrigins []string, next http.Handler) http.Handler {
 					allowOrigin = origin
 					break
 				}
-			}
-			// 开发模式：如果允许列表为空，也允许（方便本地调试）
-			if len(allowedOrigins) == 0 {
-				allowOrigin = origin
 			}
 		}
 		if allowOrigin != "" {

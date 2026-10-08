@@ -1,4 +1,4 @@
-// Sui server — M0 skeleton.
+// Sui server — 单二进制自托管入口。
 // Assembles the HTTP server and runs it with graceful shutdown.
 package main
 
@@ -27,7 +27,7 @@ func main() {
 	if dataDir == "" {
 		dataDir = "./data"
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		log.Fatalf("mkdir data: %v", err)
 	}
 
@@ -43,10 +43,14 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      api.New(st, blobs).Router(),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Addr:    addr,
+		Handler: api.New(st, blobs).Router(),
+		// M10-T25 / BR-52.5（input-validation.md §8）：补 ReadHeaderTimeout 防慢速
+		// 请求头攻击、补 IdleTimeout 回收keep-alive 空闲连接；既有 Read/Write 保持不变。
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {

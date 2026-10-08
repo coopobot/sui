@@ -3,6 +3,7 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -37,6 +38,11 @@ func (s *Server) Hub() *ws.Hub { return s.hub }
 
 // Router 返回根 mux：CORS 包裹 + 公开路由 + 受保护路由。
 func (s *Server) Router() http.Handler {
+	// M10-T23 / BR-52.5：CORS 与 WebSocket 共用同一份来源白名单；
+	// 未配置（nil）时 CORS 不回任何 Allow-* 头、WS 只接受同源 Origin。
+	origins := allowedOrigins()
+	s.hub.SetOriginPatterns(wsOriginPatterns(origins))
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealth)
 	mux.HandleFunc("GET /api/v1/ping", s.handlePing)
@@ -56,11 +62,13 @@ func (s *Server) Router() http.Handler {
 	mux.Handle("/api/v1/clips", authWrap)
 	mux.Handle("/api/v1/logout", authWrap)
 
-	// CORS 中间件包裹最外层（M4/BR-36.3：SUI_ALLOWED_ORIGINS 白名单，未配置时开发默认）
-	return cors.Middleware(allowedOrigins(), mux)
+	// CORS 中间件包裹最外层（M4/BR-36.3 + M10-T23：白名单精确匹配；未配置 = 默认拒绝）
+	return cors.Middleware(origins, mux)
 }
 
-// allowedOrigins 解析 SUI_ALLOWED_ORIGINS（逗号分隔）；为空返回 nil（开发模式全允许）。
+// allowedOrigins 解析 SUI_ALLOWED_ORIGINS（逗号分隔）；为空返回 nil。
+//
+// M10-T23：nil = **默认拒绝**（不再回显任意 Origin，见 input-validation.md §6）。
 func allowedOrigins() []string {
 	raw := strings.TrimSpace(os.Getenv("SUI_ALLOWED_ORIGINS"))
 	if raw == "" {
@@ -77,6 +85,10 @@ func allowedOrigins() []string {
 }
 
 // handleWS 校验 WS 连接鉴权（?token= 或 Bearer），未通过 → 401（M4/BR-35.x）。
+//
+// TODO(M10-T26 + M10-T28)：改为只用 Authorization 头 / Sec-WebSocket-Protocol 承载令牌，
+// 移除查询串 ?token=（查询串会进访问日志与浏览器历史）。须与服务端、客户端同步切换，
+// 故与客户端改造（T28）一并落地，避免中间态把现有客户端打断。
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -106,4 +118,23 @@ func NewRouter(s *Server) *http.ServeMux {
 	sub.HandleFunc("POST /api/v1/clips", s.handleClip)
 	sub.HandleFunc("POST /api/v1/logout", s.handleLogout)
 	return sub
+}
+
+// wsOriginPatterns 把 SUI_ALLOWED_ORIGINS 的**完整来源**转换成 nhooyr/websocket 需要的
+// **主机名**模式（该库按 Origin 的 host 匹配，不比对 scheme）。
+//
+// "*" 为显式配置的「允许任意来源」，原样透传；空（未配置）→ 只接受同源 Origin。
+func wsOriginPatterns(origins []string) []string {
+	out := make([]string, 0, len(origins))
+	for _, o := range origins {
+		if o == "*" {
+			return []string{"*"}
+		}
+		u, err := url.Parse(o)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		out = append(out, u.Host)
+	}
+	return out
 }

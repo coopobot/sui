@@ -20,7 +20,13 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		HTML  string `json:"html"`
 		Mode  string `json:"mode"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// M10-T25：整包读入前先限长（超限 413）。
+	body := http.MaxBytesReader(w, r.Body, maxBodyBytes())
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		if isTooLarge(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "payload too large"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad request"})
 		return
 	}
@@ -43,7 +49,7 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 			Blobs:   s.blobs,
 		})
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "purify failed: " + err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		title = result.Title
@@ -71,7 +77,7 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	if req.URL != "" {
 		existing, err := s.store.GetNoteBySourceURL(req.URL)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 		if existing != "" {
@@ -88,7 +94,7 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	attachments := make([]sync.AttachmentItem, 0, len(assets))
 	for _, a := range assets {
 		attachments = append(attachments, sync.AttachmentItem{
-			ID:         "att-" + store.HashBytes([]byte(noteID+"|"+a.SHA256))[:32],
+			ID:         "att-" + store.HashBytes([]byte(noteID + "|" + a.SHA256))[:32],
 			Filename:   a.Filename,
 			MimeKind:   a.MimeKind,
 			ByteSize:   a.ByteSize,
@@ -100,7 +106,7 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 	// 通过 sync 协议写入（先获取当前版本，再 push）
 	current, err := s.store.GetNote(noteID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 	baseVer := 0
@@ -118,14 +124,14 @@ func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
 		Attachments:  attachments,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeInternalError(w, r, err)
 		return
 	}
 
 	// 登记剪藏幂等键（普通笔记不写该列，M4/BR-34.3）
 	if req.URL != "" {
 		if err := s.store.SetNoteSourceURL(noteID, req.URL); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			writeInternalError(w, r, err)
 			return
 		}
 	}
