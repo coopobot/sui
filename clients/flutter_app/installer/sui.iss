@@ -15,6 +15,12 @@
   #error 缺少版本号：请用 ISCC /DMyAppVersion=<x.y.z> 编译。版本真源 = clients/flutter_app/pubspec.yaml 的 version 字段，可用 scripts/version.sh show 查看。
 #endif
 
+; build number（真源 version 的 +BN 段，规则 M*10000+m*100+p）。仅用于把 setup.exe 的
+; 四段版本资源填满（缺省 0，便于手工编译）。
+#ifndef MyAppBuild
+  #define MyAppBuild "0"
+#endif
+
 #define MyAppName      "随手记 Sui"
 #define MyAppPublisher "com.sui"
 #define MyAppExeName   "sui_flutter_app.exe"
@@ -28,6 +34,13 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+; setup.exe 自身的版本资源：FileVersion 取四段（含 build number），ProductVersion 与 AppVersion 对齐。
+; 不设 VersionInfoVersion 时，资源管理器「文件版本」会显示为空白。
+VersionInfoVersion={#MyAppVersion}.{#MyAppBuild}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoProductName={#MyAppName}
+VersionInfoDescription={#MyAppName} Setup
 DefaultDirName={autopf}\Sui
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
