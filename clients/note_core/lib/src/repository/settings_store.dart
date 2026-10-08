@@ -14,6 +14,8 @@ class SettingsStore {
   static const _kToken = 'sync.token';
   static const _kRefreshToken = 'sync.refreshToken';
   static const _kDeviceId = 'device.id';
+  /// 受保护通道的服务端指纹（TOFU 信任根，M10-T27 / FR-50，auth.md §9.2）。
+  static const _kChannelFingerprint = 'channel.fingerprint';
   static const _kCacheLimit = 'blob.cacheLimitBytes';
 
   Future<String?> get(String key) async {
@@ -86,4 +88,15 @@ class SettingsStore {
   }
 
   Future<void> setCacheLimitBytes(int bytes) => set(_kCacheLimit, '$bytes');
+
+  /// 受保护通道的服务端指纹；未记录（首次连接）返回 null。
+  ///
+  /// 首次握手成功后记录；此后**不一致即阻断**（疑似中间人）——判定在 `SecureChannelClient`。
+  Future<String?> channelFingerprint() async {
+    final v = await get(_kChannelFingerprint);
+    return (v == null || v.isEmpty) ? null : v;
+  }
+
+  Future<void> setChannelFingerprint(String fingerprint) =>
+      set(_kChannelFingerprint, fingerprint.trim());
 }

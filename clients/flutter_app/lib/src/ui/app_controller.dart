@@ -847,6 +847,11 @@ class AppController extends ChangeNotifier {
       blobStore: _blobStore,
       onTokensRefreshed: _onTokensRefreshed,
       onAuthExpired: _onAuthExpired,
+      // M10-T27 / FR-50：`http://` 地址自动套**受保护通道**（`https` 走 TLS，不叠加，§9.1）。
+      httpClient: channelAwareClient(
+        baseUrl: normalized.baseUrl,
+        trust: SettingsChannelTrustStore(_settings),
+      ),
     );
     _syncState = SyncState.idle;
     _syncError = null;
@@ -903,7 +908,7 @@ class AppController extends ChangeNotifier {
 
   /// 探测服务端：版本号 + 是否已完成首启建号（M4/BR-33.4）。
   Future<({String version, bool initialized})> probeServer(String baseUrl) =>
-      _authClient().pingInfo(baseUrl);
+      _authClient(baseUrl).pingInfo(baseUrl);
 
   /// 探测服务端连通性，成功返回服务端版本号，失败抛异常（UI 捕获展示）。
   Future<String> testConnection(String baseUrl) async =>
@@ -916,7 +921,7 @@ class AppController extends ChangeNotifier {
     required String password,
   }) async {
     try {
-      final session = await _authClient()
+      final session = await _authClient(baseUrl)
           .register(baseUrl: baseUrl, username: username, password: password);
       await connect(SyncConfig(
         baseUrl: baseUrl,
@@ -937,7 +942,7 @@ class AppController extends ChangeNotifier {
     required String password,
   }) async {
     try {
-      final session = await _authClient()
+      final session = await _authClient(baseUrl)
           .login(baseUrl: baseUrl, username: username, password: password);
       await connect(SyncConfig(
         baseUrl: baseUrl,
@@ -990,7 +995,14 @@ class AppController extends ChangeNotifier {
 
   String _blobRoot() => _dataDir == null ? '' : p.join(_dataDir, 'blobs');
 
-  AuthClient _authClient() => _auth ??= AuthClient();
+  /// 账号客户端（M10-T27 / FR-50）：`http://` 地址自动套**受保护通道**传输接缝
+  /// （握手 + TOFU 指纹核对 + 逐请求 AEAD）；`https` 走 TLS，不叠加。
+  AuthClient _authClient(String baseUrl) => _auth ??= AuthClient(
+        httpClient: channelAwareClient(
+          baseUrl: baseUrl,
+          trust: SettingsChannelTrustStore(_settings),
+        ),
+      );
 
   Future<void> _teardownConnection() async {
     _connGeneration++;
