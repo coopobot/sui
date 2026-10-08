@@ -800,6 +800,7 @@ class AppController extends ChangeNotifier {
         await _settings.saveSyncConfig(
           baseUrl: normalized.baseUrl,
           token: normalized.token,
+          refreshToken: normalized.refreshToken,
         );
       } catch (error, stackTrace) {
         debugPrint('[AppController] 同步配置写入失败：${normalized.baseUrl} → $error');
@@ -823,7 +824,10 @@ class AppController extends ChangeNotifier {
       baseUrl: normalized.baseUrl,
       deviceId: normalized.deviceId,
       token: normalized.token,
+      refreshToken: normalized.refreshToken,
       blobStore: _blobStore,
+      onTokensRefreshed: _onTokensRefreshed,
+      onAuthExpired: _onAuthExpired,
     );
     _syncState = SyncState.idle;
     _syncError = null;
@@ -844,7 +848,8 @@ class AppController extends ChangeNotifier {
       debugPrint('[AppController] 同步配置清理失败 → $error');
       debugPrintStack(stackTrace: stackTrace, maxFrames: 8);
     }
-    _config = _config.copyWith(baseUrl: '', token: '');
+    // 刷新令牌一并清掉：断开后不应残留长期凭证（M10/BR-49.4）。
+    _config = _config.copyWith(baseUrl: '', token: '', refreshToken: '');
     await _teardownConnection();
     _syncState = SyncState.unconfigured;
     _syncError = null;
@@ -892,11 +897,12 @@ class AppController extends ChangeNotifier {
     required String password,
   }) async {
     try {
-      final token = await _authClient()
+      final session = await _authClient()
           .register(baseUrl: baseUrl, username: username, password: password);
       await connect(SyncConfig(
         baseUrl: baseUrl,
-        token: token,
+        token: session.accessToken,
+        refreshToken: session.refreshToken,
         deviceId: _config.deviceId,
       ));
       return null;
@@ -912,11 +918,12 @@ class AppController extends ChangeNotifier {
     required String password,
   }) async {
     try {
-      final token = await _authClient()
+      final session = await _authClient()
           .login(baseUrl: baseUrl, username: username, password: password);
       await connect(SyncConfig(
         baseUrl: baseUrl,
-        token: token,
+        token: session.accessToken,
+        refreshToken: session.refreshToken,
         deviceId: _config.deviceId,
       ));
       return null;
@@ -925,14 +932,19 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// 直接以「地址 + 已有 Token」连接。
+  /// 直接以「地址 + 已有令牌」连接。
+  ///
+  /// [refreshToken] 可选：留空则只能用到访问令牌过期为止（M10 起访问令牌默认 30 分钟），
+  /// 之后须重新登录。
   Future<void> connectWithToken({
     required String baseUrl,
     required String token,
+    String refreshToken = '',
   }) =>
       connect(SyncConfig(
         baseUrl: baseUrl,
         token: token,
+        refreshToken: refreshToken,
         deviceId: _config.deviceId,
       ));
 
@@ -982,6 +994,51 @@ class AppController extends ChangeNotifier {
     // 附件缓存不随连接销毁：本地字节与记账都要留着（离线可用）。
   }
 
+  /// 令牌刷新成功（M10/FR-49）：落盘新令牌并**重连 WS**。
+  ///
+  /// 必须重连：WS 子协议里带的是旧访问令牌，不重连则实时通知静默失效（只剩 30s 兜底拉取）。
+  Future<void> _onTokensRefreshed(
+      String accessToken, String refreshToken) async {
+    _config = _config.copyWith(
+      token: accessToken,
+      refreshToken: refreshToken,
+    );
+    try {
+      await _settings.saveSyncConfig(
+        baseUrl: _config.baseUrl,
+        token: accessToken,
+        refreshToken: refreshToken,
+      );
+    } catch (error) {
+      debugPrint('[AppController] 刷新后的令牌写入失败 → $error');
+    }
+    await _reopenWs();
+    notifyListeners();
+  }
+
+  /// 刷新令牌失效（refresh-expired / refresh-revoked）：提示重新登录。
+  ///
+  /// 只置错误态、**不清本地配置与数据**：用户重新登录即可（避免误清丢数据）。
+  Future<void> _onAuthExpired() async {
+    _syncError = '登录已失效，请重新登录';
+    _syncState = SyncState.error;
+    notifyListeners();
+  }
+
+  /// 先关旧连接再用当前令牌重新握手。
+  Future<void> _reopenWs() async {
+    await _wsSub?.cancel();
+    _wsSub = null;
+    final ws = _ws;
+    _ws = null;
+    if (ws != null) {
+      try {
+        await ws.sink.close().timeout(const Duration(milliseconds: 500));
+      } catch (_) {}
+    }
+    _openWs();
+  }
+
   /// 订阅服务端变更广播：收到通知即拉取（多端即时感知）。
   void _openWs() {
     final base = _config.baseUrl;
@@ -1017,7 +1074,7 @@ class AppController extends ChangeNotifier {
       return switch (e.statusCode) {
         409 => '用户已存在，请改用「登录」',
         403 => '该服务端已初始化（单用户实例），请改用「登录并连接」',
-        401 => '用户名或密码错误',
+        401 => _authErrorText(e.body),
         400 => '请求无效（用户名/密码不能为空）',
         _ => 'HTTP ${e.statusCode}: ${e.body}',
       };
@@ -1031,6 +1088,21 @@ class AppController extends ChangeNotifier {
       return '无法连接服务端，请检查「服务端地址」是否正确、服务是否已启动';
     }
     return msg;
+  }
+
+  /// 401 的文案按服务端**可区分错误码**给出（auth.md §5）：
+  /// 令牌类问题与「用户名 / 密码错误」不是一回事，混为一谈会误导用户反复试密码。
+  String _authErrorText(String body) {
+    if (body.contains('refresh-expired') || body.contains('refresh-revoked')) {
+      return '登录已失效，请重新登录';
+    }
+    if (body.contains('token-expired')) {
+      return '登录状态已过期（正在自动刷新）';
+    }
+    if (body.contains('invalid_token')) {
+      return '登录已失效，请重新登录';
+    }
+    return '用户名或密码错误';
   }
 
   // ---- 修订历史 ----
