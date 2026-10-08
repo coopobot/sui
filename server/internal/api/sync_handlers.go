@@ -68,6 +68,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // handlePush 处理客户端批量推送（逐条调用 sync.Push，汇总结果）。
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
+	// M10：大请求体路由单独延长**读**期限（§8）；须在读 body 之前调用。
+	extendReadDeadline(w)
 	var req struct {
 		ClientID  string              `json:"clientId"`
 		Items     []sync.PushItem     `json:"items"`
@@ -284,6 +286,8 @@ func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
 // 只负责字节与登记，不调整引用计数——refcount 由附件映射（sync/push 携带的
 // attachments）驱动，见 store.SyncAttachments。
 func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
+	// M10：大请求体路由单独延长**读**期限（§8）；须在读 body 之前调用。
+	extendReadDeadline(w)
 	hash := r.PathValue("hash")
 	if !validSHA256(hash) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
@@ -331,6 +335,8 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 
 // handleBlobGet 下载 hash 对应的 blob 字节。
 func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
+	// M10：流式下载路由单独延长**写**期限（§8）。
+	extendWriteDeadline(w)
 	hash := r.PathValue("hash")
 	if !validSHA256(hash) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})

@@ -14,6 +14,8 @@ import (
 //
 // 幂等键为 notes.source_url（M4/BR-34.2），与 mode 无关（BR-37.5）。
 func (s *Server) handleClip(w http.ResponseWriter, r *http.Request) {
+	// M10：大请求体路由单独延长**读**期限（§8）；须在读 body 之前调用。
+	extendReadDeadline(w)
 	var req struct {
 		URL   string `json:"url"`
 		Title string `json:"title"`
