@@ -1734,6 +1734,23 @@ class AppController extends ChangeNotifier {
   bool get hasUnlockedNotebook =>
       _repository.keyStore.unlockedNotebookIds.isNotEmpty;
 
+  /// 当前选中笔记的摘要（未选中 / 不在当前列表时为 null）。
+  NoteSummary? get selectedNoteSummary {
+    final id = _selectedNoteId;
+    if (id == null) return null;
+    for (final s in _notes) {
+      if (s.note.id == id) return s;
+    }
+    return null;
+  }
+
+  /// 选中笔记是否「加密且未解锁」：UI 据此渲染**占位面板**而不是编辑器（§6.3）。
+  bool get selectedNoteLocked => selectedNoteSummary?.note.locked ?? false;
+
+  /// 选中笔记所属笔记本（解锁 / 手动锁定入口用）。
+  String? get selectedNoteNotebookId => selectedNoteSummary?.note.notebookId;
+
+
   /// 解锁加密笔记本。密码错误返回 `false`（不抛异常，由 UI 提示「锁定密码错误」）。
   Future<bool> unlockNotebook(String notebookId, String password) async {
     try {
