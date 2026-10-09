@@ -22,6 +22,7 @@ go build -o bin/sui-server ./cmd/sui-server
 |--------|--------|------|
 | 监听地址 | `:8080` | 用环境变量 `SUI_ADDR` 覆盖，如 `SUI_ADDR=:9000` |
 | 数据目录 | `./data` | 用环境变量 `SUI_DATA` 覆盖，如 `SUI_DATA=/var/lib/sui` |
+| 允许的跨源来源 | **空（默认拒绝）** | `SUI_ALLOWED_ORIGINS`，逗号分隔，如 `http://localhost:8000,https://notes.example`；**Flutter Web 端必须配置**（页面与 API 不同源）。受保护通道的自定义头已在内置白名单内，无需另行放行 |
 
 数据目录包含：
 
@@ -485,7 +486,7 @@ sui.example.com {
 | 3 | HTTPS | 无内置 TLS；`http://` 下客户端启用**应用层受保护通道**（M10 / FR-50，TOFU + 逐请求 AEAD） | 公网仍**建议强制 TLS**：通道保护内容，TLS 另外提供服务器身份与合规性 |
 | 4 | 限流 | 无 | `register` / `login` 加速率限制，防爆破 |
 | 5 | WebSocket 鉴权 | **请求头 / 子协议携带令牌且与会话绑定**（M4 + M10 §4.5；会话吊销即断开） | 升级头不在通道内 → 可改为经通道换取**一次性短时 ticket** |
-| 6 | CORS | **来源白名单精确匹配，未配置 = 默认拒绝**（M10-T23） | 生产配置具体来源 |
+| 6 | CORS | **来源白名单精确匹配，未配置 = 默认拒绝**（M10-T23；`SUI_ALLOWED_ORIGINS`，且受保护通道的 `X-Sui-Enc`/`X-Sui-Eph`/`X-Sui-Req-Id` 与响应标记头 `X-Sui-Enc` 已列入放行/暴露白名单，v0.11.2） | 生产只配自己的前端来源；Web 端跨源必须配置 |
 | 7 | 资源上限 | 请求体 / 单 blob / 条目数上限与**大传输路由单独延长读写期限**（M10-T25） | nginx `client_max_body_size` 与上表对齐（双层限长） |
 | 8 | 数据备份 | 手动 | 定期备份数据目录（`sui.db` + `blobs/` + `securechan.key`） |
 

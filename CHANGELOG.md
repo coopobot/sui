@@ -7,6 +7,35 @@
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-10-08
+
+M10 补丁：**CORS 放行受保护通道的自定义头**（Flutter Web 跨源适配）。用户在 Web 端验证时发现
+「浏览器能打开 `/healthz`，但应用里连不上服务端」——典型跨源症状：`localhost:8000`（Web 端）与
+`localhost:8080`（API）不同源，浏览器对页面发起的 fetch 强制 CORS，而地址栏访问是顶层导航不受约束。
+排查确认两处缺陷（**受保护通道与 CORS 没有一起考虑过**）：
+
+### 修复
+
+- **`Access-Control-Allow-Headers` 缺通道三头**：`X-Sui-Enc` / `X-Sui-Eph` / `X-Sui-Req-Id`
+  未在白名单里 → 加密请求的**预检必被拒**，Web 端根本发不出受保护通道请求。
+- **`Access-Control-Expose-Headers` 只有 `Content-Length`**：Web 端 JS **读不到 `X-Sui-Enc`**，
+  会把**加密响应当成明文**解析——这比直接失败更危险（静默错位）。
+- 两个白名单改为**显式列举的常量**（不用 `*`：带凭证请求下无效，且会让将来新增的头悄悄生效）。
+
+### 测试
+
+- 新增 `server/internal/cors/cors_test.go`（**5 项**，此前该包**无任何测试**）：白名单来源回
+  `Allow-Origin` + `Vary: Origin` 且 `Allow-Headers` 含通道三头、`Expose-Headers` 含 `X-Sui-Enc`；
+  未列来源不回 `Allow-Origin`；**空白名单默认拒绝**（`SUI_ALLOWED_ORIGINS` 未配置）；无 `Origin`
+  的调用不受影响且照常服务；**预检 204 且不进入下游 handler**。
+
+### 文档
+
+- `docs/deployment.md`：环境变量表补 **`SUI_ALLOWED_ORIGINS`**（逗号分隔；未配置 = 默认拒绝），
+  并说明 Web 端跨源必须配置、且通道自定义头已在白名单内；§9 安全清单的 CORS 行同步。
+- `docs/api-reference.md`：受保护通道章节补「跨源（Flutter Web）注意」——自定义请求头与响应标记头
+  已列入 CORS 白名单，自建前端若走别的中间层需自行放行/暴露同名头。
+
 ## [0.11.1] - 2026-10-08
 
 M10 补丁：补齐「**设为加密笔记本**」入口。M10 交付时，加密笔记本的解锁 / 回锁 / 占位面板 / 空闲

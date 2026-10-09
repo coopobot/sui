@@ -75,6 +75,11 @@ GET /api/v1/crypto/handshake            # 公开；返回 serverPub + fingerprin
   未启用通道的服务端握手返回 `503 {"error":"channel-disabled"}`
 * **明文请求仍然接受**（通道是加成而非强制）；WS 升级头不在通道内（已知边界，见
   [architecture.md §8.3](architecture.md#83-未实现的设计项)）
+* **跨源（Flutter Web 等）**：服务端 CORS 是**白名单精确匹配、未配置默认拒绝**，需用
+  `SUI_ALLOWED_ORIGINS` 列出前端来源；通道的三个自定义请求头与响应标记头 `X-Sui-Enc` 内置在
+  放行 / 暴露白名单里（v0.11.2 起）。若在中间层（nginx 等）自行处理 CORS，**必须**同样放行
+  `X-Sui-Enc` / `X-Sui-Eph` / `X-Sui-Req-Id` 并暴露 `X-Sui-Enc`，否则预检失败、或前端读不到
+  密文标记而把密文当明文解析。
 
 ## push 请求体
 
