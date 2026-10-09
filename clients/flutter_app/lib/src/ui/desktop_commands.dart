@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../platform/desktop_platform.dart';
 import 'app_controller.dart';
 import 'markdown_editor.dart';
 import 'notebook_tree.dart';
+import 'sync_settings_dialog.dart';
 import 'tag_overview.dart';
 
 /// 壳层命令标识（ADR-011 决策 5 / 详细设计 §4.2）。
@@ -38,6 +41,9 @@ enum DesktopCommandId {
   editorModeSource,
   editorModePreview,
   toggleRevisionPanel,
+
+  // 同步
+  reconcileAll,
 
   // 帮助
   openDocs,
@@ -280,6 +286,17 @@ final Map<DesktopCommandId, DesktopCommand> desktopCommands = {
     checked: (controller) => controller.showRevisionPanel,
     isEnabled: (controller) => controller.selectedNoteId != null,
     invoke: (context, controller) => controller.toggleRevisionPanel(),
+  ),
+
+  // ---- 同步 ----
+  DesktopCommandId.reconcileAll: DesktopCommand(
+    label: '全部重新同步',
+    // M12（FR-54 / ui-spec §20.5 入口二）：与同步设置对话框内的按钮**同一命令、
+    // 同一实现**（[showReconcileAllDialog] 复用 [SyncReconcilePanel]），
+    // 未连接服务端时置灰。
+    isEnabled: (controller) => controller.canReconcile,
+    invoke: (context, controller) =>
+        unawaited(showReconcileAllDialog(context, controller)),
   ),
 
   // ---- 帮助 ----

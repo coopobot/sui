@@ -18,6 +18,15 @@ class Notebooks extends Table {
   // M10-T29（FR-51）：是否加密笔记本 + 非敏感加密元数据（算法 / KDF 参数 / salt / verifier）。
   BoolColumn get encrypted => boolean().withDefault(const Constant(false))();
   TextColumn get cryptoMeta => text().withDefault(const Constant(''))();
+  // M12（FR-53）：逐项同步状态 —— **纯本地记账**（不进同步净荷、服务端不存储）。
+  // 0=已同步 / 1=待上传 / 2=仅本地 / 3=冲突 / 4=同步失败（见 EntitySyncState）。
+  IntColumn get syncState => integer().withDefault(const Constant(1))();
+  TextColumn get syncError => text().withDefault(const Constant(''))();
+  DateTimeColumn get syncErrorAt => dateTime().nullable()();
+  DateTimeColumn get syncCheckedAt => dateTime().nullable()();
+  // M12：用户选择「以云端为准」后**按住**的项（`sync_state == 仅本地` 且不再自动上行）；
+  // 单项重试 / 核对补齐会清除该标记（FR-55 / BR-55.2）。
+  BoolColumn get syncHold => boolean().withDefault(const Constant(false))();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -32,6 +41,15 @@ class Tags extends Table {
   DateTimeColumn get createdAt => dateTime()();
   DateTimeColumn get updatedAt => dateTime()();
   IntColumn get version => integer().withDefault(const Constant(0))();
+  // M12（FR-53）：逐项同步状态 —— **纯本地记账**（不进同步净荷、服务端不存储）。
+  // 0=已同步 / 1=待上传 / 2=仅本地 / 3=冲突 / 4=同步失败（见 EntitySyncState）。
+  IntColumn get syncState => integer().withDefault(const Constant(1))();
+  TextColumn get syncError => text().withDefault(const Constant(''))();
+  DateTimeColumn get syncErrorAt => dateTime().nullable()();
+  DateTimeColumn get syncCheckedAt => dateTime().nullable()();
+  // M12：用户选择「以云端为准」后**按住**的项（`sync_state == 仅本地` 且不再自动上行）；
+  // 单项重试 / 核对补齐会清除该标记（FR-55 / BR-55.2）。
+  BoolColumn get syncHold => boolean().withDefault(const Constant(false))();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -56,6 +74,15 @@ class Notes extends Table {
   TextColumn get sourceDevice => text().withDefault(const Constant(''))();
   // M10-T29（FR-51）：镜像所属笔记本的加密状态（供列表占位与不解密搬运，避免联表）。
   BoolColumn get encrypted => boolean().withDefault(const Constant(false))();
+  // M12（FR-53）：逐项同步状态 —— **纯本地记账**（不进同步净荷、服务端不存储）。
+  // 0=已同步 / 1=待上传 / 2=仅本地 / 3=冲突 / 4=同步失败（见 EntitySyncState）。
+  IntColumn get syncState => integer().withDefault(const Constant(1))();
+  TextColumn get syncError => text().withDefault(const Constant(''))();
+  DateTimeColumn get syncErrorAt => dateTime().nullable()();
+  DateTimeColumn get syncCheckedAt => dateTime().nullable()();
+  // M12：用户选择「以云端为准」后**按住**的项（`sync_state == 仅本地` 且不再自动上行）；
+  // 单项重试 / 核对补齐会清除该标记（FR-55 / BR-55.2）。
+  BoolColumn get syncHold => boolean().withDefault(const Constant(false))();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -162,7 +189,7 @@ class AppDatabase extends _$AppDatabase {
       AppDatabase(openConnection(basePath: basePath));
 
   @override
-  int get schemaVersion => 7;
+  int get schemaVersion => 8;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -186,6 +213,9 @@ class AppDatabase extends _$AppDatabase {
           }
           if (from <= 6) {
             await _migrateToV7(m);
+          }
+          if (from <= 7) {
+            await _migrateToV8(m);
           }
         },
       );
@@ -214,6 +244,55 @@ class AppDatabase extends _$AppDatabase {
     await m.addColumn(notebooks, notebooks.encrypted);
     await m.addColumn(notebooks, notebooks.cryptoMeta);
     await m.addColumn(notes, notes.encrypted);
+  }
+
+  /// v7 -> v8：逐项同步状态（M12 / FR-53）。
+  ///
+  /// **保守初值**（守 BR-53.6「不得凭空标为已同步」）：
+  ///   * 存在未确认修订（`revisions.server_version IS NULL`）→ 待上传（列默认值）；
+  ///   * 否则 `version == 0`（从未被任何服务端确认）→ 仅本地；
+  ///   * 其余（`version > 0`，有服务端基线但本端无法离线确认）→ 待上传。
+  /// 首次连接并完成核对后由同步层**整体重算**（BR-55.4）。
+  Future<void> _migrateToV8(Migrator m) async {
+    // 幂等 + 容错：真实 v7 库八表齐全；合成 / 部分库（如迁移用例的最小化夹具）可能缺表，
+    // 逐表探测后再补列，避免「老库打不开」。
+    if (await _hasTable('notes')) {
+      await m.addColumn(notes, notes.syncState);
+      await m.addColumn(notes, notes.syncError);
+      await m.addColumn(notes, notes.syncErrorAt);
+      await m.addColumn(notes, notes.syncCheckedAt);
+      await m.addColumn(notes, notes.syncHold);
+      final hasRevisions = await _hasTable('revisions');
+      await customStatement('UPDATE notes SET sync_state = 2 WHERE version = 0'
+          '${hasRevisions ? ' AND NOT EXISTS (SELECT 1 FROM revisions r '
+              'WHERE r.note_id = notes.id AND r.server_version IS NULL)' : ''}');
+    }
+    if (await _hasTable('notebooks')) {
+      await m.addColumn(notebooks, notebooks.syncState);
+      await m.addColumn(notebooks, notebooks.syncError);
+      await m.addColumn(notebooks, notebooks.syncErrorAt);
+      await m.addColumn(notebooks, notebooks.syncCheckedAt);
+      await m.addColumn(notebooks, notebooks.syncHold);
+      await customStatement(
+          'UPDATE notebooks SET sync_state = 2 WHERE version = 0');
+    }
+    if (await _hasTable('tags')) {
+      await m.addColumn(tags, tags.syncState);
+      await m.addColumn(tags, tags.syncError);
+      await m.addColumn(tags, tags.syncErrorAt);
+      await m.addColumn(tags, tags.syncCheckedAt);
+      await m.addColumn(tags, tags.syncHold);
+      await customStatement('UPDATE tags SET sync_state = 2 WHERE version = 0');
+    }
+  }
+
+  /// 该库里是否已存在某张表（迁移容错用；只读 `sqlite_master`）。
+  Future<bool> _hasTable(String name) async {
+    final rows = await customSelect(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      variables: [Variable.withString(name)],
+    ).get();
+    return rows.isNotEmpty;
   }
 
   /// 便捷：硬删除某笔记及其所有关联（测试/清理用）。

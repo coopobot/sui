@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:note_core/note_core.dart';
 import 'package:provider/provider.dart';
 
 import 'app_controller.dart';
+import 'sync_status_icon.dart';
 
 /// 打开「同步设置」对话框：服务端地址 / 账号 / Token / 附件缓存上限。
 Future<void> showSyncSettingsDialog(
@@ -176,6 +178,10 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
             children: [
               _statusRow(theme, connected),
               const SizedBox(height: 12),
+              // M12（FR-54 / ui-spec §20.5 入口一）：与桌面菜单栏「全部重新同步」
+              // **同一实现**（进度 / 逐项结果 / 取消 / 重试口径一致）。
+              SyncReconcilePanel(controller: _c),
+              const Divider(height: 28),
               TextField(
                 controller: _baseUrl,
                 decoration: const InputDecoration(
@@ -374,4 +380,293 @@ String _fmtBytes(int bytes) {
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
   return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+}
+
+// ---- M12（FR-54）：全局「全部重新同步」（ui-spec §20.5） ----
+
+/// 「全部重新同步」面板：核对补齐的**唯一实现**，两处入口共用（命令单一来源）。
+///
+/// * 入口一：同步设置对话框内嵌（本文件）；
+/// * 入口二：桌面菜单栏「视图 → 同步」/「同步」菜单的 [showReconcileAllDialog]。
+///
+/// 执行中就地给出**进度**（已核对 / 总数 + 当前项）与**取消**；结束后给出**逐项结果**
+/// （名称 + 状态 + 原因），失败项可**单项重试**或重试全部失败项（BR-54.5）。
+/// 取消**不回退**已成功的项（幂等，可再次执行，BR-54.4）。
+class SyncReconcilePanel extends StatefulWidget {
+  const SyncReconcilePanel({
+    super.key,
+    required this.controller,
+    this.autoStart = false,
+  });
+
+  final AppController controller;
+
+  /// 菜单命令以对话框形式打开时自动开始（对话框内嵌时由用户点按钮触发）。
+  final bool autoStart;
+
+  @override
+  State<SyncReconcilePanel> createState() => _SyncReconcilePanelState();
+}
+
+class _SyncReconcilePanelState extends State<SyncReconcilePanel> {
+  bool _running = false;
+  bool _hasResult = false;
+  bool _cancelled = false;
+  ReconcileProgress? _progress;
+  List<SyncIssue> _issues = const <SyncIssue>[];
+  int _downloaded = 0;
+  int _uploaded = 0;
+  String? _message;
+  bool _messageIsError = false;
+  CancelToken? _cancel;
+  final Set<String> _retrying = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.autoStart) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _start(pushLocal: true));
+    }
+  }
+
+  Future<void> _start({required bool pushLocal, bool hasUserDecision = false}) async {
+    if (_running) return;
+    setState(() {
+      _running = true;
+      _hasResult = false;
+      _cancelled = false;
+      _issues = const <SyncIssue>[];
+      _message = null;
+      _messageIsError = false;
+      _progress = const ReconcileProgress(
+          phase: 'check', done: 0, total: 1, detail: '正在核对云端数据');
+      _cancel = CancelToken();
+    });
+    final result = await widget.controller.reconcileAll(
+      pushLocal: pushLocal,
+      hasUserDecision: hasUserDecision,
+      onProgress: (p) {
+        if (mounted) setState(() => _progress = p);
+      },
+      cancel: _cancel,
+    );
+    if (!mounted) return;
+    setState(() {
+      _running = false;
+      _hasResult = result != null;
+      _downloaded = result?.downloaded ?? 0;
+      _uploaded = result?.uploaded ?? 0;
+      _issues = result?.issues ?? const <SyncIssue>[];
+      _cancelled = result?.cancelled ?? false;
+      if (result == null) {
+        // 换库待决与真错误分开说：前者要用户先做选择，不是「失败」。
+        _messageIsError = true;
+        _message = widget.controller.pendingCloudChange != null
+            ? '检测到云端实例已变化：请先完成上方「换库」选择，再重新同步'
+            : (widget.controller.syncError ?? '核对未完成：请确认已连接服务端');
+      }
+    });
+  }
+
+  /// 单项重试（结果列表行内）：只影响该项（BR-54.1）。
+  Future<void> _retry(SyncIssue issue) async {
+    final key = _issueKey(issue);
+    setState(() => _retrying.add(key));
+    final error = await widget.controller.retrySyncFor(issue.kind, issue.id);
+    if (!mounted) return;
+    final state = await widget.controller.repository
+        .syncStateOf(issue.kind, issue.id);
+    if (!mounted) return;
+    setState(() {
+      _retrying.remove(key);
+      _issues = [
+        for (final i in _issues)
+          if (i.kind == issue.kind && i.id == issue.id)
+            SyncIssue(
+              kind: i.kind,
+              id: i.id,
+              label: i.label,
+              state: state,
+              error: error ?? '',
+            )
+          else
+            i,
+      ];
+    });
+  }
+
+  /// 重试全部仍未同步的项（顺序执行，避免并发上行把结果搅乱）。
+  Future<void> _retryAllFailed() async {
+    for (final issue in [..._issues]) {
+      if (issue.state.isSynced) continue;
+      if (!mounted) return;
+      await _retry(issue);
+    }
+  }
+
+  static String _issueKey(SyncIssue issue) => '${issue.kind.table}:${issue.id}';
+
+  static String _phaseLabel(String phase) => switch (phase) {
+        'check' => '正在核对',
+        'upload' => '正在上传',
+        'done' => '已完成',
+        _ => phase,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final unsynced = widget.controller.unsyncedCount;
+    final progress = _progress;
+    final canRun = widget.controller.canReconcile && !_running;
+    final failed = _issues.where((i) => !i.state.isSynced).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            FilledButton.icon(
+              onPressed: canRun ? () => _start(pushLocal: true) : null,
+              icon: const Icon(Icons.sync, size: 18),
+              label: const Text('全部重新同步'),
+            ),
+            const SizedBox(width: 8),
+            SyncStatusBadge(count: unsynced),
+            if (_running) ...[
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: () => _cancel?.cancel(),
+                child: const Text('取消'),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '与云端逐项核对并补齐缺失项（不会丢弃任何一端的内容）',
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.outline),
+        ),
+        Text('未同步：$unsynced 项', style: theme.textTheme.labelSmall),
+        if (_running && progress != null) ...[
+          const SizedBox(height: 8),
+          LinearProgressIndicator(
+            value: progress.total <= 0
+                ? null
+                : (progress.done / progress.total).clamp(0.0, 1.0),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '${_phaseLabel(progress.phase)}：${progress.done}/${progress.total}'
+            '${progress.detail.isEmpty ? '' : ' · ${progress.detail}'}',
+            style: theme.textTheme.bodySmall,
+          ),
+        ],
+        if (_message != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _message!,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: _messageIsError
+                  ? theme.colorScheme.error
+                  : theme.colorScheme.primary,
+            ),
+          ),
+        ],
+        if (_hasResult) ...[
+          const SizedBox(height: 8),
+          Text(
+            '已完成：下行 $_downloaded 项 · 上行 $_uploaded 项'
+            '${_cancelled ? ' · 已取消（已成功的项保留）' : ''}',
+            style: theme.textTheme.bodySmall,
+          ),
+          const SizedBox(height: 4),
+          if (_issues.isEmpty)
+            Text('全部实体已与云端一致', style: theme.textTheme.bodySmall)
+          else ...[
+            Text('仍有 ${_issues.length} 项未同步（可单项重试）：',
+                style: theme.textTheme.bodySmall),
+            const SizedBox(height: 4),
+            for (final issue in _issues) _issueRow(theme, issue),
+            if (failed.length > 1)
+              TextButton(
+                onPressed: _running ? null : _retryAllFailed,
+                child: const Text('重试全部失败项'),
+              ),
+          ],
+        ],
+      ],
+    );
+  }
+
+  Widget _issueRow(ThemeData theme, SyncIssue issue) {
+    final retrying = _retrying.contains(_issueKey(issue));
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SyncStatusIcon(
+            state: issue.state,
+            error: issue.error,
+            kind: issue.kind,
+            size: 16,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('${issue.label}（${issue.state.label}）',
+                    style: theme.textTheme.bodySmall),
+                if (issue.error.trim().isNotEmpty)
+                  Text(
+                    issue.error,
+                    style: theme.textTheme.labelSmall
+                        ?.copyWith(color: theme.colorScheme.error),
+                  ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed:
+                (retrying || issue.state.isSynced) ? null : () => _retry(issue),
+            child: Text(retrying ? '重试中…' : '重试'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 桌面菜单栏「全部重新同步」入口（ui-spec §20.5 入口二）。
+///
+/// 与同步设置对话框内的按钮**共用** [SyncReconcilePanel]，因此命令、进度、
+/// 结果与重试口径完全一致（BR-41.2 等价聚合 / 命令单一来源）。
+Future<void> showReconcileAllDialog(
+  BuildContext context,
+  AppController controller,
+) {
+  return showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('全部重新同步'),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: SyncReconcilePanel(controller: controller, autoStart: true),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
 }

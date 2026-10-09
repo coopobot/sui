@@ -26,4 +26,5 @@ export 'src/util/hashes.dart';
 export 'src/util/ids.dart';
 export 'src/util/mime_kind.dart';
 export 'src/sync/auth_client.dart';
+export 'src/sync/entity_sync_state.dart';
 export 'src/sync/sync_client.dart';

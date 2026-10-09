@@ -1,3 +1,4 @@
+import '../sync/entity_sync_state.dart';
 /// 域模型：笔记本（支持树形嵌套）。
 class Notebook {
   final String id;
@@ -15,6 +16,15 @@ class Notebook {
   /// M10-T29：**非敏感**加密元数据（算法 / KDF 参数 / `salt` / `verifier` 的 JSON）；空串 = 未设置。
   final String cryptoMeta;
 
+  /// M12（FR-53）：本端与云端的一致状态（**纯本地记账**：不进同步净荷、服务端不存储）。
+  final EntitySyncState syncState;
+
+  /// M12：最近一次同步失败原因（`syncState == EntitySyncState.failed` 时有意义）。
+  final String syncError;
+
+  /// M12：最近一次同步失败时间。
+  final DateTime? syncErrorAt;
+
   const Notebook({
     required this.id,
     this.parentId,
@@ -26,6 +36,9 @@ class Notebook {
     this.version = 0,
     this.encrypted = false,
     this.cryptoMeta = '',
+    this.syncState = EntitySyncState.pending,
+    this.syncError = '',
+    this.syncErrorAt,
   });
 
   copyWith({
@@ -37,6 +50,9 @@ class Notebook {
     int? version,
     bool? encrypted,
     String? cryptoMeta,
+    EntitySyncState? syncState,
+    String? syncError,
+    DateTime? syncErrorAt,
   }) {
     return Notebook(
       id: id,
@@ -49,6 +65,9 @@ class Notebook {
       version: version ?? this.version,
       encrypted: encrypted ?? this.encrypted,
       cryptoMeta: cryptoMeta ?? this.cryptoMeta,
+      syncState: syncState ?? this.syncState,
+      syncError: syncError ?? this.syncError,
+      syncErrorAt: syncErrorAt ?? this.syncErrorAt,
     );
   }
 }

@@ -81,6 +81,44 @@ class $NotebooksTable extends Notebooks
       type: DriftSqlType.string,
       requiredDuringInsert: false,
       defaultValue: const Constant(''));
+  static const VerificationMeta _syncStateMeta =
+      const VerificationMeta('syncState');
+  @override
+  late final GeneratedColumn<int> syncState = GeneratedColumn<int>(
+      'sync_state', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(1));
+  static const VerificationMeta _syncErrorMeta =
+      const VerificationMeta('syncError');
+  @override
+  late final GeneratedColumn<String> syncError = GeneratedColumn<String>(
+      'sync_error', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
+  static const VerificationMeta _syncErrorAtMeta =
+      const VerificationMeta('syncErrorAt');
+  @override
+  late final GeneratedColumn<DateTime> syncErrorAt = GeneratedColumn<DateTime>(
+      'sync_error_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  static const VerificationMeta _syncCheckedAtMeta =
+      const VerificationMeta('syncCheckedAt');
+  @override
+  late final GeneratedColumn<DateTime> syncCheckedAt =
+      GeneratedColumn<DateTime>('sync_checked_at', aliasedName, true,
+          type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  static const VerificationMeta _syncHoldMeta =
+      const VerificationMeta('syncHold');
+  @override
+  late final GeneratedColumn<bool> syncHold = GeneratedColumn<bool>(
+      'sync_hold', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("sync_hold" IN (0, 1))'),
+      defaultValue: const Constant(false));
   @override
   List<GeneratedColumn> get $columns => [
         id,
@@ -92,7 +130,12 @@ class $NotebooksTable extends Notebooks
         updatedAt,
         version,
         encrypted,
-        cryptoMeta
+        cryptoMeta,
+        syncState,
+        syncError,
+        syncErrorAt,
+        syncCheckedAt,
+        syncHold
       ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -153,6 +196,30 @@ class $NotebooksTable extends Notebooks
           cryptoMeta.isAcceptableOrUnknown(
               data['crypto_meta']!, _cryptoMetaMeta));
     }
+    if (data.containsKey('sync_state')) {
+      context.handle(_syncStateMeta,
+          syncState.isAcceptableOrUnknown(data['sync_state']!, _syncStateMeta));
+    }
+    if (data.containsKey('sync_error')) {
+      context.handle(_syncErrorMeta,
+          syncError.isAcceptableOrUnknown(data['sync_error']!, _syncErrorMeta));
+    }
+    if (data.containsKey('sync_error_at')) {
+      context.handle(
+          _syncErrorAtMeta,
+          syncErrorAt.isAcceptableOrUnknown(
+              data['sync_error_at']!, _syncErrorAtMeta));
+    }
+    if (data.containsKey('sync_checked_at')) {
+      context.handle(
+          _syncCheckedAtMeta,
+          syncCheckedAt.isAcceptableOrUnknown(
+              data['sync_checked_at']!, _syncCheckedAtMeta));
+    }
+    if (data.containsKey('sync_hold')) {
+      context.handle(_syncHoldMeta,
+          syncHold.isAcceptableOrUnknown(data['sync_hold']!, _syncHoldMeta));
+    }
     return context;
   }
 
@@ -182,6 +249,16 @@ class $NotebooksTable extends Notebooks
           .read(DriftSqlType.bool, data['${effectivePrefix}encrypted'])!,
       cryptoMeta: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}crypto_meta'])!,
+      syncState: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}sync_state'])!,
+      syncError: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}sync_error'])!,
+      syncErrorAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}sync_error_at']),
+      syncCheckedAt: attachedDatabase.typeMapping.read(
+          DriftSqlType.dateTime, data['${effectivePrefix}sync_checked_at']),
+      syncHold: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}sync_hold'])!,
     );
   }
 
@@ -202,6 +279,11 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
   final int version;
   final bool encrypted;
   final String cryptoMeta;
+  final int syncState;
+  final String syncError;
+  final DateTime? syncErrorAt;
+  final DateTime? syncCheckedAt;
+  final bool syncHold;
   const NotebookRow(
       {required this.id,
       this.parentId,
@@ -212,7 +294,12 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       required this.updatedAt,
       required this.version,
       required this.encrypted,
-      required this.cryptoMeta});
+      required this.cryptoMeta,
+      required this.syncState,
+      required this.syncError,
+      this.syncErrorAt,
+      this.syncCheckedAt,
+      required this.syncHold});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -228,6 +315,15 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
     map['version'] = Variable<int>(version);
     map['encrypted'] = Variable<bool>(encrypted);
     map['crypto_meta'] = Variable<String>(cryptoMeta);
+    map['sync_state'] = Variable<int>(syncState);
+    map['sync_error'] = Variable<String>(syncError);
+    if (!nullToAbsent || syncErrorAt != null) {
+      map['sync_error_at'] = Variable<DateTime>(syncErrorAt);
+    }
+    if (!nullToAbsent || syncCheckedAt != null) {
+      map['sync_checked_at'] = Variable<DateTime>(syncCheckedAt);
+    }
+    map['sync_hold'] = Variable<bool>(syncHold);
     return map;
   }
 
@@ -245,6 +341,15 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       version: Value(version),
       encrypted: Value(encrypted),
       cryptoMeta: Value(cryptoMeta),
+      syncState: Value(syncState),
+      syncError: Value(syncError),
+      syncErrorAt: syncErrorAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(syncErrorAt),
+      syncCheckedAt: syncCheckedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(syncCheckedAt),
+      syncHold: Value(syncHold),
     );
   }
 
@@ -262,6 +367,11 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       version: serializer.fromJson<int>(json['version']),
       encrypted: serializer.fromJson<bool>(json['encrypted']),
       cryptoMeta: serializer.fromJson<String>(json['cryptoMeta']),
+      syncState: serializer.fromJson<int>(json['syncState']),
+      syncError: serializer.fromJson<String>(json['syncError']),
+      syncErrorAt: serializer.fromJson<DateTime?>(json['syncErrorAt']),
+      syncCheckedAt: serializer.fromJson<DateTime?>(json['syncCheckedAt']),
+      syncHold: serializer.fromJson<bool>(json['syncHold']),
     );
   }
   @override
@@ -278,6 +388,11 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       'version': serializer.toJson<int>(version),
       'encrypted': serializer.toJson<bool>(encrypted),
       'cryptoMeta': serializer.toJson<String>(cryptoMeta),
+      'syncState': serializer.toJson<int>(syncState),
+      'syncError': serializer.toJson<String>(syncError),
+      'syncErrorAt': serializer.toJson<DateTime?>(syncErrorAt),
+      'syncCheckedAt': serializer.toJson<DateTime?>(syncCheckedAt),
+      'syncHold': serializer.toJson<bool>(syncHold),
     };
   }
 
@@ -291,7 +406,12 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
           DateTime? updatedAt,
           int? version,
           bool? encrypted,
-          String? cryptoMeta}) =>
+          String? cryptoMeta,
+          int? syncState,
+          String? syncError,
+          Value<DateTime?> syncErrorAt = const Value.absent(),
+          Value<DateTime?> syncCheckedAt = const Value.absent(),
+          bool? syncHold}) =>
       NotebookRow(
         id: id ?? this.id,
         parentId: parentId.present ? parentId.value : this.parentId,
@@ -303,6 +423,12 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
         version: version ?? this.version,
         encrypted: encrypted ?? this.encrypted,
         cryptoMeta: cryptoMeta ?? this.cryptoMeta,
+        syncState: syncState ?? this.syncState,
+        syncError: syncError ?? this.syncError,
+        syncErrorAt: syncErrorAt.present ? syncErrorAt.value : this.syncErrorAt,
+        syncCheckedAt:
+            syncCheckedAt.present ? syncCheckedAt.value : this.syncCheckedAt,
+        syncHold: syncHold ?? this.syncHold,
       );
   NotebookRow copyWithCompanion(NotebooksCompanion data) {
     return NotebookRow(
@@ -317,6 +443,14 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
       encrypted: data.encrypted.present ? data.encrypted.value : this.encrypted,
       cryptoMeta:
           data.cryptoMeta.present ? data.cryptoMeta.value : this.cryptoMeta,
+      syncState: data.syncState.present ? data.syncState.value : this.syncState,
+      syncError: data.syncError.present ? data.syncError.value : this.syncError,
+      syncErrorAt:
+          data.syncErrorAt.present ? data.syncErrorAt.value : this.syncErrorAt,
+      syncCheckedAt: data.syncCheckedAt.present
+          ? data.syncCheckedAt.value
+          : this.syncCheckedAt,
+      syncHold: data.syncHold.present ? data.syncHold.value : this.syncHold,
     );
   }
 
@@ -332,14 +466,33 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
           ..write('updatedAt: $updatedAt, ')
           ..write('version: $version, ')
           ..write('encrypted: $encrypted, ')
-          ..write('cryptoMeta: $cryptoMeta')
+          ..write('cryptoMeta: $cryptoMeta, ')
+          ..write('syncState: $syncState, ')
+          ..write('syncError: $syncError, ')
+          ..write('syncErrorAt: $syncErrorAt, ')
+          ..write('syncCheckedAt: $syncCheckedAt, ')
+          ..write('syncHold: $syncHold')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(id, parentId, name, sortOrder, isDeleted,
-      createdAt, updatedAt, version, encrypted, cryptoMeta);
+  int get hashCode => Object.hash(
+      id,
+      parentId,
+      name,
+      sortOrder,
+      isDeleted,
+      createdAt,
+      updatedAt,
+      version,
+      encrypted,
+      cryptoMeta,
+      syncState,
+      syncError,
+      syncErrorAt,
+      syncCheckedAt,
+      syncHold);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -353,7 +506,12 @@ class NotebookRow extends DataClass implements Insertable<NotebookRow> {
           other.updatedAt == this.updatedAt &&
           other.version == this.version &&
           other.encrypted == this.encrypted &&
-          other.cryptoMeta == this.cryptoMeta);
+          other.cryptoMeta == this.cryptoMeta &&
+          other.syncState == this.syncState &&
+          other.syncError == this.syncError &&
+          other.syncErrorAt == this.syncErrorAt &&
+          other.syncCheckedAt == this.syncCheckedAt &&
+          other.syncHold == this.syncHold);
 }
 
 class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
@@ -367,6 +525,11 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
   final Value<int> version;
   final Value<bool> encrypted;
   final Value<String> cryptoMeta;
+  final Value<int> syncState;
+  final Value<String> syncError;
+  final Value<DateTime?> syncErrorAt;
+  final Value<DateTime?> syncCheckedAt;
+  final Value<bool> syncHold;
   final Value<int> rowid;
   const NotebooksCompanion({
     this.id = const Value.absent(),
@@ -379,6 +542,11 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     this.version = const Value.absent(),
     this.encrypted = const Value.absent(),
     this.cryptoMeta = const Value.absent(),
+    this.syncState = const Value.absent(),
+    this.syncError = const Value.absent(),
+    this.syncErrorAt = const Value.absent(),
+    this.syncCheckedAt = const Value.absent(),
+    this.syncHold = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   NotebooksCompanion.insert({
@@ -392,6 +560,11 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     this.version = const Value.absent(),
     this.encrypted = const Value.absent(),
     this.cryptoMeta = const Value.absent(),
+    this.syncState = const Value.absent(),
+    this.syncError = const Value.absent(),
+    this.syncErrorAt = const Value.absent(),
+    this.syncCheckedAt = const Value.absent(),
+    this.syncHold = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         name = Value(name),
@@ -408,6 +581,11 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     Expression<int>? version,
     Expression<bool>? encrypted,
     Expression<String>? cryptoMeta,
+    Expression<int>? syncState,
+    Expression<String>? syncError,
+    Expression<DateTime>? syncErrorAt,
+    Expression<DateTime>? syncCheckedAt,
+    Expression<bool>? syncHold,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -421,6 +599,11 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
       if (version != null) 'version': version,
       if (encrypted != null) 'encrypted': encrypted,
       if (cryptoMeta != null) 'crypto_meta': cryptoMeta,
+      if (syncState != null) 'sync_state': syncState,
+      if (syncError != null) 'sync_error': syncError,
+      if (syncErrorAt != null) 'sync_error_at': syncErrorAt,
+      if (syncCheckedAt != null) 'sync_checked_at': syncCheckedAt,
+      if (syncHold != null) 'sync_hold': syncHold,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -436,6 +619,11 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
       Value<int>? version,
       Value<bool>? encrypted,
       Value<String>? cryptoMeta,
+      Value<int>? syncState,
+      Value<String>? syncError,
+      Value<DateTime?>? syncErrorAt,
+      Value<DateTime?>? syncCheckedAt,
+      Value<bool>? syncHold,
       Value<int>? rowid}) {
     return NotebooksCompanion(
       id: id ?? this.id,
@@ -448,6 +636,11 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
       version: version ?? this.version,
       encrypted: encrypted ?? this.encrypted,
       cryptoMeta: cryptoMeta ?? this.cryptoMeta,
+      syncState: syncState ?? this.syncState,
+      syncError: syncError ?? this.syncError,
+      syncErrorAt: syncErrorAt ?? this.syncErrorAt,
+      syncCheckedAt: syncCheckedAt ?? this.syncCheckedAt,
+      syncHold: syncHold ?? this.syncHold,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -485,6 +678,21 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
     if (cryptoMeta.present) {
       map['crypto_meta'] = Variable<String>(cryptoMeta.value);
     }
+    if (syncState.present) {
+      map['sync_state'] = Variable<int>(syncState.value);
+    }
+    if (syncError.present) {
+      map['sync_error'] = Variable<String>(syncError.value);
+    }
+    if (syncErrorAt.present) {
+      map['sync_error_at'] = Variable<DateTime>(syncErrorAt.value);
+    }
+    if (syncCheckedAt.present) {
+      map['sync_checked_at'] = Variable<DateTime>(syncCheckedAt.value);
+    }
+    if (syncHold.present) {
+      map['sync_hold'] = Variable<bool>(syncHold.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -504,6 +712,11 @@ class NotebooksCompanion extends UpdateCompanion<NotebookRow> {
           ..write('version: $version, ')
           ..write('encrypted: $encrypted, ')
           ..write('cryptoMeta: $cryptoMeta, ')
+          ..write('syncState: $syncState, ')
+          ..write('syncError: $syncError, ')
+          ..write('syncErrorAt: $syncErrorAt, ')
+          ..write('syncCheckedAt: $syncCheckedAt, ')
+          ..write('syncHold: $syncHold, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -555,9 +768,58 @@ class $TagsTable extends Tags with TableInfo<$TagsTable, TagRow> {
       type: DriftSqlType.int,
       requiredDuringInsert: false,
       defaultValue: const Constant(0));
+  static const VerificationMeta _syncStateMeta =
+      const VerificationMeta('syncState');
   @override
-  List<GeneratedColumn> get $columns =>
-      [id, name, isDeleted, createdAt, updatedAt, version];
+  late final GeneratedColumn<int> syncState = GeneratedColumn<int>(
+      'sync_state', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(1));
+  static const VerificationMeta _syncErrorMeta =
+      const VerificationMeta('syncError');
+  @override
+  late final GeneratedColumn<String> syncError = GeneratedColumn<String>(
+      'sync_error', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
+  static const VerificationMeta _syncErrorAtMeta =
+      const VerificationMeta('syncErrorAt');
+  @override
+  late final GeneratedColumn<DateTime> syncErrorAt = GeneratedColumn<DateTime>(
+      'sync_error_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  static const VerificationMeta _syncCheckedAtMeta =
+      const VerificationMeta('syncCheckedAt');
+  @override
+  late final GeneratedColumn<DateTime> syncCheckedAt =
+      GeneratedColumn<DateTime>('sync_checked_at', aliasedName, true,
+          type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  static const VerificationMeta _syncHoldMeta =
+      const VerificationMeta('syncHold');
+  @override
+  late final GeneratedColumn<bool> syncHold = GeneratedColumn<bool>(
+      'sync_hold', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("sync_hold" IN (0, 1))'),
+      defaultValue: const Constant(false));
+  @override
+  List<GeneratedColumn> get $columns => [
+        id,
+        name,
+        isDeleted,
+        createdAt,
+        updatedAt,
+        version,
+        syncState,
+        syncError,
+        syncErrorAt,
+        syncCheckedAt,
+        syncHold
+      ];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -599,6 +861,30 @@ class $TagsTable extends Tags with TableInfo<$TagsTable, TagRow> {
       context.handle(_versionMeta,
           version.isAcceptableOrUnknown(data['version']!, _versionMeta));
     }
+    if (data.containsKey('sync_state')) {
+      context.handle(_syncStateMeta,
+          syncState.isAcceptableOrUnknown(data['sync_state']!, _syncStateMeta));
+    }
+    if (data.containsKey('sync_error')) {
+      context.handle(_syncErrorMeta,
+          syncError.isAcceptableOrUnknown(data['sync_error']!, _syncErrorMeta));
+    }
+    if (data.containsKey('sync_error_at')) {
+      context.handle(
+          _syncErrorAtMeta,
+          syncErrorAt.isAcceptableOrUnknown(
+              data['sync_error_at']!, _syncErrorAtMeta));
+    }
+    if (data.containsKey('sync_checked_at')) {
+      context.handle(
+          _syncCheckedAtMeta,
+          syncCheckedAt.isAcceptableOrUnknown(
+              data['sync_checked_at']!, _syncCheckedAtMeta));
+    }
+    if (data.containsKey('sync_hold')) {
+      context.handle(_syncHoldMeta,
+          syncHold.isAcceptableOrUnknown(data['sync_hold']!, _syncHoldMeta));
+    }
     return context;
   }
 
@@ -620,6 +906,16 @@ class $TagsTable extends Tags with TableInfo<$TagsTable, TagRow> {
           .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at'])!,
       version: attachedDatabase.typeMapping
           .read(DriftSqlType.int, data['${effectivePrefix}version'])!,
+      syncState: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}sync_state'])!,
+      syncError: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}sync_error'])!,
+      syncErrorAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}sync_error_at']),
+      syncCheckedAt: attachedDatabase.typeMapping.read(
+          DriftSqlType.dateTime, data['${effectivePrefix}sync_checked_at']),
+      syncHold: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}sync_hold'])!,
     );
   }
 
@@ -636,13 +932,23 @@ class TagRow extends DataClass implements Insertable<TagRow> {
   final DateTime createdAt;
   final DateTime updatedAt;
   final int version;
+  final int syncState;
+  final String syncError;
+  final DateTime? syncErrorAt;
+  final DateTime? syncCheckedAt;
+  final bool syncHold;
   const TagRow(
       {required this.id,
       required this.name,
       required this.isDeleted,
       required this.createdAt,
       required this.updatedAt,
-      required this.version});
+      required this.version,
+      required this.syncState,
+      required this.syncError,
+      this.syncErrorAt,
+      this.syncCheckedAt,
+      required this.syncHold});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -652,6 +958,15 @@ class TagRow extends DataClass implements Insertable<TagRow> {
     map['created_at'] = Variable<DateTime>(createdAt);
     map['updated_at'] = Variable<DateTime>(updatedAt);
     map['version'] = Variable<int>(version);
+    map['sync_state'] = Variable<int>(syncState);
+    map['sync_error'] = Variable<String>(syncError);
+    if (!nullToAbsent || syncErrorAt != null) {
+      map['sync_error_at'] = Variable<DateTime>(syncErrorAt);
+    }
+    if (!nullToAbsent || syncCheckedAt != null) {
+      map['sync_checked_at'] = Variable<DateTime>(syncCheckedAt);
+    }
+    map['sync_hold'] = Variable<bool>(syncHold);
     return map;
   }
 
@@ -663,6 +978,15 @@ class TagRow extends DataClass implements Insertable<TagRow> {
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
       version: Value(version),
+      syncState: Value(syncState),
+      syncError: Value(syncError),
+      syncErrorAt: syncErrorAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(syncErrorAt),
+      syncCheckedAt: syncCheckedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(syncCheckedAt),
+      syncHold: Value(syncHold),
     );
   }
 
@@ -676,6 +1000,11 @@ class TagRow extends DataClass implements Insertable<TagRow> {
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
       version: serializer.fromJson<int>(json['version']),
+      syncState: serializer.fromJson<int>(json['syncState']),
+      syncError: serializer.fromJson<String>(json['syncError']),
+      syncErrorAt: serializer.fromJson<DateTime?>(json['syncErrorAt']),
+      syncCheckedAt: serializer.fromJson<DateTime?>(json['syncCheckedAt']),
+      syncHold: serializer.fromJson<bool>(json['syncHold']),
     );
   }
   @override
@@ -688,6 +1017,11 @@ class TagRow extends DataClass implements Insertable<TagRow> {
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
       'version': serializer.toJson<int>(version),
+      'syncState': serializer.toJson<int>(syncState),
+      'syncError': serializer.toJson<String>(syncError),
+      'syncErrorAt': serializer.toJson<DateTime?>(syncErrorAt),
+      'syncCheckedAt': serializer.toJson<DateTime?>(syncCheckedAt),
+      'syncHold': serializer.toJson<bool>(syncHold),
     };
   }
 
@@ -697,7 +1031,12 @@ class TagRow extends DataClass implements Insertable<TagRow> {
           bool? isDeleted,
           DateTime? createdAt,
           DateTime? updatedAt,
-          int? version}) =>
+          int? version,
+          int? syncState,
+          String? syncError,
+          Value<DateTime?> syncErrorAt = const Value.absent(),
+          Value<DateTime?> syncCheckedAt = const Value.absent(),
+          bool? syncHold}) =>
       TagRow(
         id: id ?? this.id,
         name: name ?? this.name,
@@ -705,6 +1044,12 @@ class TagRow extends DataClass implements Insertable<TagRow> {
         createdAt: createdAt ?? this.createdAt,
         updatedAt: updatedAt ?? this.updatedAt,
         version: version ?? this.version,
+        syncState: syncState ?? this.syncState,
+        syncError: syncError ?? this.syncError,
+        syncErrorAt: syncErrorAt.present ? syncErrorAt.value : this.syncErrorAt,
+        syncCheckedAt:
+            syncCheckedAt.present ? syncCheckedAt.value : this.syncCheckedAt,
+        syncHold: syncHold ?? this.syncHold,
       );
   TagRow copyWithCompanion(TagsCompanion data) {
     return TagRow(
@@ -714,6 +1059,14 @@ class TagRow extends DataClass implements Insertable<TagRow> {
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
       version: data.version.present ? data.version.value : this.version,
+      syncState: data.syncState.present ? data.syncState.value : this.syncState,
+      syncError: data.syncError.present ? data.syncError.value : this.syncError,
+      syncErrorAt:
+          data.syncErrorAt.present ? data.syncErrorAt.value : this.syncErrorAt,
+      syncCheckedAt: data.syncCheckedAt.present
+          ? data.syncCheckedAt.value
+          : this.syncCheckedAt,
+      syncHold: data.syncHold.present ? data.syncHold.value : this.syncHold,
     );
   }
 
@@ -725,14 +1078,19 @@ class TagRow extends DataClass implements Insertable<TagRow> {
           ..write('isDeleted: $isDeleted, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
-          ..write('version: $version')
+          ..write('version: $version, ')
+          ..write('syncState: $syncState, ')
+          ..write('syncError: $syncError, ')
+          ..write('syncErrorAt: $syncErrorAt, ')
+          ..write('syncCheckedAt: $syncCheckedAt, ')
+          ..write('syncHold: $syncHold')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, name, isDeleted, createdAt, updatedAt, version);
+  int get hashCode => Object.hash(id, name, isDeleted, createdAt, updatedAt,
+      version, syncState, syncError, syncErrorAt, syncCheckedAt, syncHold);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -742,7 +1100,12 @@ class TagRow extends DataClass implements Insertable<TagRow> {
           other.isDeleted == this.isDeleted &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt &&
-          other.version == this.version);
+          other.version == this.version &&
+          other.syncState == this.syncState &&
+          other.syncError == this.syncError &&
+          other.syncErrorAt == this.syncErrorAt &&
+          other.syncCheckedAt == this.syncCheckedAt &&
+          other.syncHold == this.syncHold);
 }
 
 class TagsCompanion extends UpdateCompanion<TagRow> {
@@ -752,6 +1115,11 @@ class TagsCompanion extends UpdateCompanion<TagRow> {
   final Value<DateTime> createdAt;
   final Value<DateTime> updatedAt;
   final Value<int> version;
+  final Value<int> syncState;
+  final Value<String> syncError;
+  final Value<DateTime?> syncErrorAt;
+  final Value<DateTime?> syncCheckedAt;
+  final Value<bool> syncHold;
   final Value<int> rowid;
   const TagsCompanion({
     this.id = const Value.absent(),
@@ -760,6 +1128,11 @@ class TagsCompanion extends UpdateCompanion<TagRow> {
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.version = const Value.absent(),
+    this.syncState = const Value.absent(),
+    this.syncError = const Value.absent(),
+    this.syncErrorAt = const Value.absent(),
+    this.syncCheckedAt = const Value.absent(),
+    this.syncHold = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   TagsCompanion.insert({
@@ -769,6 +1142,11 @@ class TagsCompanion extends UpdateCompanion<TagRow> {
     required DateTime createdAt,
     required DateTime updatedAt,
     this.version = const Value.absent(),
+    this.syncState = const Value.absent(),
+    this.syncError = const Value.absent(),
+    this.syncErrorAt = const Value.absent(),
+    this.syncCheckedAt = const Value.absent(),
+    this.syncHold = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         name = Value(name),
@@ -781,6 +1159,11 @@ class TagsCompanion extends UpdateCompanion<TagRow> {
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
     Expression<int>? version,
+    Expression<int>? syncState,
+    Expression<String>? syncError,
+    Expression<DateTime>? syncErrorAt,
+    Expression<DateTime>? syncCheckedAt,
+    Expression<bool>? syncHold,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -790,6 +1173,11 @@ class TagsCompanion extends UpdateCompanion<TagRow> {
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
       if (version != null) 'version': version,
+      if (syncState != null) 'sync_state': syncState,
+      if (syncError != null) 'sync_error': syncError,
+      if (syncErrorAt != null) 'sync_error_at': syncErrorAt,
+      if (syncCheckedAt != null) 'sync_checked_at': syncCheckedAt,
+      if (syncHold != null) 'sync_hold': syncHold,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -801,6 +1189,11 @@ class TagsCompanion extends UpdateCompanion<TagRow> {
       Value<DateTime>? createdAt,
       Value<DateTime>? updatedAt,
       Value<int>? version,
+      Value<int>? syncState,
+      Value<String>? syncError,
+      Value<DateTime?>? syncErrorAt,
+      Value<DateTime?>? syncCheckedAt,
+      Value<bool>? syncHold,
       Value<int>? rowid}) {
     return TagsCompanion(
       id: id ?? this.id,
@@ -809,6 +1202,11 @@ class TagsCompanion extends UpdateCompanion<TagRow> {
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       version: version ?? this.version,
+      syncState: syncState ?? this.syncState,
+      syncError: syncError ?? this.syncError,
+      syncErrorAt: syncErrorAt ?? this.syncErrorAt,
+      syncCheckedAt: syncCheckedAt ?? this.syncCheckedAt,
+      syncHold: syncHold ?? this.syncHold,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -834,6 +1232,21 @@ class TagsCompanion extends UpdateCompanion<TagRow> {
     if (version.present) {
       map['version'] = Variable<int>(version.value);
     }
+    if (syncState.present) {
+      map['sync_state'] = Variable<int>(syncState.value);
+    }
+    if (syncError.present) {
+      map['sync_error'] = Variable<String>(syncError.value);
+    }
+    if (syncErrorAt.present) {
+      map['sync_error_at'] = Variable<DateTime>(syncErrorAt.value);
+    }
+    if (syncCheckedAt.present) {
+      map['sync_checked_at'] = Variable<DateTime>(syncCheckedAt.value);
+    }
+    if (syncHold.present) {
+      map['sync_hold'] = Variable<bool>(syncHold.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -849,6 +1262,11 @@ class TagsCompanion extends UpdateCompanion<TagRow> {
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('version: $version, ')
+          ..write('syncState: $syncState, ')
+          ..write('syncError: $syncError, ')
+          ..write('syncErrorAt: $syncErrorAt, ')
+          ..write('syncCheckedAt: $syncCheckedAt, ')
+          ..write('syncHold: $syncHold, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -967,6 +1385,44 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
       defaultConstraints:
           GeneratedColumn.constraintIsAlways('CHECK ("encrypted" IN (0, 1))'),
       defaultValue: const Constant(false));
+  static const VerificationMeta _syncStateMeta =
+      const VerificationMeta('syncState');
+  @override
+  late final GeneratedColumn<int> syncState = GeneratedColumn<int>(
+      'sync_state', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(1));
+  static const VerificationMeta _syncErrorMeta =
+      const VerificationMeta('syncError');
+  @override
+  late final GeneratedColumn<String> syncError = GeneratedColumn<String>(
+      'sync_error', aliasedName, false,
+      type: DriftSqlType.string,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(''));
+  static const VerificationMeta _syncErrorAtMeta =
+      const VerificationMeta('syncErrorAt');
+  @override
+  late final GeneratedColumn<DateTime> syncErrorAt = GeneratedColumn<DateTime>(
+      'sync_error_at', aliasedName, true,
+      type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  static const VerificationMeta _syncCheckedAtMeta =
+      const VerificationMeta('syncCheckedAt');
+  @override
+  late final GeneratedColumn<DateTime> syncCheckedAt =
+      GeneratedColumn<DateTime>('sync_checked_at', aliasedName, true,
+          type: DriftSqlType.dateTime, requiredDuringInsert: false);
+  static const VerificationMeta _syncHoldMeta =
+      const VerificationMeta('syncHold');
+  @override
+  late final GeneratedColumn<bool> syncHold = GeneratedColumn<bool>(
+      'sync_hold', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("sync_hold" IN (0, 1))'),
+      defaultValue: const Constant(false));
   @override
   List<GeneratedColumn> get $columns => [
         id,
@@ -982,7 +1438,12 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
         deletedAt,
         version,
         sourceDevice,
-        encrypted
+        encrypted,
+        syncState,
+        syncError,
+        syncErrorAt,
+        syncCheckedAt,
+        syncHold
       ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1063,6 +1524,30 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
       context.handle(_encryptedMeta,
           encrypted.isAcceptableOrUnknown(data['encrypted']!, _encryptedMeta));
     }
+    if (data.containsKey('sync_state')) {
+      context.handle(_syncStateMeta,
+          syncState.isAcceptableOrUnknown(data['sync_state']!, _syncStateMeta));
+    }
+    if (data.containsKey('sync_error')) {
+      context.handle(_syncErrorMeta,
+          syncError.isAcceptableOrUnknown(data['sync_error']!, _syncErrorMeta));
+    }
+    if (data.containsKey('sync_error_at')) {
+      context.handle(
+          _syncErrorAtMeta,
+          syncErrorAt.isAcceptableOrUnknown(
+              data['sync_error_at']!, _syncErrorAtMeta));
+    }
+    if (data.containsKey('sync_checked_at')) {
+      context.handle(
+          _syncCheckedAtMeta,
+          syncCheckedAt.isAcceptableOrUnknown(
+              data['sync_checked_at']!, _syncCheckedAtMeta));
+    }
+    if (data.containsKey('sync_hold')) {
+      context.handle(_syncHoldMeta,
+          syncHold.isAcceptableOrUnknown(data['sync_hold']!, _syncHoldMeta));
+    }
     return context;
   }
 
@@ -1100,6 +1585,16 @@ class $NotesTable extends Notes with TableInfo<$NotesTable, NoteRow> {
           .read(DriftSqlType.string, data['${effectivePrefix}source_device'])!,
       encrypted: attachedDatabase.typeMapping
           .read(DriftSqlType.bool, data['${effectivePrefix}encrypted'])!,
+      syncState: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}sync_state'])!,
+      syncError: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}sync_error'])!,
+      syncErrorAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}sync_error_at']),
+      syncCheckedAt: attachedDatabase.typeMapping.read(
+          DriftSqlType.dateTime, data['${effectivePrefix}sync_checked_at']),
+      syncHold: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}sync_hold'])!,
     );
   }
 
@@ -1124,6 +1619,11 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
   final int version;
   final String sourceDevice;
   final bool encrypted;
+  final int syncState;
+  final String syncError;
+  final DateTime? syncErrorAt;
+  final DateTime? syncCheckedAt;
+  final bool syncHold;
   const NoteRow(
       {required this.id,
       this.notebookId,
@@ -1138,7 +1638,12 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       this.deletedAt,
       required this.version,
       required this.sourceDevice,
-      required this.encrypted});
+      required this.encrypted,
+      required this.syncState,
+      required this.syncError,
+      this.syncErrorAt,
+      this.syncCheckedAt,
+      required this.syncHold});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -1160,6 +1665,15 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
     map['version'] = Variable<int>(version);
     map['source_device'] = Variable<String>(sourceDevice);
     map['encrypted'] = Variable<bool>(encrypted);
+    map['sync_state'] = Variable<int>(syncState);
+    map['sync_error'] = Variable<String>(syncError);
+    if (!nullToAbsent || syncErrorAt != null) {
+      map['sync_error_at'] = Variable<DateTime>(syncErrorAt);
+    }
+    if (!nullToAbsent || syncCheckedAt != null) {
+      map['sync_checked_at'] = Variable<DateTime>(syncCheckedAt);
+    }
+    map['sync_hold'] = Variable<bool>(syncHold);
     return map;
   }
 
@@ -1183,6 +1697,15 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       version: Value(version),
       sourceDevice: Value(sourceDevice),
       encrypted: Value(encrypted),
+      syncState: Value(syncState),
+      syncError: Value(syncError),
+      syncErrorAt: syncErrorAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(syncErrorAt),
+      syncCheckedAt: syncCheckedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(syncCheckedAt),
+      syncHold: Value(syncHold),
     );
   }
 
@@ -1204,6 +1727,11 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       version: serializer.fromJson<int>(json['version']),
       sourceDevice: serializer.fromJson<String>(json['sourceDevice']),
       encrypted: serializer.fromJson<bool>(json['encrypted']),
+      syncState: serializer.fromJson<int>(json['syncState']),
+      syncError: serializer.fromJson<String>(json['syncError']),
+      syncErrorAt: serializer.fromJson<DateTime?>(json['syncErrorAt']),
+      syncCheckedAt: serializer.fromJson<DateTime?>(json['syncCheckedAt']),
+      syncHold: serializer.fromJson<bool>(json['syncHold']),
     );
   }
   @override
@@ -1224,6 +1752,11 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       'version': serializer.toJson<int>(version),
       'sourceDevice': serializer.toJson<String>(sourceDevice),
       'encrypted': serializer.toJson<bool>(encrypted),
+      'syncState': serializer.toJson<int>(syncState),
+      'syncError': serializer.toJson<String>(syncError),
+      'syncErrorAt': serializer.toJson<DateTime?>(syncErrorAt),
+      'syncCheckedAt': serializer.toJson<DateTime?>(syncCheckedAt),
+      'syncHold': serializer.toJson<bool>(syncHold),
     };
   }
 
@@ -1241,7 +1774,12 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           Value<DateTime?> deletedAt = const Value.absent(),
           int? version,
           String? sourceDevice,
-          bool? encrypted}) =>
+          bool? encrypted,
+          int? syncState,
+          String? syncError,
+          Value<DateTime?> syncErrorAt = const Value.absent(),
+          Value<DateTime?> syncCheckedAt = const Value.absent(),
+          bool? syncHold}) =>
       NoteRow(
         id: id ?? this.id,
         notebookId: notebookId.present ? notebookId.value : this.notebookId,
@@ -1257,6 +1795,12 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
         version: version ?? this.version,
         sourceDevice: sourceDevice ?? this.sourceDevice,
         encrypted: encrypted ?? this.encrypted,
+        syncState: syncState ?? this.syncState,
+        syncError: syncError ?? this.syncError,
+        syncErrorAt: syncErrorAt.present ? syncErrorAt.value : this.syncErrorAt,
+        syncCheckedAt:
+            syncCheckedAt.present ? syncCheckedAt.value : this.syncCheckedAt,
+        syncHold: syncHold ?? this.syncHold,
       );
   NoteRow copyWithCompanion(NotesCompanion data) {
     return NoteRow(
@@ -1281,6 +1825,14 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           ? data.sourceDevice.value
           : this.sourceDevice,
       encrypted: data.encrypted.present ? data.encrypted.value : this.encrypted,
+      syncState: data.syncState.present ? data.syncState.value : this.syncState,
+      syncError: data.syncError.present ? data.syncError.value : this.syncError,
+      syncErrorAt:
+          data.syncErrorAt.present ? data.syncErrorAt.value : this.syncErrorAt,
+      syncCheckedAt: data.syncCheckedAt.present
+          ? data.syncCheckedAt.value
+          : this.syncCheckedAt,
+      syncHold: data.syncHold.present ? data.syncHold.value : this.syncHold,
     );
   }
 
@@ -1300,7 +1852,12 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           ..write('deletedAt: $deletedAt, ')
           ..write('version: $version, ')
           ..write('sourceDevice: $sourceDevice, ')
-          ..write('encrypted: $encrypted')
+          ..write('encrypted: $encrypted, ')
+          ..write('syncState: $syncState, ')
+          ..write('syncError: $syncError, ')
+          ..write('syncErrorAt: $syncErrorAt, ')
+          ..write('syncCheckedAt: $syncCheckedAt, ')
+          ..write('syncHold: $syncHold')
           ..write(')'))
         .toString();
   }
@@ -1320,7 +1877,12 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
       deletedAt,
       version,
       sourceDevice,
-      encrypted);
+      encrypted,
+      syncState,
+      syncError,
+      syncErrorAt,
+      syncCheckedAt,
+      syncHold);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1338,7 +1900,12 @@ class NoteRow extends DataClass implements Insertable<NoteRow> {
           other.deletedAt == this.deletedAt &&
           other.version == this.version &&
           other.sourceDevice == this.sourceDevice &&
-          other.encrypted == this.encrypted);
+          other.encrypted == this.encrypted &&
+          other.syncState == this.syncState &&
+          other.syncError == this.syncError &&
+          other.syncErrorAt == this.syncErrorAt &&
+          other.syncCheckedAt == this.syncCheckedAt &&
+          other.syncHold == this.syncHold);
 }
 
 class NotesCompanion extends UpdateCompanion<NoteRow> {
@@ -1356,6 +1923,11 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
   final Value<int> version;
   final Value<String> sourceDevice;
   final Value<bool> encrypted;
+  final Value<int> syncState;
+  final Value<String> syncError;
+  final Value<DateTime?> syncErrorAt;
+  final Value<DateTime?> syncCheckedAt;
+  final Value<bool> syncHold;
   final Value<int> rowid;
   const NotesCompanion({
     this.id = const Value.absent(),
@@ -1372,6 +1944,11 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     this.version = const Value.absent(),
     this.sourceDevice = const Value.absent(),
     this.encrypted = const Value.absent(),
+    this.syncState = const Value.absent(),
+    this.syncError = const Value.absent(),
+    this.syncErrorAt = const Value.absent(),
+    this.syncCheckedAt = const Value.absent(),
+    this.syncHold = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   NotesCompanion.insert({
@@ -1389,6 +1966,11 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     this.version = const Value.absent(),
     this.sourceDevice = const Value.absent(),
     this.encrypted = const Value.absent(),
+    this.syncState = const Value.absent(),
+    this.syncError = const Value.absent(),
+    this.syncErrorAt = const Value.absent(),
+    this.syncCheckedAt = const Value.absent(),
+    this.syncHold = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         createdAt = Value(createdAt),
@@ -1408,6 +1990,11 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     Expression<int>? version,
     Expression<String>? sourceDevice,
     Expression<bool>? encrypted,
+    Expression<int>? syncState,
+    Expression<String>? syncError,
+    Expression<DateTime>? syncErrorAt,
+    Expression<DateTime>? syncCheckedAt,
+    Expression<bool>? syncHold,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1425,6 +2012,11 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
       if (version != null) 'version': version,
       if (sourceDevice != null) 'source_device': sourceDevice,
       if (encrypted != null) 'encrypted': encrypted,
+      if (syncState != null) 'sync_state': syncState,
+      if (syncError != null) 'sync_error': syncError,
+      if (syncErrorAt != null) 'sync_error_at': syncErrorAt,
+      if (syncCheckedAt != null) 'sync_checked_at': syncCheckedAt,
+      if (syncHold != null) 'sync_hold': syncHold,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1444,6 +2036,11 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
       Value<int>? version,
       Value<String>? sourceDevice,
       Value<bool>? encrypted,
+      Value<int>? syncState,
+      Value<String>? syncError,
+      Value<DateTime?>? syncErrorAt,
+      Value<DateTime?>? syncCheckedAt,
+      Value<bool>? syncHold,
       Value<int>? rowid}) {
     return NotesCompanion(
       id: id ?? this.id,
@@ -1460,6 +2057,11 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
       version: version ?? this.version,
       sourceDevice: sourceDevice ?? this.sourceDevice,
       encrypted: encrypted ?? this.encrypted,
+      syncState: syncState ?? this.syncState,
+      syncError: syncError ?? this.syncError,
+      syncErrorAt: syncErrorAt ?? this.syncErrorAt,
+      syncCheckedAt: syncCheckedAt ?? this.syncCheckedAt,
+      syncHold: syncHold ?? this.syncHold,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1509,6 +2111,21 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
     if (encrypted.present) {
       map['encrypted'] = Variable<bool>(encrypted.value);
     }
+    if (syncState.present) {
+      map['sync_state'] = Variable<int>(syncState.value);
+    }
+    if (syncError.present) {
+      map['sync_error'] = Variable<String>(syncError.value);
+    }
+    if (syncErrorAt.present) {
+      map['sync_error_at'] = Variable<DateTime>(syncErrorAt.value);
+    }
+    if (syncCheckedAt.present) {
+      map['sync_checked_at'] = Variable<DateTime>(syncCheckedAt.value);
+    }
+    if (syncHold.present) {
+      map['sync_hold'] = Variable<bool>(syncHold.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1532,6 +2149,11 @@ class NotesCompanion extends UpdateCompanion<NoteRow> {
           ..write('version: $version, ')
           ..write('sourceDevice: $sourceDevice, ')
           ..write('encrypted: $encrypted, ')
+          ..write('syncState: $syncState, ')
+          ..write('syncError: $syncError, ')
+          ..write('syncErrorAt: $syncErrorAt, ')
+          ..write('syncCheckedAt: $syncCheckedAt, ')
+          ..write('syncHold: $syncHold, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -3345,6 +3967,11 @@ typedef $$NotebooksTableCreateCompanionBuilder = NotebooksCompanion Function({
   Value<int> version,
   Value<bool> encrypted,
   Value<String> cryptoMeta,
+  Value<int> syncState,
+  Value<String> syncError,
+  Value<DateTime?> syncErrorAt,
+  Value<DateTime?> syncCheckedAt,
+  Value<bool> syncHold,
   Value<int> rowid,
 });
 typedef $$NotebooksTableUpdateCompanionBuilder = NotebooksCompanion Function({
@@ -3358,6 +3985,11 @@ typedef $$NotebooksTableUpdateCompanionBuilder = NotebooksCompanion Function({
   Value<int> version,
   Value<bool> encrypted,
   Value<String> cryptoMeta,
+  Value<int> syncState,
+  Value<String> syncError,
+  Value<DateTime?> syncErrorAt,
+  Value<DateTime?> syncCheckedAt,
+  Value<bool> syncHold,
   Value<int> rowid,
 });
 
@@ -3399,6 +4031,21 @@ class $$NotebooksTableFilterComposer
 
   ColumnFilters<String> get cryptoMeta => $composableBuilder(
       column: $table.cryptoMeta, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get syncState => $composableBuilder(
+      column: $table.syncState, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get syncError => $composableBuilder(
+      column: $table.syncError, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get syncErrorAt => $composableBuilder(
+      column: $table.syncErrorAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get syncCheckedAt => $composableBuilder(
+      column: $table.syncCheckedAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<bool> get syncHold => $composableBuilder(
+      column: $table.syncHold, builder: (column) => ColumnFilters(column));
 }
 
 class $$NotebooksTableOrderingComposer
@@ -3439,6 +4086,22 @@ class $$NotebooksTableOrderingComposer
 
   ColumnOrderings<String> get cryptoMeta => $composableBuilder(
       column: $table.cryptoMeta, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get syncState => $composableBuilder(
+      column: $table.syncState, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get syncError => $composableBuilder(
+      column: $table.syncError, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get syncErrorAt => $composableBuilder(
+      column: $table.syncErrorAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get syncCheckedAt => $composableBuilder(
+      column: $table.syncCheckedAt,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<bool> get syncHold => $composableBuilder(
+      column: $table.syncHold, builder: (column) => ColumnOrderings(column));
 }
 
 class $$NotebooksTableAnnotationComposer
@@ -3479,6 +4142,21 @@ class $$NotebooksTableAnnotationComposer
 
   GeneratedColumn<String> get cryptoMeta => $composableBuilder(
       column: $table.cryptoMeta, builder: (column) => column);
+
+  GeneratedColumn<int> get syncState =>
+      $composableBuilder(column: $table.syncState, builder: (column) => column);
+
+  GeneratedColumn<String> get syncError =>
+      $composableBuilder(column: $table.syncError, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get syncErrorAt => $composableBuilder(
+      column: $table.syncErrorAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get syncCheckedAt => $composableBuilder(
+      column: $table.syncCheckedAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get syncHold =>
+      $composableBuilder(column: $table.syncHold, builder: (column) => column);
 }
 
 class $$NotebooksTableTableManager extends RootTableManager<
@@ -3514,6 +4192,11 @@ class $$NotebooksTableTableManager extends RootTableManager<
             Value<int> version = const Value.absent(),
             Value<bool> encrypted = const Value.absent(),
             Value<String> cryptoMeta = const Value.absent(),
+            Value<int> syncState = const Value.absent(),
+            Value<String> syncError = const Value.absent(),
+            Value<DateTime?> syncErrorAt = const Value.absent(),
+            Value<DateTime?> syncCheckedAt = const Value.absent(),
+            Value<bool> syncHold = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               NotebooksCompanion(
@@ -3527,6 +4210,11 @@ class $$NotebooksTableTableManager extends RootTableManager<
             version: version,
             encrypted: encrypted,
             cryptoMeta: cryptoMeta,
+            syncState: syncState,
+            syncError: syncError,
+            syncErrorAt: syncErrorAt,
+            syncCheckedAt: syncCheckedAt,
+            syncHold: syncHold,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -3540,6 +4228,11 @@ class $$NotebooksTableTableManager extends RootTableManager<
             Value<int> version = const Value.absent(),
             Value<bool> encrypted = const Value.absent(),
             Value<String> cryptoMeta = const Value.absent(),
+            Value<int> syncState = const Value.absent(),
+            Value<String> syncError = const Value.absent(),
+            Value<DateTime?> syncErrorAt = const Value.absent(),
+            Value<DateTime?> syncCheckedAt = const Value.absent(),
+            Value<bool> syncHold = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               NotebooksCompanion.insert(
@@ -3553,6 +4246,11 @@ class $$NotebooksTableTableManager extends RootTableManager<
             version: version,
             encrypted: encrypted,
             cryptoMeta: cryptoMeta,
+            syncState: syncState,
+            syncError: syncError,
+            syncErrorAt: syncErrorAt,
+            syncCheckedAt: syncCheckedAt,
+            syncHold: syncHold,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0
@@ -3581,6 +4279,11 @@ typedef $$TagsTableCreateCompanionBuilder = TagsCompanion Function({
   required DateTime createdAt,
   required DateTime updatedAt,
   Value<int> version,
+  Value<int> syncState,
+  Value<String> syncError,
+  Value<DateTime?> syncErrorAt,
+  Value<DateTime?> syncCheckedAt,
+  Value<bool> syncHold,
   Value<int> rowid,
 });
 typedef $$TagsTableUpdateCompanionBuilder = TagsCompanion Function({
@@ -3590,6 +4293,11 @@ typedef $$TagsTableUpdateCompanionBuilder = TagsCompanion Function({
   Value<DateTime> createdAt,
   Value<DateTime> updatedAt,
   Value<int> version,
+  Value<int> syncState,
+  Value<String> syncError,
+  Value<DateTime?> syncErrorAt,
+  Value<DateTime?> syncCheckedAt,
+  Value<bool> syncHold,
   Value<int> rowid,
 });
 
@@ -3618,6 +4326,21 @@ class $$TagsTableFilterComposer extends Composer<_$AppDatabase, $TagsTable> {
 
   ColumnFilters<int> get version => $composableBuilder(
       column: $table.version, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get syncState => $composableBuilder(
+      column: $table.syncState, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get syncError => $composableBuilder(
+      column: $table.syncError, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get syncErrorAt => $composableBuilder(
+      column: $table.syncErrorAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get syncCheckedAt => $composableBuilder(
+      column: $table.syncCheckedAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<bool> get syncHold => $composableBuilder(
+      column: $table.syncHold, builder: (column) => ColumnFilters(column));
 }
 
 class $$TagsTableOrderingComposer extends Composer<_$AppDatabase, $TagsTable> {
@@ -3645,6 +4368,22 @@ class $$TagsTableOrderingComposer extends Composer<_$AppDatabase, $TagsTable> {
 
   ColumnOrderings<int> get version => $composableBuilder(
       column: $table.version, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get syncState => $composableBuilder(
+      column: $table.syncState, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get syncError => $composableBuilder(
+      column: $table.syncError, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get syncErrorAt => $composableBuilder(
+      column: $table.syncErrorAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get syncCheckedAt => $composableBuilder(
+      column: $table.syncCheckedAt,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<bool> get syncHold => $composableBuilder(
+      column: $table.syncHold, builder: (column) => ColumnOrderings(column));
 }
 
 class $$TagsTableAnnotationComposer
@@ -3673,6 +4412,21 @@ class $$TagsTableAnnotationComposer
 
   GeneratedColumn<int> get version =>
       $composableBuilder(column: $table.version, builder: (column) => column);
+
+  GeneratedColumn<int> get syncState =>
+      $composableBuilder(column: $table.syncState, builder: (column) => column);
+
+  GeneratedColumn<String> get syncError =>
+      $composableBuilder(column: $table.syncError, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get syncErrorAt => $composableBuilder(
+      column: $table.syncErrorAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get syncCheckedAt => $composableBuilder(
+      column: $table.syncCheckedAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get syncHold =>
+      $composableBuilder(column: $table.syncHold, builder: (column) => column);
 }
 
 class $$TagsTableTableManager extends RootTableManager<
@@ -3704,6 +4458,11 @@ class $$TagsTableTableManager extends RootTableManager<
             Value<DateTime> createdAt = const Value.absent(),
             Value<DateTime> updatedAt = const Value.absent(),
             Value<int> version = const Value.absent(),
+            Value<int> syncState = const Value.absent(),
+            Value<String> syncError = const Value.absent(),
+            Value<DateTime?> syncErrorAt = const Value.absent(),
+            Value<DateTime?> syncCheckedAt = const Value.absent(),
+            Value<bool> syncHold = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               TagsCompanion(
@@ -3713,6 +4472,11 @@ class $$TagsTableTableManager extends RootTableManager<
             createdAt: createdAt,
             updatedAt: updatedAt,
             version: version,
+            syncState: syncState,
+            syncError: syncError,
+            syncErrorAt: syncErrorAt,
+            syncCheckedAt: syncCheckedAt,
+            syncHold: syncHold,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -3722,6 +4486,11 @@ class $$TagsTableTableManager extends RootTableManager<
             required DateTime createdAt,
             required DateTime updatedAt,
             Value<int> version = const Value.absent(),
+            Value<int> syncState = const Value.absent(),
+            Value<String> syncError = const Value.absent(),
+            Value<DateTime?> syncErrorAt = const Value.absent(),
+            Value<DateTime?> syncCheckedAt = const Value.absent(),
+            Value<bool> syncHold = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               TagsCompanion.insert(
@@ -3731,6 +4500,11 @@ class $$TagsTableTableManager extends RootTableManager<
             createdAt: createdAt,
             updatedAt: updatedAt,
             version: version,
+            syncState: syncState,
+            syncError: syncError,
+            syncErrorAt: syncErrorAt,
+            syncCheckedAt: syncCheckedAt,
+            syncHold: syncHold,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0
@@ -3767,6 +4541,11 @@ typedef $$NotesTableCreateCompanionBuilder = NotesCompanion Function({
   Value<int> version,
   Value<String> sourceDevice,
   Value<bool> encrypted,
+  Value<int> syncState,
+  Value<String> syncError,
+  Value<DateTime?> syncErrorAt,
+  Value<DateTime?> syncCheckedAt,
+  Value<bool> syncHold,
   Value<int> rowid,
 });
 typedef $$NotesTableUpdateCompanionBuilder = NotesCompanion Function({
@@ -3784,6 +4563,11 @@ typedef $$NotesTableUpdateCompanionBuilder = NotesCompanion Function({
   Value<int> version,
   Value<String> sourceDevice,
   Value<bool> encrypted,
+  Value<int> syncState,
+  Value<String> syncError,
+  Value<DateTime?> syncErrorAt,
+  Value<DateTime?> syncCheckedAt,
+  Value<bool> syncHold,
   Value<int> rowid,
 });
 
@@ -3837,6 +4621,21 @@ class $$NotesTableFilterComposer extends Composer<_$AppDatabase, $NotesTable> {
 
   ColumnFilters<bool> get encrypted => $composableBuilder(
       column: $table.encrypted, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<int> get syncState => $composableBuilder(
+      column: $table.syncState, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get syncError => $composableBuilder(
+      column: $table.syncError, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get syncErrorAt => $composableBuilder(
+      column: $table.syncErrorAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<DateTime> get syncCheckedAt => $composableBuilder(
+      column: $table.syncCheckedAt, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<bool> get syncHold => $composableBuilder(
+      column: $table.syncHold, builder: (column) => ColumnFilters(column));
 }
 
 class $$NotesTableOrderingComposer
@@ -3892,6 +4691,22 @@ class $$NotesTableOrderingComposer
 
   ColumnOrderings<bool> get encrypted => $composableBuilder(
       column: $table.encrypted, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<int> get syncState => $composableBuilder(
+      column: $table.syncState, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get syncError => $composableBuilder(
+      column: $table.syncError, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get syncErrorAt => $composableBuilder(
+      column: $table.syncErrorAt, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<DateTime> get syncCheckedAt => $composableBuilder(
+      column: $table.syncCheckedAt,
+      builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<bool> get syncHold => $composableBuilder(
+      column: $table.syncHold, builder: (column) => ColumnOrderings(column));
 }
 
 class $$NotesTableAnnotationComposer
@@ -3944,6 +4759,21 @@ class $$NotesTableAnnotationComposer
 
   GeneratedColumn<bool> get encrypted =>
       $composableBuilder(column: $table.encrypted, builder: (column) => column);
+
+  GeneratedColumn<int> get syncState =>
+      $composableBuilder(column: $table.syncState, builder: (column) => column);
+
+  GeneratedColumn<String> get syncError =>
+      $composableBuilder(column: $table.syncError, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get syncErrorAt => $composableBuilder(
+      column: $table.syncErrorAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get syncCheckedAt => $composableBuilder(
+      column: $table.syncCheckedAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get syncHold =>
+      $composableBuilder(column: $table.syncHold, builder: (column) => column);
 }
 
 class $$NotesTableTableManager extends RootTableManager<
@@ -3983,6 +4813,11 @@ class $$NotesTableTableManager extends RootTableManager<
             Value<int> version = const Value.absent(),
             Value<String> sourceDevice = const Value.absent(),
             Value<bool> encrypted = const Value.absent(),
+            Value<int> syncState = const Value.absent(),
+            Value<String> syncError = const Value.absent(),
+            Value<DateTime?> syncErrorAt = const Value.absent(),
+            Value<DateTime?> syncCheckedAt = const Value.absent(),
+            Value<bool> syncHold = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               NotesCompanion(
@@ -4000,6 +4835,11 @@ class $$NotesTableTableManager extends RootTableManager<
             version: version,
             sourceDevice: sourceDevice,
             encrypted: encrypted,
+            syncState: syncState,
+            syncError: syncError,
+            syncErrorAt: syncErrorAt,
+            syncCheckedAt: syncCheckedAt,
+            syncHold: syncHold,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -4017,6 +4857,11 @@ class $$NotesTableTableManager extends RootTableManager<
             Value<int> version = const Value.absent(),
             Value<String> sourceDevice = const Value.absent(),
             Value<bool> encrypted = const Value.absent(),
+            Value<int> syncState = const Value.absent(),
+            Value<String> syncError = const Value.absent(),
+            Value<DateTime?> syncErrorAt = const Value.absent(),
+            Value<DateTime?> syncCheckedAt = const Value.absent(),
+            Value<bool> syncHold = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               NotesCompanion.insert(
@@ -4034,6 +4879,11 @@ class $$NotesTableTableManager extends RootTableManager<
             version: version,
             sourceDevice: sourceDevice,
             encrypted: encrypted,
+            syncState: syncState,
+            syncError: syncError,
+            syncErrorAt: syncErrorAt,
+            syncCheckedAt: syncCheckedAt,
+            syncHold: syncHold,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0

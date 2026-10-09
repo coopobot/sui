@@ -81,8 +81,13 @@ func (a AttachmentItem) toRow(noteID string) store.AttachmentRow {
 type PushResponse struct {
 	Accepted bool `json:"accepted"`
 	// Conflict 时给出服务端当前权威版本，供客户端字段级合并/双版本保留。
-	ServerVersion  int `json:"serverVersion,omitempty"`
+	//
+	// M12（ADR-019 决策 3）：**去掉 omitempty** —— 「服务端没有该实体」时须**显式给出 0**，
+	// 客户端据此区分「服务端没有它」（可自愈：基线归零重发）与真冲突。
+	ServerVersion  int `json:"serverVersion"`
 	AppliedVersion int `json:"appliedVersion,omitempty"`
+	// NotFound 表示服务端**没有**该实体（而非版本冲突）；此时 ServerVersion 为 0。
+	NotFound bool `json:"notFound,omitempty"`
 }
 
 // Push 处理客户端推送。冲突判定的唯一依据是：
@@ -142,6 +147,12 @@ func (p *Protocol) Push(it PushItem) (*PushResponse, error) {
 			}
 		}
 		return &PushResponse{Accepted: true, AppliedVersion: nextVer}, nil
+	}
+
+	// M12：服务端**没有**该实体（而客户端基线非 0）→ 明确告知 notFound。
+	// 客户端把基线归零后重发即被接受；旧实现在这里会永久冲突（B24-①）。
+	if current == nil {
+		return &PushResponse{Accepted: false, NotFound: true}, nil
 	}
 
 	// 冲突：返回服务端权威版本，供客户端合并。服务端不落库。
@@ -249,6 +260,10 @@ func (p *Protocol) PushNotebook(it NotebookItem) (*PushResponse, error) {
 		}
 		return &PushResponse{Accepted: true, AppliedVersion: nextVer}, nil
 	}
+	if current == nil {
+		// M12：服务端没有该笔记本（客户端基线非 0）→ 基线归零后重发即被接受。
+		return &PushResponse{Accepted: false, NotFound: true}, nil
+	}
 	return &PushResponse{Accepted: false, ServerVersion: serverVer}, nil
 }
 
@@ -270,6 +285,10 @@ func (p *Protocol) PushTag(it TagItem) (*PushResponse, error) {
 			return nil, err
 		}
 		return &PushResponse{Accepted: true, AppliedVersion: nextVer}, nil
+	}
+	if current == nil {
+		// M12：服务端没有该标签（客户端基线非 0）→ 基线归零后重发即被接受。
+		return &PushResponse{Accepted: false, NotFound: true}, nil
 	}
 	return &PushResponse{Accepted: false, ServerVersion: serverVer}, nil
 }

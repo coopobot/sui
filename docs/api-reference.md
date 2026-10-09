@@ -7,12 +7,12 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
 | GET | `/healthz` | 否 | 健康检查 |
-| GET | `/api/v1/ping` | 否 | 心跳（返回 `{"ok":true,"initialized":<bool>}`；`initialized` 表示是否已建号） |
+| GET | `/api/v1/ping` | 否 | 心跳（返回 `{"ok":true,"initialized":<bool>}`；`initialized` 表示是否已建号。**携带有效 Bearer 令牌时**额外返回 `instanceId`，匿名探测不返回 —— M12 / FR-55） |
 | POST | `/api/v1/register` | 否 | 首启注册（单用户）：`{"username","password"}` → `{"ok","token","username"}`；建号后返回 403 |
 | POST | `/api/v1/login` | 否 | 登录：`{"username","password"}` → `{"ok","token","username"}` |
 | GET | `/api/v1/ws?token=<token>` | ✅ | WebSocket 变更通知（`?token=` 或 `Bearer` 鉴权） |
 | POST | `/api/v1/sync/push` | ✅ | 推送批量变更（见下） |
-| GET | `/api/v1/sync/pull?since=<RFC3339>` | ✅ | 增量拉取变更 |
+| GET | `/api/v1/sync/pull?since=<RFC3339>` | ✅ | 增量拉取变更（响应**恒**含 `instanceId`：云端实例身份 —— M12 / FR-55） |
 | PUT | `/api/v1/blobs/{hash}` | ✅ | 上传附件字节 |
 | GET | `/api/v1/blobs/{hash}` | ✅ | 下载附件字节 |
 | HEAD | `/api/v1/blobs/{hash}` | ✅ | 附件存在性 |
@@ -38,6 +38,21 @@ curl http://localhost:8080/api/v1/ping
 
 > `initialized` 表示服务端是否已存在账号（单用户模式：建号后自助注册关闭）。首启未建号时为
 > `false`，建号后为 `true`；`/healthz` 沿用同一响应壳，判定请以 `/api/v1/ping` 为准。
+
+**`instanceId`（M12 / FR-55）**：云端实例身份，服务端首启初始化时生成并持久化于 `meta` 表，
+形如 `inst-<32 位小写十六进制>`。**同一数据目录内恒定；换库 / 重建（数据目录被替换或清空重建）
+必变** —— 它是客户端识别「云端已经不是原来那一份」的依据。
+
+```bash
+curl http://localhost:8080/api/v1/ping
+# → {"ok":true,...,"initialized":true}                     # 匿名：不含 instanceId
+
+curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/ping
+# → {"ok":true,...,"initialized":true,"instanceId":"inst-3f2a1b2c3d4e5f60718293a4b5c6d7e8"}
+```
+
+> `ping` 的 `instanceId` **仅在鉴权通过时**返回：匿名探测拿不到，避免对公网暴露稳定的实例指纹。
+> 需要无条件获取时改用 `GET /api/v1/sync/pull`（该端点恒鉴权、恒下发）。
 
 ## 注册与登录
 
@@ -157,7 +172,23 @@ GET /api/v1/crypto/handshake            # 公开；返回 serverPub + fingerprin
 ## push 响应
 
 `results` / `notebookResults` / `tagResults` 三类同构，逐条对应请求中的 `items` / `notebooks` /
-`tags`；被接受时回带 `appliedVersion`，冲突时回带 `serverVersion`（不含 `appliedVersion`）。
+`tags`；被接受时回带 `appliedVersion`；未被接受时回带 `serverVersion`（**M12 起该字段去掉
+`omitempty`、恒出现**，即「服务端没有该实体」时会**显式**给出 `serverVersion: 0`）。
+
+### 逐项裁决与客户端自愈（M12 / FR-55）
+
+`serverVersion` 与 `notFound` 的组合即完整裁决。**第三方实现必须按此区分两种「未接受」**：
+
+| 响应 | 含义 | 客户端应做 |
+|------|------|------------|
+| `accepted: true` + `appliedVersion: N` | 已应用，服务端权威版本为 N | 把该实体 `baseVersion` 更新为 N、标记已同步 |
+| `accepted: false` + `notFound: true` + `serverVersion: 0` | 服务端**没有**该实体（换库 / 重建 / 回滚后不存在） | `baseVersion` **归零后立即重发**（同一轮内即会被接受）；**不要**走合并 |
+| `accepted: false` + `serverVersion: N`（无 `notFound`） | **真冲突**：服务端持有该实体且权威版本为 N | 以 N 为 `baseVersion` 合并本地改动后重发；重发轮**不要**再次合并（否则冲突标记会无界膨胀） |
+| `accepted: false`（响应里既无 `notFound`，也无 `serverVersion` —— 旧服务端因 `omitempty` 省略之） | 旧服务端对「没有该实体」的表达方式，解析后等价于 `serverVersion: 0` | 按「基线归零后重发」处理（向后兼容，见下方判定顺序） |
+
+> 判定顺序：先看 `notFound`；服务端不返回该字段时，退化为「`accepted == false` 且
+> `serverVersion` 缺失或为 0」即视为「服务端没有该实体」。基线本就是 0 的新实体**不会**走到这里
+> （`baseVersion == 0` 时服务端直接接受）。
 
 ```json
 {
@@ -174,11 +205,26 @@ GET /api/v1/crypto/handshake            # 公开；返回 serverPub + fingerprin
 }
 ```
 
+服务端**没有**该实体（换库 / 重建 / 回滚）与**真冲突**的逐项裁决长这样：
+
+```json
+{
+  "ok": true,
+  "results": [
+    { "id": "note-1", "accepted": false, "serverVersion": 0, "notFound": true }
+  ],
+  "notebookResults": [
+    { "id": "nb-1", "accepted": false, "serverVersion": 7 }
+  ]
+}
+```
+
 ## pull 响应
 
 ```json
 {
   "ok": true,
+  "instanceId": "inst-3f2a1b2c3d4e5f60718293a4b5c6d7e8",
   "notes": [
     {
       "id": "note-1",
@@ -232,7 +278,12 @@ GET /api/v1/crypto/handshake            # 公开；返回 serverPub + fingerprin
 }
 ```
 
-`since` 为上一次拉取的时间游标（RFC3339）。首次拉取可省略或传极早时间。
+`since` 为上一次拉取的时间游标（RFC3339）。首次拉取可省略或传极早时间；传极早时间（epoch）
+即得到**云端全量权威态**（含墓碑），这也是客户端「核对补齐」所用的口径。
+
+`instanceId`（M12 / FR-55）为**云端实例身份**，`pull` **恒定下发**（该端点本就恒鉴权）。
+客户端应持久化它并在后续响应中比对：**一旦变化即说明云端被换库 / 重建**，此时**不要**直接上传
+或覆盖本地数据（**选择前不动任何一端数据**），而是交由用户决断（见[用户指南](guides/user-guide.md)）。
 
 ## WebSocket 通知
 

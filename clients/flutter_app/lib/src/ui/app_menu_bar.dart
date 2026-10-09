@@ -80,6 +80,15 @@ class AppMenuBar extends StatelessWidget {
             DesktopCommandId.toggleRevisionPanel,
           ],
         ),
+        // M12（FR-54 / ui-spec §20.5 入口二）：同步命令与同步设置对话框**同源**
+        // （[desktopCommands] 单一来源，不新增绕过命令清单的独立动作）。
+        _submenu(
+          context,
+          '同步',
+          const <DesktopCommandId?>[
+            DesktopCommandId.reconcileAll,
+          ],
+        ),
         _submenu(
           context,
           '帮助',

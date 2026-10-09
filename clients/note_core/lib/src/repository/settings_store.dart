@@ -17,6 +17,12 @@ class SettingsStore {
   /// 受保护通道的服务端指纹（TOFU 信任根，M10-T27 / FR-50，auth.md §9.2）。
   static const _kChannelFingerprint = 'channel.fingerprint';
   static const _kCacheLimit = 'blob.cacheLimitBytes';
+  /// M12（FR-55）：最近一次成功同步的**云端实例身份**（换库 / 重建判定依据）。
+  static const _kInstanceId = 'sync.instanceId';
+  /// M12：持久化拉取游标（已含 `−1s` 安全回退，见 sync-status.md §9）。
+  static const _kLastPull = 'sync.lastPull';
+  /// M12：最近一次「全部重新同步」完成时间。
+  static const _kLastReconcileAt = 'sync.lastReconcileAt';
 
   Future<String?> get(String key) async {
     final row = await (_db.select(_db.settings)
@@ -88,6 +94,34 @@ class SettingsStore {
   }
 
   Future<void> setCacheLimitBytes(int bytes) => set(_kCacheLimit, '$bytes');
+
+  /// M12：云端实例身份（未记录返回 null）。
+  Future<String?> instanceId() async {
+    final v = await get(_kInstanceId);
+    return (v == null || v.isEmpty) ? null : v;
+  }
+
+  Future<void> setInstanceId(String id) => set(_kInstanceId, id.trim());
+
+  /// M12：持久化拉取游标（UTC；未记录返回 null）。
+  Future<DateTime?> lastPull() async {
+    final v = await get(_kLastPull);
+    if (v == null || v.isEmpty) return null;
+    return DateTime.tryParse(v)?.toUtc();
+  }
+
+  Future<void> setLastPull(DateTime since) =>
+      set(_kLastPull, since.toUtc().toIso8601String());
+
+  /// M12：最近一次「全部重新同步」完成时间。
+  Future<DateTime?> lastReconcileAt() async {
+    final v = await get(_kLastReconcileAt);
+    if (v == null || v.isEmpty) return null;
+    return DateTime.tryParse(v)?.toUtc();
+  }
+
+  Future<void> setLastReconcileAt(DateTime at) =>
+      set(_kLastReconcileAt, at.toUtc().toIso8601String());
 
   /// 受保护通道的服务端指纹；未记录（首次连接）返回 null。
   ///

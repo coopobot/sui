@@ -1,6 +1,7 @@
 import 'package:drift/drift.dart';
 
 import '../crypto/notebook_crypto.dart';
+import '../sync/entity_sync_state.dart';
 import '../crypto/notebook_key_store.dart';
 import '../db/app_database.dart';
 import '../models/attachment.dart';
@@ -152,6 +153,11 @@ class NoteRepository {
       for (final n in noteWrites) {
         converted.add((await getNote(n.id))!);
       }
+      // M12：加密开关与被就地加解密的笔记都属「本端改动」，需上行。
+      for (final n in converted) {
+        await _markLocallyChanged(SyncEntityKind.note, n.id);
+      }
+      await _markLocallyChanged(SyncEntityKind.notebook, notebookId);
       return (notebook: (await getNotebook(notebookId))!, converted: converted);
     } catch (_) {
       keyStore.lock(notebookId);
@@ -324,12 +330,14 @@ class NoteRepository {
           parentId: Value(pid),
           name: name,
           sortOrder: Value(order),
-          version: const Value(1),
+          // 服务端基线镜像：本地新建尚未同步 → 0（与 createNote 同口径）。
+          version: const Value(0),
           encrypted: Value(encrypted),
           cryptoMeta: Value(cryptoMeta),
           createdAt: t,
           updatedAt: t,
         ));
+    await _markLocallyChanged(SyncEntityKind.notebook, nid);
     return (await getNotebook(nid))!;
   }
 
@@ -377,24 +385,26 @@ class NoteRepository {
   }
 
   Future<Notebook> renameNotebook(String id, String name) async {
+    await _markLocallyChanged(SyncEntityKind.notebook, id);
     final notebook = await getNotebook(id);
     if (notebook == null) throw StateError('notebook not found: $id');
     await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
         .write(NotebooksCompanion(
       name: Value(name),
       updatedAt: Value(DateTime.now()),
-      version: Value(notebook.version + 1),
+      // M12：`version` 是**服务端基线镜像**，本地编辑不得推进（与 Notes.version 同口径）；
+      // 本地改动由 `sync_state`（待上传）表达。
     ));
     return (await getNotebook(id))!;
   }
 
   Future<void> removeNotebook(String id) async {
+    await _markLocallyChanged(SyncEntityKind.notebook, id);
     final notebook = await getNotebook(id);
     if (notebook == null) return;
     await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
         .write(NotebooksCompanion(
       isDeleted: const Value(true),
-      version: Value(notebook.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
   }
@@ -404,12 +414,12 @@ class NoteRepository {
   /// 仅写 sortOrder + version + updatedAt；UI 负责计算目标位置与兄弟交换。
   /// 不删除 / 不重命名，故无需写 revision（笔记本无修订表）。
   Future<Notebook> reorderNotebook(String id, int sortOrder) async {
+    await _markLocallyChanged(SyncEntityKind.notebook, id);
     final notebook = await getNotebook(id);
     if (notebook == null) throw StateError('notebook not found: $id');
     await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
         .write(NotebooksCompanion(
       sortOrder: Value(sortOrder),
-      version: Value(notebook.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
     return (await getNotebook(id))!;
@@ -420,12 +430,12 @@ class NoteRepository {
   /// 不校验循环引用：调用方（AppController.deleteNotebook）保证目标 parentId
   /// 是被删节点的父级，结构上不可能形成环。
   Future<Notebook> reparentNotebook(String id, String? parentId) async {
+    await _markLocallyChanged(SyncEntityKind.notebook, id);
     final notebook = await getNotebook(id);
     if (notebook == null) throw StateError('notebook not found: $id');
     await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
         .write(NotebooksCompanion(
       parentId: Value(_normalizeParentId(parentId)),
-      version: Value(notebook.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
     return (await getNotebook(id))!;
@@ -440,10 +450,12 @@ class NoteRepository {
     await db.into(db.tags).insert(TagsCompanion.insert(
           id: tagId,
           name: name,
-          version: const Value(1),
+          // 服务端基线镜像：本地新建尚未同步 → 0（与 createNote / createNotebook 同口径）。
+          version: const Value(0),
           createdAt: t,
           updatedAt: t,
         ));
+    await _markLocallyChanged(SyncEntityKind.tag, tagId);
     return (await getTag(tagId))!;
   }
 
@@ -475,12 +487,12 @@ class NoteRepository {
   }
 
   Future<void> removeTag(String id) async {
+    await _markLocallyChanged(SyncEntityKind.tag, id);
     final tag = await getTag(id);
     if (tag == null) return;
     await (db.update(db.tags)..where((t) => t.id.equals(id)))
         .write(TagsCompanion(
       isDeleted: const Value(true),
-      version: Value(tag.version + 1),
       updatedAt: Value(DateTime.now()),
     ));
   }
@@ -555,6 +567,12 @@ class NoteRepository {
             updatedAt: t,
             sourceDevice: Value(src),
           ));
+      // M12：本地新建 → 需要上行；下行落库（fromWire）→ 已同步，避免拉一次又回推。
+      if (fromWire) {
+        await markSynced(SyncEntityKind.note, nid, serverVersion: baseVersion);
+      } else {
+        await _markLocallyChanged(SyncEntityKind.note, nid);
+      }
       if (tags.isNotEmpty) {
         await _replaceTags(nid, tags);
       }
@@ -612,6 +630,7 @@ class NoteRepository {
     List<String>? tags,
     DateTime? now,
   }) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
     final t = now ?? DateTime.now();
     final note = await getNote(id);
     if (note == null) throw StateError('note not found: $id');
@@ -779,6 +798,7 @@ class NoteRepository {
   /// 不写 revision：归档不属于内容修订，避免污染版本链。
   /// 不改 `version`：它是服务端基线镜像，本地编辑不得推进（sync-protocol §3）。
   Future<void> archiveNote(String id, bool archived) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
     final note = await getNote(id);
     if (note == null) throw StateError('note not found: $id');
     await (db.update(db.notes)..where((n) => n.id.equals(id)))
@@ -857,6 +877,7 @@ class NoteRepository {
   }
 
   Future<void> pinNote(String id, bool pinned) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
     await (db.update(db.notes)..where((n) => n.id.equals(id)))
         .write(NotesCompanion(
       pinned: Value(pinned),
@@ -871,6 +892,7 @@ class NoteRepository {
   /// 不写 revision：归属变更不属于内容修订，避免污染版本链。
   /// 不改 `version`：它是服务端基线镜像，本地编辑不得推进（sync-protocol §3）。
   Future<Note> moveNoteToNotebook(String id, String? notebookId) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
     final stored = await getStoredNote(id);
     if (stored == null) throw StateError('note not found: $id');
 
@@ -964,8 +986,13 @@ class NoteRepository {
   ///
   /// 附件映射必须一起墓碑化：否则对端拉到笔记墓碑后本地附件行仍然「活着」，
   /// 引用计数不减、映射也收敛不到删除态。
-  Future<void> markNoteDeleted(String id, {DateTime? now}) async {
+  Future<void> markNoteDeleted(String id,
+      {DateTime? now, bool fromRemote = false}) async {
     final t = now ?? DateTime.now();
+    // 上行（本地删除）→ 待上传；下行（远端墓碑）→ 由同步层随后置「已同步」。
+    if (!fromRemote) {
+      await _markLocallyChanged(SyncEntityKind.note, id);
+    }
     await db.transaction(() async {
       await (db.update(db.notes)..where((n) => n.id.equals(id)))
           .write(NotesCompanion(
@@ -1034,6 +1061,7 @@ class NoteRepository {
   ///
   /// 还原会同时把该笔记的附件映射去墓碑，并补回引用计数。
   Future<Note?> restoreNote(String id) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
     final note = await getNote(id);
     if (note == null) return null;
     String? notebookId = note.notebookId;
@@ -1145,6 +1173,7 @@ class NoteRepository {
   ///
   /// 返回恢复后的新 Note。
   Future<Note> restoreRevision(String noteId, int version) async {
+    await _markLocallyChanged(SyncEntityKind.note, noteId);
     final rev = await getRevision(noteId, version);
     if (rev == null) {
       throw StateError('revision not found: note=$noteId ver=$version');
@@ -1292,6 +1321,7 @@ class NoteRepository {
     int embeddedPos = 0,
     DateTime? now,
   }) async {
+    await _markLocallyChanged(SyncEntityKind.note, noteId);
     final t = now ?? DateTime.now();
     final aid = id ?? newId();
     await db.transaction(() async {
@@ -1323,6 +1353,7 @@ class NoteRepository {
             ..where((t) => t.id.equals(id)))
           .getSingleOrNull();
       if (prev == null) return;
+      await _markLocallyChanged(SyncEntityKind.note, prev.noteId ?? '');
       await (db.update(db.attachments)..where((t) => t.id.equals(id)))
           .write(const AttachmentsCompanion(isDeleted: Value(true)));
       if (!prev.isDeleted && prev.sha256.isNotEmpty) {
@@ -1350,6 +1381,7 @@ class NoteRepository {
       if (prev == null || prev.isDeleted || prev.sha256 == newSha256) {
         return false;
       }
+      await _markLocallyChanged(SyncEntityKind.note, prev.noteId ?? '');
       await (db.update(db.attachments)..where((t) => t.id.equals(id)))
           .write(AttachmentsCompanion(
         sha256: Value(newSha256),
@@ -1413,6 +1445,7 @@ class NoteRepository {
         updatedAt: Value(t),
       ));
     }
+    await markSynced(SyncEntityKind.notebook, id, serverVersion: version);
   }
 
   /// 应用远端的「加密态」镜像（M10-T29）：笔记归属的笔记本是否为加密笔记本。
@@ -1452,6 +1485,7 @@ class NoteRepository {
         updatedAt: Value(t),
       ));
     }
+    await markSynced(SyncEntityKind.tag, id, serverVersion: version);
   }
 
   /// 以笔记为粒度整体替换标签关联（同步下行，按 tag ID 直接关联）。
@@ -1482,6 +1516,191 @@ class NoteRepository {
           ));
     }
   }
+  // ---- M12（FR-53 / FR-54 / FR-55）：逐项同步状态与上行队列 ----
+  //
+  // 状态是**纯本地记账**（不入净荷、服务端不存储）；「待上传」意图落库后，
+  // 上行批次由库中状态选取（状态即队列，ADR-019 决策 2），不再依赖内存 Outbox。
+
+  /// 标记「本端有未上传改动」。
+  ///
+  /// 口径：本端已有服务端基线（`version > 0`）→ 待上传；从未被服务端确认
+  /// （`version == 0`，如刚新建）→ 仅本地。两者都属「需要上行」，区别只在语义与文案。
+  Future<void> _markLocallyChanged(SyncEntityKind kind, String id) async {
+    if (id.isEmpty) return;
+    await db.customStatement(
+      'UPDATE ${kind.table} SET '
+      'sync_state = CASE WHEN version > 0 THEN 1 ELSE 2 END, '
+      "sync_error = '', sync_error_at = NULL WHERE id = ?",
+      [id],
+    );
+  }
+
+  Future<void> _writeSyncState(
+    SyncEntityKind kind,
+    String id, {
+    required int state,
+    String error = '',
+    DateTime? errorAt,
+    DateTime? checkedAt,
+    int? serverVersion,
+  }) async {
+    final checked = checkedAt ?? DateTime.now();
+    switch (kind) {
+      case SyncEntityKind.note:
+        await (db.update(db.notes)..where((n) => n.id.equals(id)))
+            .write(NotesCompanion(
+          syncState: Value(state),
+          syncError: Value(error),
+          syncErrorAt: Value(error.isEmpty ? null : (errorAt ?? checked)),
+          syncCheckedAt: Value(checked),
+          version: serverVersion == null
+              ? const Value.absent()
+              : Value(serverVersion),
+        ));
+      case SyncEntityKind.notebook:
+        await (db.update(db.notebooks)..where((n) => n.id.equals(id)))
+            .write(NotebooksCompanion(
+          syncState: Value(state),
+          syncError: Value(error),
+          syncErrorAt: Value(error.isEmpty ? null : (errorAt ?? checked)),
+          syncCheckedAt: Value(checked),
+          version: serverVersion == null
+              ? const Value.absent()
+              : Value(serverVersion),
+        ));
+      case SyncEntityKind.tag:
+        await (db.update(db.tags)..where((t) => t.id.equals(id)))
+            .write(TagsCompanion(
+          syncState: Value(state),
+          syncError: Value(error),
+          syncErrorAt: Value(error.isEmpty ? null : (errorAt ?? checked)),
+          syncCheckedAt: Value(checked),
+          version: serverVersion == null
+              ? const Value.absent()
+              : Value(serverVersion),
+        ));
+    }
+  }
+
+  /// 上行成功：置「已同步」，可选回写服务端版本（基线镜像）。
+  Future<void> markSynced(
+    SyncEntityKind kind,
+    String id, {
+    int? serverVersion,
+    DateTime? checkedAt,
+  }) =>
+      _writeSyncState(kind, id,
+          state: EntitySyncState.synced.code,
+          checkedAt: checkedAt,
+          serverVersion: serverVersion);
+
+  /// 置「待上传」（强制，不看基线）。
+  Future<void> markPending(SyncEntityKind kind, String id) =>
+      _writeSyncState(kind, id, state: EntitySyncState.pending.code);
+
+  /// 置「仅本地」（云端从未持有）。
+  ///
+  /// [hold] 为真 = 用户已选择**以云端为准**：保留在本机但**不再自动上行**
+  /// （BR-55.2「不得静默上传」）。
+  Future<void> markLocalOnly(SyncEntityKind kind, String id,
+      {bool hold = false}) async {
+    await _writeSyncState(kind, id, state: EntitySyncState.localOnly.code);
+    await db.customStatement(
+      'UPDATE ${kind.table} SET sync_hold = ? WHERE id = ?',
+      [hold ? 1 : 0, id],
+    );
+  }
+
+  /// 置「冲突」（需合并 / 需先解锁加密笔记本）。
+  Future<void> markConflict(SyncEntityKind kind, String id, {String reason = ''}) =>
+      _writeSyncState(kind, id,
+          state: EntitySyncState.conflict.code, error: reason);
+
+  /// 置「同步失败」并**保留原因与时间**（界面 tooltip 直接展示）。
+  Future<void> markFailed(SyncEntityKind kind, String id, String error) =>
+      _writeSyncState(kind, id,
+          state: EntitySyncState.failed.code, error: error, errorAt: DateTime.now());
+
+  /// 「服务端没有该实体」自愈（ADR-019 决策 3，修永久冲突）：
+  /// 基线归零 + 置待上传，使下一轮以 `baseVersion: 0` 重发即被接受。
+  Future<void> resetSyncBaseline(SyncEntityKind kind, String id) async {
+    await db.customStatement(
+      'UPDATE ${kind.table} SET version = 0, '
+      'sync_state = CASE WHEN 0 > 0 THEN 1 ELSE 2 END, '
+      "sync_error = '', sync_error_at = NULL WHERE id = ?",
+      [id],
+    );
+  }
+
+  /// 当前同步状态（行不存在返回「仅本地」）。
+  Future<EntitySyncState> syncStateOf(SyncEntityKind kind, String id) async {
+    final row = await db.customSelect(
+      'SELECT sync_state FROM ${kind.table} WHERE id = ?',
+      variables: [Variable.withString(id)],
+    ).getSingleOrNull();
+    return EntitySyncState.fromCode(row?.read<int>('sync_state'));
+  }
+
+  /// 需要上行的 id 列表（按最近修改排序，供分批 push）。
+  ///
+  /// [includeHeld] 为真时把「被用户按住」的项（`sync_hold = 1`）也纳入 ——
+  /// 只有**核对补齐**（用户选择「用本地数据补齐」）与**单项重试**才这样取。
+  Future<List<String>> idsNeedingUpload(SyncEntityKind kind,
+      {bool includeHeld = false, int limit = 200}) async {
+    final holdClause = includeHeld ? '' : ' AND sync_hold = 0';
+    final rows = await db.customSelect(
+      'SELECT id FROM ${kind.table} WHERE sync_state IN (1, 2, 3, 4)'
+      '$holdClause ORDER BY updated_at LIMIT ?',
+      variables: [Variable.withInt(limit)],
+    ).get();
+    return rows.map((r) => r.read<String>('id')).toList();
+  }
+
+  /// 待处理条数（界面角标 / `outboxLength` 用）。
+  Future<int> countNeedingUpload(
+      {SyncEntityKind? kind, bool includeHeld = false}) async {
+    final kinds = kind == null ? SyncEntityKind.values : [kind];
+    final holdClause = includeHeld ? '' : ' AND sync_hold = 0';
+    var total = 0;
+    for (final k in kinds) {
+      final row = await db.customSelect(
+        'SELECT COUNT(*) AS c FROM ${k.table} '
+        'WHERE sync_state IN (1, 2, 3, 4)$holdClause',
+      ).getSingle();
+      total += row.read<int>('c');
+    }
+    return total;
+  }
+
+  /// 清除「用户按住」标记（单项重试 / 核对补齐时调用）。
+  Future<void> clearSyncHold(SyncEntityKind kind, String id) async {
+    await db.customStatement(
+      'UPDATE ${kind.table} SET sync_hold = 0 WHERE id = ?',
+      [id],
+    );
+  }
+
+  /// 上行成功后回写笔记本 / 标签的服务端基线镜像（与 [setNoteServerVersion] 同口径）。
+  Future<void> setNotebookServerVersion(String id, int version) async {
+    await (db.update(db.notebooks)..where((n) => n.id.equals(id)))
+        .write(NotebooksCompanion(version: Value(version)));
+  }
+
+  Future<void> setTagServerVersion(String id, int version) async {
+    await (db.update(db.tags)..where((t) => t.id.equals(id)))
+        .write(TagsCompanion(version: Value(version)));
+  }
+
+  /// 某类实体的全部本地 id（核对补齐用；[includeDeleted] 为真时含墓碑）。
+  Future<List<String>> allIds(SyncEntityKind kind,
+      {bool includeDeleted = false}) async {
+    final rows = await db.customSelect(
+      'SELECT id FROM ${kind.table}'
+      '${includeDeleted ? '' : ' WHERE is_deleted = 0'}',
+    ).get();
+    return rows.map((r) => r.read<String>('id')).toList();
+  }
+
 }
 
 // ---- Row → Model 映射（避免 drift 数据类外泄到域层） ----
@@ -1498,6 +1717,9 @@ extension _NotebookRowEx on NotebookRow {
         version: version,
         encrypted: encrypted,
         cryptoMeta: cryptoMeta,
+        syncState: EntitySyncState.fromCode(syncState),
+        syncError: syncError,
+        syncErrorAt: syncErrorAt,
       );
 }
 
@@ -1509,6 +1731,9 @@ extension _TagRowEx on TagRow {
         createdAt: createdAt,
         updatedAt: updatedAt,
         version: version,
+        syncState: EntitySyncState.fromCode(syncState),
+        syncError: syncError,
+        syncErrorAt: syncErrorAt,
       );
 }
 
@@ -1528,6 +1753,9 @@ extension _NoteRowEx on NoteRow {
         version: version,
         sourceDevice: sourceDevice,
         encrypted: encrypted,
+        syncState: EntitySyncState.fromCode(syncState),
+        syncError: syncError,
+        syncErrorAt: syncErrorAt,
       );
 }
 

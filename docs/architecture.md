@@ -75,6 +75,7 @@
 | `notebooks` | 笔记本分组（id / parent_id / name / sort_order / is_deleted / version / source_device / created_at / updated_at） |
 | `tags` | 标签（id / name / is_deleted / version / source_device / created_at / updated_at） |
 | `note_tags` | 笔记-标签多对多关联（note_id / tag_id） |
+| `meta` | 实例元数据键值（key / value / updated_at）。当前存 `instance_id` —— **云端实例身份**（形如 `inst-<32 位小写十六进制>`），首启初始化生成、同一数据目录内恒定、**重建 / 换库必变**（M12 / FR-55） |
 
 关键索引：`idx_notes_updated`、`idx_revisions_note`、`idx_revisions_note_ver`、`idx_notes_isdel`、
 `idx_attachments_note`、`idx_notebooks_updated`、`idx_tags_updated`、`idx_note_tags_note`、`idx_note_tags_tag`、`idx_sessions_user`。
@@ -86,8 +87,14 @@
 > （`accepted` / `serverVersion` / `appliedVersion`），复用同一套 `base_version` 冲突与墓碑机制。
 > M2 起笔记条目增带 `archived`（归档状态，随 push/pull 往返、跨端一致）。
 > 旧表清单中的 `outbox` 为设计预留描述，代码中并未建表，已从本表移除。
+>
+> **M12 起（FR-55）**：服务端库由 9 张表增至 **10 张**（新增 `meta`）；`GET /api/v1/sync/pull`
+> 响应新增 `instanceId`（该端点恒鉴权），`GET /api/v1/ping` **仅在鉴权通过时**回带 `instanceId`
+> （匿名探测不返回，避免对公网暴露稳定指纹）。push 逐项结果新增 `notFound`，且 `serverVersion`
+> 去掉 `omitempty` ——「服务端没有该实体」时**显式**给出 `serverVersion: 0`。push/pull 的其余净荷
+> 字段、`baseVersion` 冲突判定与启发式合并策略**均未改动**；契约细节见 [API 参考](api-reference.md)。
 
-### 2.3 测试清单（`internal/api/handlers_test.go` + `internal/api/m4_test.go` + `internal/api/m6_test.go`）
+### 2.3 测试清单（`internal/api/handlers_test.go` + `internal/api/m4_test.go` + `internal/api/m6_test.go` + `internal/api/m10_test.go` + `internal/api/m12_test.go`）
 
 | 测试 | 覆盖 |
 |------|------|
@@ -111,6 +118,10 @@
 | `TestClipMediaLocalization` | 图片本地化：下载 → sha256 → 附件入库 → 正文改 `sui://` + 附件映射随笔记入库 |
 | `TestClipMediaFailureDegrade` | 单图失败降级：保留（已解析的）**绝对 URL**，不阻断整篇 |
 | `TestClipOfflineReadable` | 离线可读：本地化后按 `sha256` 可从附件库取回图片字节 |
+| `TestM12InstanceIDStableWithinDataDir` | 云端实例身份在同一数据目录内**恒定**（重开库不变） |
+| `TestM12InstanceIDChangesAfterRebuild` | 重建 / 换库后实例身份**必变** |
+| `TestM12PingExposesInstanceIDOnlyWhenAuthed` | 匿名 `ping` **不**返回 `instanceId`，鉴权通过后返回 |
+| `TestM12PushNotFoundSignalAndSelfHeal` | 「服务端没有该实体」→ `notFound: true` + 显式 `serverVersion: 0`；基线归零后**立即**被接受 |
 
 ## 3. 客户端
 
@@ -121,14 +132,15 @@
 | 类 | 职责 |
 |----|------|
 | `NoteRepository` | 本地数据访问门面：笔记本 CRUD、标签、笔记 CRUD、修订追加、搜索 |
-| `SyncClient` | 同步引擎：Outbox 合并、增量 pull、冲突本地合并、重发 |
+| `SyncClient` | 同步引擎：按库中状态**重建**上行批次（状态即队列）、增量 pull、冲突本地合并与「服务端没有该实体」自愈、核对补齐 `reconcile()` |
+| `EntitySyncState` | 逐项同步状态五态（`已同步` / `待上传` / `仅本地` / `冲突` / `同步失败`）+ 承载实体类别映射（M12 / FR-53） |
 | `AppDatabase` | drift 数据库（8 表 + 迁移） |
 | `LocalBlobStore` | 附件本地存储实现（原生分片落盘 / Web 内存缓存） |
 | `CachedBlobStore` | 附件缓存层：LRU 上限 + 按需下载 + `uploaded_at` 待上传记账（`blob_refs`） |
 | `mimeKindFor()` | 由扩展名推断附件大类（卡片图标用） |
 | `DeviceId` | 设备标识（冲突合并 / 来源标记用） |
 
-**本机数据表（drift，`schemaVersion = 6`）**：定义见
+**本机数据表（drift，`schemaVersion = 8`，共 8 张）**：定义见
 `clients/note_core/lib/src/db/app_database.dart`。
 
 | 表 | 用途 | 随同步上行 |
@@ -140,11 +152,21 @@
 | `revisions` | 修订历史（快照 + diff 增量） | ✅ |
 | `attachments` | 附件元数据（字节存 BlobStore，此处只存引用 + sha256） | ✅（映射随笔记） |
 | `blob_refs` | 本机附件缓存记账（LRU 元数据 + `uploaded_at` 待上传标记） | ❌ 本机缓存状态 |
-| `settings` | 应用级键值配置（服务端地址 / Token / deviceId） | ❌ 设备级偏好 |
+| `settings` | 应用级键值配置（服务端地址 / Token / deviceId；M12 增 `sync.instanceId` / `sync.lastPull` / `sync.lastReconcileAt`） | ❌ 设备级偏好 |
 
 > M1 起服务端补齐 `notebooks` / `tags` / `note_tags` 三表：`notebooks` / `tags` 随 sync/push、
 > sync/pull 净荷上下行（与笔记一样携带 `version` / `is_deleted` / 来源设备与墓碑机制）；
 > `note_tags` 关联不单独传输，而是随所属笔记的 `tagIds` 全量携带、在笔记被接受时重建关联。
+>
+> **M12 起（FR-53）：新增逐项同步状态列。** `notes` / `notebooks` / `tags` 三表各增
+> `sync_state`（0 已同步 / 1 待上传 / 2 仅本地 / 3 冲突 / 4 同步失败）、`sync_error`、
+> `sync_error_at`、`sync_checked_at`、`sync_hold`（用户选「以云端为准」后被**按住**的项）。
+> 状态是**纯本地记账** —— 它描述「本端这一条相对云端的关系」，故**不写入 Markdown 正本、
+> 不进 push/pull 净荷、服务端不存储**（BR-53.3）。迁移（v7 → v8）取**保守初值**、
+> **绝不预置「已同步」**：有服务端基线（`version > 0`）→ 待上传；`version == 0` 且无未确认
+> 修订 → 仅本地；有未确认修订 → 待上传；首次连接并完成核对后由同步层**整体重算**。
+>
+> 笔记本 / 标签的 `version` 自 M12 起与笔记同口径 —— 是**服务端基线镜像**，本地编辑不再递增它。
 
 ### 3.2 flutter_app（Flutter 客户端）
 
@@ -152,7 +174,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `note_shell.dart` | 响应式三栏骨架（宽屏三栏 / 窄屏抽屉 + 导航堆栈）；桌面端左栏 / 中栏按视图偏好**条件渲染**（折叠面板与其分隔线一并消失） |
+| `note_shell.dart` | 响应式三栏骨架（宽屏三栏 / 窄屏抽屉 + 导航堆栈）；桌面端左栏 / 中栏按视图偏好**条件渲染**（折叠面板与其分隔线一并消失）；M12 增顶栏同步状态入口（未连接 → 打开同步设置，已连接 → 立即同步）与「云端数据已更换 / 重建」**三选一对话框**（默认焦点在「取消」，非破坏性） |
 | `notebook_tree.dart` | 笔记本树 + 收件箱 + 全部笔记 + 标签入口 + 归档 / 回收站入口（底部区域） |
 | `note_list.dart` | 笔记列表（置顶 / 剪藏标签 / 搜索过滤） |
 | `note_editor.dart` | 编辑器（标题 / 格式工具栏 + 编辑快捷键 / 勾选框点选 / 标签 / 附件面板 / 附件预览 / 历史 / 导出 / 删除 / **表格工具** / **粘贴保留格式** / **简化格式**） |
@@ -163,8 +185,9 @@
 | `note_window_manager.dart` | 桌面多窗口**平台无关接缝**：`NoteWindowManager` 接口（开窗 / 聚焦 / 关闭 / 查询）+ `WindowEventHub` 事件枢纽（窗口打开 / 关闭 / 视图聚焦）—— 窗口注册表语义与「两面并行」流程可在**纯 Dart 单测**中驱动，无需真实窗口 |
 | `note_window.dart` | **独立笔记窗口**内容（复用 `NoteEditor`，按笔记 id 装载）；窗口内以视图键 `setActiveViewKey` 认领命令、关闭经 `closeCurrentWindow` 释放 |
 | `desktop_commands.dart` | 桌面命令**单一来源**（`DesktopCommandId` / `DesktopCommand` / `desktopCommands` 注册表）+ `EditorCommandTarget` 接口桥；菜单项 / 顶栏图标按钮 / 快捷键**同源**（多窗口下按当前**聚焦视图**路由命令） |
-| `app_menu_bar.dart` | 桌面端自绘菜单栏「文件 / 编辑 / 视图 / 帮助」+ 顶栏折叠切换控件 `PanelToggles`（窄屏 / 非桌面**不渲染**） |
-| `sync_settings_dialog.dart` | 同步设置对话框（服务端地址 / Token / 设备 ID 的录入与校验） |
+| `app_menu_bar.dart` | 桌面端自绘菜单栏「文件 / 编辑 / 视图 / **同步** / 帮助」（M12 增「同步 → 全部重新同步」）+ 顶栏折叠切换控件 `PanelToggles`（窄屏 / 非桌面**不渲染**） |
+| `sync_settings_dialog.dart` | 同步设置对话框（服务端地址 / Token / 设备 ID 的录入与校验）+ M12 的「全部重新同步」面板（进度 / 逐项结果 / 失败项重试，桌面菜单同名命令共用同一实现） |
+| `sync_status_icon.dart` | 逐项同步状态的**就地呈现**（五态图标 + tooltip 缘由 + 未同步计数角标；窄屏降级为状态点）——图标与文案的单一来源在 `note_core`（M12 / FR-53） |
 | `platform/attachment_picker.dart` | 跨端文件选择（`file_picker`，返回文件名 + 字节） |
 | `platform/app_lifecycle.dart`（+ `_io` / `_web`） | 桌面退出前落库接缝（条件导入）：桌面实现「`flushPendingEdits` → 尽力推送 → 退出」，其他平台降级为空实现 |
 | `platform/multi_window.dart`（+ `_io` / `_stub`） | 多窗口平台接缝（条件导入）：桌面经 `multiview_desktop` 开**真 OS 窗口**（单引擎多视图），其他平台降级为 no-op（Web / 移动端不构建该依赖） |
@@ -175,9 +198,11 @@
 
 ### 3.3 测试
 
-- note_core：123 个用例，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+- note_core：**329 个用例**，覆盖仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
   缓存 LRU / 配置存取 / 落盘持久化 / 笔记本排序（同级 `sortOrder` 递增、子笔记本权重独立、
-  重排归一化）/ 编辑器格式化（快捷键映射同源、勾选框往返、`==高亮==` 往返、块级行为），另含
+  重排归一化）/ 编辑器格式化（快捷键映射同源、勾选框往返、`==高亮==` 往返、块级行为）/
+  **逐项同步状态与核对补齐（M12：写路径状态、`notFound` 自愈、真冲突合并且绝不丢字、
+  游标回退与重放幂等、换库拒落数据、v7 → v8 迁移保守初值）**，另含
   e2e（首批注册后双端 push/pull→冲突合并→重发；附件映射同步 + 字节按需下载）。
 - flutter_app：62 个用例，含 widget 测试、`sync_wiring_test.dart`（起真服务端跑注册连接→同步→
   第二设备拉取）、`editor_format_image_test.dart`（格式模式图片渲染与尺寸手柄）、
@@ -217,6 +242,9 @@
 ### 4.2 冲突判定与合并
 
 - **判定**：服务端 `base_version` 撞车即冲突，返回当前 `serverVersion`。
+- **服务端没有该实体**（客户端基线非 0、服务端无记录）：**不算冲突** —— M12 起服务端回
+  `accepted: false` + `notFound: true` + **显式** `serverVersion: 0`；客户端据此把该实体**基线归零
+  并在同一轮内重发**（自愈）。旧实现只回 `accepted: false`，客户端无从判断 → 会**永久冲突**（B24-①）。
 - **合并（客户端启发式）**：
   1. 标题取较新修订。
   2. 正文：合并双方内容，冲突段落用标记分隔，**绝不丢字**。
@@ -233,6 +261,50 @@
 - 端点：`GET /api/v1/ws?token=<token>`（亦接受 `Authorization: Bearer`）；鉴权未通过 → 401。
 - push / 剪藏成功后向已鉴权连接广播 `{"type":"changed"}`。
 - 客户端收到后触发一次增量 pull；WS 不可用仅静默降级，手动同步与防抖推送仍可用。
+
+### 4.5 逐项同步状态（M12 / FR-53）
+
+五态为**纯本地记账**（不写入 Markdown 正本、不进 push/pull 净荷、服务端不存储），落在
+`notes` / `notebooks` / `tags` 三表：
+
+| 状态 | 判定口径 |
+|------|----------|
+| `已同步` | 本端无未确认改动，且已知服务端版本与本端基线一致 |
+| `待上传` | 本端有未上行改动，且**云端已知持有**该实体 |
+| `仅本地` | 云端**从未持有**该实体（核对确认不存在） |
+| `冲突` | 云端持有、版本 ≠ 本端基线，**且**本端仍有未上行改动（含加密笔记本未解锁、无法就地合并） |
+| `同步失败` | 最近一次针对该项的上行 / 下行失败（保留原因与时间） |
+
+未知落库值一律按**保守态**（`待上传`）处理，**不误报「已同步」**（BR-53.6）；未配置同步时界面
+一律呈现「仅本地」的弱化文案，同样不伪造「已同步」。
+
+### 4.6 状态即队列与自愈（M12）
+
+- **上行队列 = 库中状态**：`push()` 按 `sync_state` **重建**批次（内存 Outbox 退役），本地写路径
+  （新建 / 编辑 / 改名 / 移动 / 排序 / 删除 / 归档 / 恢复 / 附件 / 标签 / 加密开关 / 还原修订）
+  即时置位 —— 待上传意图**跨重启、跨换服务端保持**（B24-②）。
+- **自愈**：收到 `notFound`（或旧服务端的 `serverVersion == 0`）→ 该实体**基线归零并在同一轮内
+  重发**；真冲突 → 同一轮内完成「明文层启发式合并 → 以服务端版本为 base 重发」，**重发轮不再
+  重复合并**（避免冲突标记膨胀）；加密笔记本未解锁 → 保持「冲突」并提示先解锁。
+- **单项重试**：`retryOne()` 只影响该项，并顺带解除「以云端为准」留下的按住标记。
+
+### 4.7 拉取游标与下行幂等（M12）
+
+游标持久化于 `settings`（`sync.lastPull`），取值 `max(updated_at) − 1s`（服务端 `updated_at`
+仍是秒精度，**未改**）；下行幂等，故重放最后一秒安全，而同一秒内新增的多条不再被永久漏拉（B24-③）。
+
+### 4.8 核对补齐与换库决策（M12 / FR-54 / FR-55）
+
+- **`reconcile()`（「全部重新同步」）**：`ping`（取实例身份）→ `pull?since=epoch`（云端全量权威态，
+  含墓碑）→ 逐项判定与下行 → 云端缺失的本地实体标「仅本地」→ 分批 push（用户选「用本地补齐」时
+  含被按住项；选「以云端为准」则**按住不上行**）→ 逐项回写状态 + 失败原因。可取消、幂等，
+  给出进度与逐项结果。
+- **云端实例身份**：服务端首启初始化生成 `instance_id`（`meta` 表，形如 `inst-<32 位小写十六进制>`）；
+  `pull` 恒下发，`ping` **仅鉴权时**下发。
+- **换库 / 重建**：客户端记录的身份与云端不一致，或**首次连接即发现云端为空而本机有数据** →
+  抛 `CloudInstanceChangedException`，**在用户决断前不落任何数据、不上传、不更新身份**；
+  界面弹三选一（用本地补齐 / 以云端为准 / 取消）。「以云端为准」**不删除本地数据**，只把它们
+  降级为「仅本地」并按住（`sync_hold`）。
 
 ## 5. 附件存储策略（客户端侧）
 
@@ -397,7 +469,7 @@ sui/
     │   │   ├── repository/      # note_repository.dart
     │   │   ├── sync/            # sync_client.dart
     │   │   └── util/            # ids.dart / mime_kind.dart
-    │   └── test/                # 123 用例
+    │   └── test/                # 329 用例
     └── flutter_app/             # Flutter 客户端
         ├── lib/src/
         │   ├── app.dart / main.dart / bootstrap.dart
@@ -414,12 +486,13 @@ sui/
 
 ### 8.1 已落地并验证
 
-- **服务端**：Go 构建通过、22/22 测试通过；`ping` / `register` / `login` / `push` / `pull` /
+- **服务端**：Go 构建通过、`go test ./...` 全绿；`ping` / `register` / `login` / `push` / `pull` /
   `blobs`(HEAD/PUT/GET) / `revisions` / `clips` / `ws` 全部实测正常，鉴权 401、密码错误 401、
   已建号后重复注册 403、坏 body 400、不存在资源 404、`base_version` 冲突 `accepted=false` 均正确。
-- **note_core**：123/123 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
-  缓存 LRU / 配置存取 / 落盘持久化 / 笔记本排序 / 编辑器格式化（含图片块级插入）+ e2e 同步等）。
-- **flutter_app**：62/62 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
+- **note_core**：329/329 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
+  缓存 LRU / 配置存取 / 落盘持久化 / 笔记本排序 / 编辑器格式化（含图片块级插入）/
+  逐项同步状态与核对补齐 + e2e 同步等）。
+- **flutter_app**：171/171 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
   第二台设备拉取到；格式模式图片渲染与尺寸手柄、块级图片下方留出行高；编辑器增强的快捷键 /
   勾选框 / 高亮与「打开不编辑」保真用例；窄屏紧凑模式行与附件弹窗；窄屏历史入口（整页推入
   修订面板、返回两级）；桌面外壳 12 项：折叠 /
@@ -545,7 +618,7 @@ sui/
   刷新为**单次使用 + 轮换**；轮换时把旧哈希挪到 `prev_refresh_token_hash`，故**重放旧刷新令牌**可被识别
   并**吊销整个会话**（`refresh-revoked`）。401 错误码**可区分**（`token-expired` / `invalid_token`），
   客户端据此**单飞刷新 + 重放一次**（并发去重；`invalid_token` 亦允许一次性刷新，见
-  [auth.md §8.5](../../Trae-workspace/SuiDevAgent-m10/technology/design/low-level-design/auth.md)）。
+  `auth.md` §8.5 —— 该详细设计文档随项目技术文档单独维护，不随本仓库发布）。
   会话与 WS 连接**绑定**：会话被吊销即断开连接。
 - **受保护通道（M10 / FR-50）**：`http://` 地址下应用层加密，`https://` 走 TLS 不叠加。
   服务端持有**长期 X25519 密钥**（`<数据目录>/securechan.key`，0600），客户端经
@@ -563,8 +636,22 @@ sui/
 - **测试现状（M10 收口）**：服务端 Go 测试全部通过（M10 新增 `m10_test.go` / `m10_auth_test.go` /
   `m10_clip_test.go` / `m10_encnotebook_test.go` / `m10_securechan_test.go` / `m10_transport_test.go`
   与 `internal/securechan/channel_test.go`）；`note_core` **294 项**（含 5 个 e2e：同步、受保护通道、
-  加密笔记本跨端、令牌刷新、既有同步链）；`flutter_app` **146 项**。加密封装另有 **Spike 向量**
+  加密笔记本跨端、令牌刷新、既有同步链）；`flutter_app` **171 项**。加密封装另有 **Spike 向量**
   （`sui-crypto-v1`）在 Go 与 Dart 两侧**逐字节**门禁。
+
+- **逐项同步状态与云端核对补齐（M12 / v0.12.0，FR-53 ~ FR-55）**：`notes` / `notebooks` / `tags`
+  三表新增本地状态列（五态 `已同步` / `待上传` / `仅本地` / `冲突` / `同步失败`），界面就地呈现
+  状态图标与缘由（悬停可见，窄屏降级为状态点）；支持单项「立即上传 / 重试」与全局
+  「全部重新同步」（核对 → 补齐，可取消、幂等、给出逐项结果与失败原因）。上行队列改由库中状态
+  **重建**（内存 Outbox 退役）；服务端 push 逐项裁决显式化（`notFound` + 显式 `serverVersion: 0`），
+  使「换服务端 / 服务端重建后推不上去」可自愈；拉取游标持久化并回退 1 秒；服务端新增 `meta` 表
+  与**云端实例身份** `instanceId`（`pull` 恒下发 / `ping` 仅鉴权时下发），换库 / 重建由用户在
+  三选一提示中决断（**选择前不动任何一端数据**）。状态为**纯本地记账**，Markdown 正本与
+  同步净荷均不变（架构零改动）。
+- **测试现状（M12 收口）**：`note_core` **329 项**全量通过（M12 新增 `sync_status_m12_test.dart` 15 项
+  + `schema_migration_v8_test.dart` 1 项）；服务端 `go test ./...` 全绿（M12 新增
+  `internal/api/m12_test.go` 4 项）；`flutter_app` **171 项**全绿（含**新增**同步状态图标与单项 / 全局入口的
+  widget 用例 12 项）；**Windows 桌面目标** `flutter build windows --debug` 通过。
 
 ### 8.2 历史缺口（均已修复）
 
@@ -581,6 +668,9 @@ sui/
 | 9 | 笔记本分组 / 标签 / 笔记-标签关联无云端存储与同步 | ✅ 已修复 | 换设备后分组树与标签不跟随；M1 补齐服务端三表 + 协议净荷 |
 | 10 | WebSocket 端点无需鉴权，任意客户端均可订阅变更广播 | ✅ 已修复 | 未授权方可感知笔记变更；M4 起 WS 须 Token 鉴权 |
 | 11 | 剪藏笔记 id 与手写笔记共用 64 bit 摘要命名空间、可能碰撞 | ✅ 已修复 | 剪藏可能覆盖同名笔记；M4 起改为 ≥128 bit 摘要 + `source_url` 幂等 |
+| 12 | 换服务端 / 服务端重建（回滚）后本地实体基线非 0 而云端无记录 → 永久冲突、再也推不上去（B24-①） | ✅ 已修复 | 改动永久卡在本机；M12 起服务端回 `notFound` + 显式 `serverVersion: 0`，客户端基线归零并同轮重发 |
+| 13 | 上传意图只存在于内存 Outbox（B24-②） | ✅ 已修复 | 重启 / 换服务端后未上传改动静默滞留本机；M12 起上行队列 = 库中 `sync_state`（状态即队列） |
+| 14 | 拉取游标为进程内且无回退（B24-③） | ✅ 已修复 | 同一秒内的多条变更被永久漏拉；M12 起游标持久化于 `settings` 并取 `max(updated_at) − 1s`（下行幂等，重放安全） |
 
 ### 8.3 未实现的设计项
 
@@ -600,6 +690,12 @@ sui/
   Android / iOS / Web 未实测（Web 端为纯 Dart 或 WASM 兑算，风险最高）。
 - **通道正文整包缓冲**：请求与响应均先整体缓冲再加解密，单请求峰值内存约 2× 报文大小；
   流式加密为后续优化项。
+- **核对补齐首版做「带正文」的全量 pull**（M12 已知取舍）：`reconcile()` 以 `pull?since=epoch`
+  取云端全量权威态，因此首次核对会把所有笔记正文拉一遍；数据量大时首轮较慢，但**幂等且只此一次**。
+- **`pull?meta=1` 精简清单**（演进项，当前未实现）：另提供「只回 id / version / isDeleted 的轻量
+  清单」用于核对，可把首轮全量 pull 降为清单比对 + 按需拉正文。
+- **标签的同步状态目前仅落在数据层**：`tags` 已有五态记账，但界面尚未为标签单列状态入口
+  （笔记列表与笔记本树上的状态可就地辨认）。
 
 ### 8.4 M10 安全加固的实现要点（FR-49 / FR-50 / FR-51）
 

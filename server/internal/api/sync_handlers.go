@@ -91,10 +91,13 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type itemResult struct {
-		ID             string `json:"id"`
-		Accepted       bool   `json:"accepted"`
-		ServerVersion  int    `json:"serverVersion,omitempty"`
-		AppliedVersion int    `json:"appliedVersion,omitempty"`
+		ID       string `json:"id"`
+		Accepted bool   `json:"accepted"`
+		// M12（ADR-019 决策 3）：`serverVersion` **不再 omitempty**，使「服务端没有该实体」时
+		// 也能显式给出 0；`notFound` 明确区分「没有该实体」与「版本冲突」。
+		ServerVersion  int  `json:"serverVersion"`
+		AppliedVersion int  `json:"appliedVersion,omitempty"`
+		NotFound       bool `json:"notFound,omitempty"`
 	}
 	results := make([]itemResult, 0, len(req.Items))
 	for _, it := range req.Items {
@@ -106,6 +109,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		results = append(results, itemResult{
 			ID: it.ID, Accepted: resp.Accepted,
 			ServerVersion: resp.ServerVersion, AppliedVersion: resp.AppliedVersion,
+			NotFound: resp.NotFound,
 		})
 	}
 	notebookResults := make([]itemResult, 0, len(req.Notebooks))
@@ -118,6 +122,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		notebookResults = append(notebookResults, itemResult{
 			ID: it.ID, Accepted: resp.Accepted,
 			ServerVersion: resp.ServerVersion, AppliedVersion: resp.AppliedVersion,
+			NotFound: resp.NotFound,
 		})
 	}
 	tagResults := make([]itemResult, 0, len(req.Tags))
@@ -130,6 +135,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		tagResults = append(tagResults, itemResult{
 			ID: it.ID, Accepted: resp.Accepted,
 			ServerVersion: resp.ServerVersion, AppliedVersion: resp.AppliedVersion,
+			NotFound: resp.NotFound,
 		})
 	}
 	// 发送变更通知（WebSocket）
@@ -253,9 +259,17 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt: tg.UpdatedAt.UTC().Format(time.RFC3339),
 		})
 	}
+	// M12（FR-55）：随 pull 下发**云端实例身份**（该端点恒鉴权），
+	// 供客户端识别「换库 / 重建」并提示用户（ADR-019 决策 4）。
+	instanceID, err := s.store.InstanceID()
+	if err != nil {
+		writeInternalError(w, r, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "notes": list,
 		"notebooks": notebooks, "tags": tags,
+		"instanceId": instanceID,
 	})
 }
 

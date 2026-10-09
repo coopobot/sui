@@ -218,6 +218,35 @@ class AppController extends ChangeNotifier {
   String? _syncError;
   String? get syncError => _syncError;
 
+  // ---- M12（FR-53 / FR-54 / FR-55）：逐项同步状态与云端核对补齐 ----
+
+  /// 最近一次「全部重新同步 / 首次连接核对」完成时间（`已同步` tooltip 用）。
+  DateTime? _lastReconcileAt;
+  DateTime? get lastReconcileAt => _lastReconcileAt;
+
+  /// 待上传条数（库中「未同步」实体计数），供同步设置对话框与菜单角标。
+  ///
+  /// 取自 [SyncClient.outboxLength] 的缓存 —— M12 起**不再自动刷新**，
+  /// 每次 `refresh*` / `syncNow` / 核对完成后显式调 `refreshQueuedCount()`。
+  int get unsyncedCount => _syncClient?.outboxLength ?? 0;
+
+  /// 是否已配置并装配同步客户端（未配置时界面按「仅本地」弱化呈现，BR-53.6）。
+  bool get syncConfigured => _syncClient != null && _config.isConfigured;
+
+  /// 正在执行「全部重新同步」/ 换库补齐（命令置灰用）。
+  bool _reconciling = false;
+  bool get reconciling => _reconciling;
+
+  /// 「全部重新同步」是否可用：已连接且没有正在跑的核对。
+  bool get canReconcile => _syncClient != null && !_reconciling;
+
+  /// 待决的**云端实例身份变化**（换库 / 重建 / 首次连接即发现云端为空）。
+  ///
+  /// 由 [syncNow] / [reconcileAll] 捕获 [CloudInstanceChangedException] 后落这里，
+  /// 界面据此弹三选一对话框（ui-spec §20.6）；**选择前不上传、不清空**（AC-191）。
+  CloudInstanceChange? _pendingCloudChange;
+  CloudInstanceChange? get pendingCloudChange => _pendingCloudChange;
+
   int _cacheLimitBytes = 512 * 1024 * 1024;
   int get cacheLimitBytes => _cacheLimitBytes;
 
@@ -364,6 +393,7 @@ class AppController extends ChangeNotifier {
     _leftPanelCollapsed = _boolPref(await _settings.get(_kLeftPanelCollapsed));
     _noteListCollapsed = _boolPref(await _settings.get(_kNoteListCollapsed));
     _editorMode = editorModeFromName(await _settings.get(_kEditorMode));
+    _lastReconcileAt = await _settings.lastReconcileAt();
     _blobStore = CachedBlobStore(
       local: LocalBlobStore(_blobRoot()),
       meta: SqliteBlobCacheMeta(_db),
@@ -380,12 +410,21 @@ class AppController extends ChangeNotifier {
 
   Future<void> refreshNotebooks() async {
     _notebooks = await _repository.listNotebooks();
+    await _refreshUnsyncedCount();
     notifyListeners();
   }
 
   Future<void> refreshTags() async {
     _tags = await _repository.listTags();
+    await _refreshUnsyncedCount();
     notifyListeners();
+  }
+
+  /// 刷新待上传条数缓存（M12：`outboxLength` 不再自动同步，须显式刷新）。
+  Future<void> _refreshUnsyncedCount() async {
+    final client = _syncClient;
+    if (client == null) return;
+    await client.refreshQueuedCount();
   }
 
   /// 加载标签总览数据（标签 + 关联笔记数），并按当前 [tagSortMode] 排序。
@@ -446,12 +485,14 @@ class AppController extends ChangeNotifier {
         _notes = await _repository.listArchivedNotes(
           search: _query.isEmpty ? null : _query,
         );
+        await _refreshUnsyncedCount();
         notifyListeners();
         return;
       case NoteViewMode.trash:
         _notes = await _repository.listDeletedNotes(
           search: _query.isEmpty ? null : _query,
         );
+        await _refreshUnsyncedCount();
         notifyListeners();
         return;
       case NoteViewMode.all:
@@ -479,6 +520,7 @@ class AppController extends ChangeNotifier {
           _notes.where((n) => n.note.sourceDevice.startsWith('clip:')).toList();
     }
     _applySort();
+    await _refreshUnsyncedCount();
     notifyListeners();
   }
 
@@ -870,6 +912,8 @@ class AppController extends ChangeNotifier {
       token: normalized.token,
       refreshToken: normalized.refreshToken,
       blobStore: _blobStore,
+      // M12（FR-55）：实例身份与拉取游标落在本地 settings，换库检测才跨进程有效。
+      settings: _settings,
       onTokensRefreshed: _onTokensRefreshed,
       onAuthExpired: _onAuthExpired,
       // M10-T27 / FR-50：`http://` 地址自动套**受保护通道**（`https` 走 TLS，不叠加，§9.1）。
@@ -885,7 +929,9 @@ class AppController extends ChangeNotifier {
     _openWs();
     _syncTicker?.cancel();
     _syncTicker = Timer.periodic(_syncInterval, (_) => syncNow());
-    await syncNow();
+    // M12（BR-55.4）：首次连接**先核对**而非直接 push —— 「迁移后的保守状态」立即重算，
+    // 也顺带避免升级后把所有旧数据重推一遍。探测到换库时落待决状态（不置 error）。
+    await reconcileAll();
   }
 
   /// 断开连接：清掉地址与 Token（保留 deviceId 与本地数据）。
@@ -920,14 +966,128 @@ class AppController extends ChangeNotifier {
       if (generation != _connGeneration) return;
       _lastSyncedAt = DateTime.now();
       _syncState = SyncState.idle;
-      await refreshNotebooks();
-      await refreshTags();
-      await refreshNotes();
+      await _refreshLocalViews();
+    } on CloudInstanceChangedException catch (e) {
+      // 换库 / 重建**不是错误态**：落待决状态交界面弹窗（AC-191；选择前不动任何数据）。
+      if (generation != _connGeneration) return;
+      _pendingCloudChange = e.change;
+      _syncState = SyncState.idle;
+      _syncError = null;
     } catch (e) {
       if (generation != _connGeneration) return;
       _syncError = _describeError(e);
       _syncState = SyncState.error;
     }
+    notifyListeners();
+  }
+
+  /// 同步动作的收口刷新：树 / 列表 / 标签 + 待上传计数 + 最近核对时间。
+  Future<void> _refreshLocalViews() async {
+    await refreshNotebooks();
+    await refreshTags();
+    await refreshNotes();
+    await _syncClient?.refreshQueuedCount();
+    _lastReconcileAt = await _settings.lastReconcileAt();
+  }
+
+  /// 单项「立即上传 / 重试」（FR-54 / ui-spec §20.4）：**只影响该项**，
+  /// 不改变当前编辑焦点、不清草稿（BR-54.1）。
+  ///
+  /// 成功返回 `null`；失败返回可展示文案（UI 以 SnackBar 呈现原因）。
+  Future<String?> retrySyncFor(SyncEntityKind kind, String id) async {
+    final client = _syncClient;
+    if (client == null) return '尚未配置同步服务端';
+    try {
+      final state = await client.retryOne(kind, id);
+      await _refreshLocalViews();
+      notifyListeners();
+      if (state == EntitySyncState.synced) return null;
+      if (state == EntitySyncState.conflict) {
+        return '该项与云端存在冲突：加密笔记本需先解锁，其余将按既有合并策略自动合并';
+      }
+      return '该项仍未同步完成（当前状态：${state.label}）';
+    } catch (e) {
+      await _refreshLocalViews();
+      notifyListeners();
+      return _describeError(e);
+    }
+  }
+
+  /// 全局「全部重新同步」（FR-54 / ui-spec §20.5）：核对云端权威态并逐项补齐。
+  ///
+  /// [pushLocal] 为假 = 用户选了「以云端为准」：只做下行，本端多出的实体**不删除**、
+  /// 仅标记 `仅本地` 且不再自动上行（BR-55.2）；[hasUserDecision] 为真表示换库已获用户决策。
+  ///
+  /// 返回 `null` 表示**没有结果**（未连接 / 出错 / 探测到换库）。换库时
+  /// [pendingCloudChange] 有值，由界面弹三选一对话框（ui-spec §20.6）。
+  Future<ReconcileResult?> reconcileAll({
+    bool pushLocal = true,
+    bool hasUserDecision = false,
+    void Function(ReconcileProgress progress)? onProgress,
+    CancelToken? cancel,
+  }) async {
+    final client = _syncClient;
+    if (client == null) return null;
+    if (_reconciling) return null;
+    final generation = _connGeneration;
+    _reconciling = true;
+    _syncState = SyncState.syncing;
+    _syncError = null;
+    notifyListeners();
+    try {
+      final result = await client.reconcile(
+        pushLocal: pushLocal,
+        hasUserDecision: hasUserDecision,
+        onProgress: onProgress,
+        cancel: cancel,
+      );
+      if (generation != _connGeneration) return result;
+      _pendingCloudChange = null;
+      _syncState = SyncState.idle;
+      _syncError = null;
+      if (!result.cancelled) _lastSyncedAt = DateTime.now();
+      await _refreshLocalViews();
+      return result;
+    } on CloudInstanceChangedException catch (e) {
+      // 未经用户决策前：**不上传、不清空**（AC-191）。这不是错误态，故不置 error。
+      if (generation != _connGeneration) return null;
+      _pendingCloudChange = e.change;
+      _syncState = SyncState.idle;
+      _syncError = null;
+      return null;
+    } catch (e) {
+      if (generation != _connGeneration) return null;
+      _syncError = _describeError(e);
+      _syncState = SyncState.error;
+      return null;
+    } finally {
+      _reconciling = false;
+      notifyListeners();
+    }
+  }
+
+  /// 用户对**换库 / 重建**做出选择（ui-spec §20.6 / AC-191）。
+  ///
+  /// `useLocal: true` → 用本地数据补齐到云端；`false` → 以云端为准（本地只降级为
+  /// `仅本地`、不删除不上传）。完成后清空待决状态并刷新界面。
+  Future<ReconcileResult?> resolveCloudChange({required bool useLocal}) async {
+    if (_pendingCloudChange == null) return null;
+    final result = await reconcileAll(
+      pushLocal: useLocal,
+      hasUserDecision: true,
+    );
+    if (result != null) {
+      _pendingCloudChange = null;
+      await _refreshLocalViews();
+      notifyListeners();
+    }
+    return result;
+  }
+
+  /// 用户在换库对话框点「取消」：**两端数据都不动**，只清掉待决状态（可稍后再选）。
+  void dismissCloudChange() {
+    if (_pendingCloudChange == null) return;
+    _pendingCloudChange = null;
     notifyListeners();
   }
 
@@ -1047,6 +1207,8 @@ class AppController extends ChangeNotifier {
     }
     _syncClient?.close();
     _syncClient = null;
+    // 连接被替换 / 断开：待决的换库状态随之失效（新连接会重新探测并重新告知）。
+    _pendingCloudChange = null;
     // 附件缓存不随连接销毁：本地字节与记账都要留着（离线可用）。
   }
 

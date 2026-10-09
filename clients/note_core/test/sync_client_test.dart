@@ -154,7 +154,9 @@ void main() {
       await syncer.enqueue(note);
       final results = await syncer.push();
 
-      expect(pushCalls, 1);
+      // M12：冲突会在**同一轮内**以新基线重发一次（故 push 被调用两次）；
+      // 第二次仍冲突则不再重复合并（避免冲突标记膨胀），保留「冲突」态待下轮。
+      expect(pushCalls, 2);
       expect(pullCalls, greaterThanOrEqualTo(1));
       expect(results.first.accepted, isFalse);
       expect(syncer.outboxLength, 1);
@@ -162,6 +164,7 @@ void main() {
       expect(merged!.contentMarkdown, contains('远端正文'));
       expect(merged.contentMarkdown, contains('本地正文'));
       expect(merged.contentMarkdown, contains('sui:conflict'));
+      expect(merged.syncState, EntitySyncState.conflict);
 
       syncer.close();
     });
@@ -198,7 +201,14 @@ void main() {
     // 现象：对端编辑了本机已有的笔记（尤其带附件），本机 pull 后附件映射会更新，
     // 正文却停留在旧版本。修复后 pull 的「本地已有」分支同样应用服务端正文与版本。
     test('BUG 修复：pull 更新已存在笔记的正文/标题/版本（无待推草稿）', () async {
-      final local = await repo.createNote(title: '旧标题', contentMarkdown: '旧正文');
+      // M12：本端无改动 = 同步状态为「已同步」（等价于旧模型的「Outbox 无草稿」）。
+      // 这里以服务端来源落库（fromWire）模拟「本机已有、且没有未上传改动」。
+      final local = await repo.createNote(
+        title: '旧标题',
+        contentMarkdown: '旧正文',
+        version: 1,
+        fromWire: true,
+      );
       final syncer = newClient((req) async => jsonResponse(200, {
             'ok': true,
             'notes': [
@@ -360,8 +370,8 @@ void main() {
           return jsonResponse(200, {'ok': true, 'notes': []});
         });
 
-        syncer.enqueueNotebook(nb);
-        syncer.enqueueTag(tag);
+        await syncer.enqueueNotebook(nb);
+        await syncer.enqueueTag(tag);
         await syncer.push();
 
         expect(pushCalls, 1);
@@ -370,7 +380,8 @@ void main() {
         expect(nbs.first['id'], nb.id);
         expect(nbs.first['name'], '工作');
         expect(nbs.first['baseVersion'], 0);
-        expect(nbs.first['version'], 1);
+        // M12：本地新建 = 服务端基线 0（`version` 与 `baseVersion` 同源，均为基线镜像）。
+        expect(nbs.first['version'], 0);
         final tags = (body!['tags'] as List).cast<Map<String, dynamic>>();
         expect(tags.length, 1);
         expect(tags.first['id'], tag.id);
@@ -530,7 +541,10 @@ void main() {
 
         final still = await repo.getNotebook(local.id);
         expect(still!.name, '本地名');
-        expect(still.version, 1);
+        // M12：冲突后基线**对齐服务端版本**（下轮以它为 base 重发本地字段），
+        // 且本地仍是「待上传」（pull 不覆盖脏项）。
+        expect(still.version, 5);
+        expect(still.syncState, isNot(EntitySyncState.synced));
         syncer.close();
       });
 

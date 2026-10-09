@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"sui/note-server/internal/auth"
+	"sui/note-server/internal/store"
 	"sui/note-server/internal/version"
 )
 
@@ -17,6 +19,8 @@ type Payload struct {
 	Time        string `json:"time"`
 	Msg         string `json:"msg,omitempty"`
 	Initialized bool   `json:"initialized"`
+	// M12（FR-55）：云端实例身份 —— **仅鉴权通过时**才填充（匿名探测不返回这些信息）。
+	InstanceID string `json:"instanceId,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -58,12 +62,22 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "internal error"})
 		return
 	}
-	writeJSON(w, http.StatusOK, Payload{
+	p := Payload{
 		OK:          true,
 		Service:     "sui-server",
 		Version:     version.String,
 		Time:        now(),
 		Msg:         "pong",
 		Initialized: initialized,
-	})
+	}
+	// M12（FR-55）：实例身份**仅在鉴权通过时**返回 —— 匿名探测拿不到，
+	// 避免对公网暴露稳定的实例指纹（承 ADR-016「默认拒绝、取严」）。
+	if token := auth.BearerToken(r); token != "" {
+		if status, _, _ := s.store.Authenticate(token); status == store.AuthOK {
+			if id, err := s.store.InstanceID(); err == nil {
+				p.InstanceID = id
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, p)
 }

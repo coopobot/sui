@@ -3,6 +3,7 @@ import 'package:note_core/note_core.dart';
 
 import '../platform/desktop_platform.dart';
 import 'app_controller.dart';
+import 'sync_status_icon.dart';
 
 /// 笔记列表：展示所选笔记本/搜索下的笔记摘要 + 元信息（时间、所属笔记本）。
 ///
@@ -293,6 +294,7 @@ class _NoteTile extends StatelessWidget {
                   pinned: note.pinned,
                   archived: note.archived,
                   openInWindow: openInWindow,
+                  syncStatus: _syncStatusIcon(context, note),
                 ),
               ],
             ),
@@ -308,6 +310,27 @@ class _NoteTile extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+
+  /// 行尾状态角标（M12 / FR-53 / ui-spec §20.2）。
+  ///
+  /// 位置与既有归档 / 剪藏角标**同一区域**（行尾状态角标区），固定尺寸与间隔，
+  /// 不进入标题行、不占摘要行，因此**不挤压标题与行尾操作按钮**；窄屏按 §20.3
+  /// 收敛为**单一状态点**；未配置同步时按「仅本地」弱化呈现（BR-53.6，不伪造已同步）。
+  Widget _syncStatusIcon(BuildContext context, Note note) {
+    final narrow = MediaQuery.sizeOf(context).width < 900;
+    return SyncStatusIcon(
+      state: displaySyncState(note.syncState,
+          configured: controller.syncConfigured),
+      error: note.syncError,
+      errorAt: note.syncErrorAt,
+      checkedAt: controller.lastReconcileAt,
+      kind: SyncEntityKind.note,
+      // 加密笔记本未解锁：状态照常显示，tooltip 追加一句（BR-53.5）。
+      encryptedLocked: note.encrypted && !controller.isNotebookUnlocked(note.notebookId),
+      size: narrow ? 12 : 14,
+      dotOnly: narrow,
     );
   }
 
@@ -345,6 +368,7 @@ class _NoteTile extends StatelessWidget {
 
 /// 「笔记操作」菜单项取值（行尾菜单与行右击菜单共用，见 [noteMenuItems]）。
 const String _noteMenuOpenInWindow = 'openInWindow';
+const String _noteMenuSync = 'sync';
 const String _noteMenuPin = 'pin';
 const String _noteMenuArchive = 'archive';
 const String _noteMenuMove = 'move';
@@ -369,6 +393,11 @@ List<PopupMenuEntry<String>> noteMenuItems(Note note) {
       ),
       const PopupMenuDivider(),
     ],
+    // M12（FR-54 / ui-spec §20.4）：单项「立即上传 / 重试」——行尾菜单与本行右击菜单
+    // **同一项、同一命令**（与树节点菜单同源）。仅 `待上传` / `仅本地` / `同步失败` 可用；
+    // `已同步` 置灰（无可上行改动），`冲突` 不给上传入口、只给「需先解锁 / 将自动合并」的说明。
+    syncMenuItem(note.syncState),
+    const PopupMenuDivider(),
     PopupMenuItem<String>(
       value: _noteMenuPin,
       child: Row(children: [
@@ -405,6 +434,52 @@ List<PopupMenuEntry<String>> noteMenuItems(Note note) {
   ];
 }
 
+/// 单项同步菜单项（行尾菜单 / 行右击菜单 / 树节点菜单**同源**，ui-spec §20.4）。
+///
+/// 可用性严格按 `EntitySyncState.offersManualUpload`：`已同步` 与 `冲突` 置灰并就地
+/// 给出理由（`冲突` 呈现为「查看冲突 / 合并」，但**不直接提供上传**）。
+PopupMenuEntry<String> syncMenuItem(EntitySyncState state) {
+  final conflict = state == EntitySyncState.conflict;
+  final hint = syncMenuHint(state);
+  return PopupMenuItem<String>(
+    value: _noteMenuSync,
+    enabled: state.offersManualUpload,
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(conflict ? Icons.call_split : Icons.arrow_upward, size: 18),
+            const SizedBox(width: 8),
+            Text(conflict ? '查看冲突 / 合并' : '立即上传 / 重试'),
+          ],
+        ),
+        if (hint.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 26, top: 2),
+            child: SizedBox(
+              width: 250,
+              child: Text(
+                hint,
+                maxLines: 3,
+                style: const TextStyle(fontSize: 11),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+}
+
+/// 置灰理由（`已同步` / `冲突`）；可上传的状态返回空串。
+String syncMenuHint(EntitySyncState state) => switch (state) {
+      EntitySyncState.synced => '已同步，无可上行改动',
+      EntitySyncState.conflict =>
+        '云端与本机都有改动：将按既有合并策略自动合并（加密笔记本需先解锁）',
+      _ => '',
+    };
+
 /// 执行「笔记操作」菜单项（[noteMenuItems] 的取值）。两处入口共用，行为一致。
 Future<void> noteMenuAction(
   BuildContext context,
@@ -437,6 +512,24 @@ Future<void> noteMenuAction(
       if (!context.mounted) return;
       final ok = await _confirmDeleteNote(context, note);
       if (ok) await controller.deleteNote(note.id);
+      break;
+    case _noteMenuSync:
+      if (!note.syncState.offersManualUpload) {
+        // 置灰项不可点；防御性给出理由，避免「点了没反应」。
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(syncMenuHint(note.syncState))),
+        );
+        return;
+      }
+      final error = await controller.retrySyncFor(SyncEntityKind.note, note.id);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error ??
+              '已上传「${note.title.isEmpty ? '无标题' : note.title}」'),
+        ),
+      );
       break;
   }
 }
@@ -604,6 +697,7 @@ class _MetaLine extends StatelessWidget {
     required this.pinned,
     required this.archived,
     required this.openInWindow,
+    required this.syncStatus,
   });
 
   final String relativeTime;
@@ -615,6 +709,10 @@ class _MetaLine extends StatelessWidget {
   /// 该笔记当前是否已在独立窗口打开（BR-43.5 / AC-132），由 `isNoteOpen` 驱动。
   final bool openInWindow;
 
+  /// 同步状态图标（M12 / FR-53）：占**固定槽位**、排在同区角标**最末**
+  /// （置顶 → 剪藏 → 归档 → … → 同步状态，ui-spec §20.2）。
+  final Widget syncStatus;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -623,7 +721,15 @@ class _MetaLine extends StatelessWidget {
     if (notebookName != null) {
       parts
         ..add(Text(' · ', style: style))
-        ..add(Text(notebookName!, style: style));
+        // 笔记本名可省略号截断：新增状态槽位后仍**不挤压**时间与角标（§20.2）。
+        ..add(Flexible(
+          child: Text(
+            notebookName!,
+            style: style,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ));
     }
     if (archived) {
       parts
@@ -657,6 +763,10 @@ class _MetaLine extends StatelessWidget {
           onColor: scheme.onPrimaryContainer,
         ));
     }
+    // 同步状态：固定槽位 + 固定间隔，恒在末位（ui-spec §20.2）。
+    parts
+      ..add(const SizedBox(width: 6))
+      ..add(syncStatus);
     return Padding(
       padding: const EdgeInsets.only(top: 2),
       child: Row(

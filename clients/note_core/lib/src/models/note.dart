@@ -1,3 +1,4 @@
+import '../sync/entity_sync_state.dart';
 /// 域模型：笔记。与数据库表 [Notes] 解耦，仓储负责映射。
 class Note {
   final String id;
@@ -16,6 +17,16 @@ class Note {
 
   /// M10-T29：镜像所属笔记本的加密状态；为真时 [title] / [contentMarkdown] 是**密文**。
   final bool encrypted;
+
+
+  /// M12（FR-53）：本端与云端的一致状态（**纯本地记账**：不进同步净荷、服务端不存储）。
+  final EntitySyncState syncState;
+
+  /// M12：最近一次同步失败原因（`syncState == EntitySyncState.failed` 时有意义）。
+  final String syncError;
+
+  /// M12：最近一次同步失败时间。
+  final DateTime? syncErrorAt;
 
   /// M10-T29：**运行时标记（不落库）**——该笔记属于加密笔记本且当前**未解锁**，或密文损坏。
   /// 为真时 [title] 是占位文案、[contentMarkdown] 为空；UI 据此禁止进入编辑、排除搜索与预览。
@@ -37,6 +48,9 @@ class Note {
     this.sourceDevice = '',
     this.encrypted = false,
     this.locked = false,
+    this.syncState = EntitySyncState.pending,
+    this.syncError = '',
+    this.syncErrorAt,
   });
 
   Note copyWith({
@@ -55,6 +69,9 @@ class Note {
     String? sourceDevice,
     bool? encrypted,
     bool? locked,
+    EntitySyncState? syncState,
+    String? syncError,
+    DateTime? syncErrorAt,
   }) {
     return Note(
       id: id ?? this.id,
@@ -72,6 +89,9 @@ class Note {
       sourceDevice: sourceDevice ?? this.sourceDevice,
       encrypted: encrypted ?? this.encrypted,
       locked: locked ?? this.locked,
+      syncState: syncState ?? this.syncState,
+      syncError: syncError ?? this.syncError,
+      syncErrorAt: syncErrorAt ?? this.syncErrorAt,
     );
   }
 

@@ -113,7 +113,7 @@ sui/
 │   │       ├── db/              # drift schema + 生成代码
 │   │       ├── models/          # Note / Notebook / Tag / Attachment / Revision
 │   │       ├── repository/      # NoteRepository（CRUD / 标签 / 搜索 / 修订）
-│   │       ├── sync/            # SyncClient + Outbox + 冲突合并
+│   │       ├── sync/            # SyncClient（状态即队列）+ 冲突合并 + 核对补齐
 │   │       ├── blob/            # BlobStore 抽象 + LocalBlobStore + CachedBlobStore
 │   │       └── util/            # 工具
 │   └── flutter_app/             # Flutter 客户端
@@ -138,7 +138,7 @@ go build ./...             # 编译
 make build-server                              # 推荐：注入版本号 + 版本一致性校验
 go build -o bin/sui-server ./cmd/sui-server    # 直接构建：版本停在 version.go 内最后同步值
 go vet ./...               # 静态检查
-go test ./... -count=1     # 全部测试（当前 8 个用例，均在 internal/api）
+go test ./... -count=1     # 全部测试（服务端各包，含 internal/api 的端到端接口用例）
 ```
 
 ### 4.2 note_core（纯 Dart 包）
@@ -148,7 +148,7 @@ cd clients/note_core
 dart pub get
 dart run build_runner build   # 生成 drift 代码（app_database.g.dart）
 dart analyze                  # 静态检查
-dart test                     # 全部用例（当前 51 个，含 2 个 e2e）
+dart test                     # 全部用例（329 项，含同步链 / 受保护通道 / 加密笔记本跨端 / 令牌刷新等 e2e）
 ```
 
 > 注意：drift schema 变更后必须重新执行 `build_runner build`。
@@ -245,19 +245,19 @@ powershell -ExecutionPolicy Bypass -File D:\dev\build_windows_installer.ps1 -Ski
 前置条件：**Inno Setup 6.3+**（从官方站点安装即可；脚本会自动探测安装路径，也可用 `-IsccPath` 指定）。
 目标机需 **VC++ 2015-2022 x64 运行库**（产物依赖 `MSVCP140.dll` / `VCRUNTIME140.dll`），安装器会检测并提示。
 
-**版本号只有一个真源**：`clients/flutter_app/pubspec.yaml` 的 `version:`（形如 `0.10.14+1014`）。
+**版本号只有一个真源**：`clients/flutter_app/pubspec.yaml` 的 `version:`（形如 `0.12.0+1200`）。
 它决定 exe 的文件属性、Android 包版本与安装包版本；服务端版本在构建期用 `-ldflags` 注入
 （`make build-server` 已接好）。改版本号与校验：
 
 ```bash
-bash scripts/version.sh set 0.10.15   # 唯一入口：改 pubspec 并同步 version.go，随后补 CHANGELOG 小节
+bash scripts/version.sh set 0.12.0    # 唯一入口：改 pubspec 并同步 version.go，随后补 CHANGELOG 小节
 bash scripts/version.sh check         # 交叉校验 pubspec / version.go / CHANGELOG / git tag
 ```
 
 静默安装（批量部署）：
 
 ```powershell
-sui-setup-0.10.14-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+sui-setup-0.12.0-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
 > 卸载**不会**删除用户数据（`%APPDATA%\com.sui\Sui\sui\sui.sqlite`）。

@@ -133,9 +133,13 @@ void main() {
     expect(merged.contentMarkdown, contains('A 的正文'));
     expect(merged.contentMarkdown, contains('sui:conflict'));
 
-    final pushAgain = await syncA.push();
-    expect(pushAgain.first.accepted, isTrue);
-    expect(pushAgain.first.appliedVersion, 3);
+    // M12：冲突合并后**同一轮内**已以服务端版本为 base 重发 —— 故第一次 push 的结果里
+    // 就带了重发结果（第二条），无需再等第二个周期。
+    expect(pushAConflict, hasLength(2));
+    expect(pushAConflict.last.accepted, isTrue);
+    expect(pushAConflict.last.appliedVersion, 3);
+    // 再推一次已无待上行内容（幂等收敛）。
+    expect(await syncA.push(), isEmpty);
 
     syncA.close();
     syncB.close();

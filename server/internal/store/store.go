@@ -146,6 +146,13 @@ func (s *Store) migrate() error {
 			tag_id TEXT NOT NULL,
 			PRIMARY KEY (note_id, tag_id)
 		)`,
+		// M12（FR-55）：实例元数据键值。当前存 `instance_id` —— **云端实例身份**，
+		// 用于「换库 / 重建 / 回滚」判定（客户端据此提示用户，而不是静默上传）。
+		`CREATE TABLE IF NOT EXISTS meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_revisions_note ON revisions(note_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_revisions_note_ver ON revisions(note_id, version DESC)`,
@@ -620,6 +627,39 @@ func NewToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(raw), nil
+}
+
+// InstanceID 返回本实例的**云端实例身份**（首次调用生成并持久化，此后恒定）。
+//
+// M12 / FR-55（ADR-019 决策 4）：同一数据目录内保持稳定；**更换数据目录 / 重建库必然变化**，
+// 客户端据此识别「云端数据已更换」并要求用户决策（用本地补齐 / 以云端为准），
+// 而不是静默上传或静默清库。该值**非敏感**（不含任何密钥），但仅在鉴权后返回。
+func (s *Store) InstanceID() (string, error) {
+	var id string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'instance_id'`).Scan(&id)
+	if err == nil && id != "" {
+		return id, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	fresh := "inst-" + hex.EncodeToString(raw)
+	// 并发首次调用：冲突即放弃写入，随后重读已有值，保证身份唯一且稳定。
+	if _, err := s.db.Exec(
+		`INSERT INTO meta (key, value, updated_at) VALUES ('instance_id', ?, ?)
+		 ON CONFLICT(key) DO NOTHING`,
+		fresh, time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		return "", err
+	}
+	if err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'instance_id'`).Scan(&id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // ---- 笔记同步 ----

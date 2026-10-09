@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:note_core/note_core.dart';
 import 'package:provider/provider.dart';
 
 import '../platform/desktop_platform.dart';
@@ -12,8 +13,16 @@ import 'sync_settings_dialog.dart';
 
 /// 应用主界面外壳：响应式三栏（笔记本树 / 笔记列表 / 编辑区）。
 /// 宽屏（桌面/平板）三栏并排；窄屏（手机）用抽屉 + 导航堆栈。
-class NoteShell extends StatelessWidget {
+class NoteShell extends StatefulWidget {
   const NoteShell({super.key});
+
+  @override
+  State<NoteShell> createState() => _NoteShellState();
+}
+
+class _NoteShellState extends State<NoteShell> {
+  /// 已经弹过对话框的那一次变更：避免同一变更在多次 rebuild 中重复弹窗。
+  CloudInstanceChange? _promptedChange;
 
   @override
   Widget build(BuildContext context) {
@@ -21,6 +30,9 @@ class NoteShell extends StatelessWidget {
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= 900;
         final controller = context.watch<AppController>();
+        // M12（FR-55 / ui-spec §20.6）：换库 / 重建告知——不在 build 里直接 showDialog，
+        // 而是帧后回调，避免「build 期间导航」。
+        _maybePromptCloudChange(context, controller);
 
         if (wide) {
           return _WideLayout(
@@ -31,6 +43,36 @@ class NoteShell extends StatelessWidget {
         return _NarrowLayout(controller: controller);
       },
     );
+  }
+
+  /// 待决的云端实例变化 → 弹三选一对话框，并按其结果走控制器对应路径。
+  ///
+  /// **未选择前不上传、不清空任何一端数据**（AC-191）；「取消」只清待决状态。
+  void _maybePromptCloudChange(BuildContext context, AppController controller) {
+    final change = controller.pendingCloudChange;
+    if (change == null) {
+      _promptedChange = null;
+      return;
+    }
+    if (identical(change, _promptedChange)) return;
+    _promptedChange = change;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      final choice = await showCloudInstanceChangeDialog(context, change);
+      if (!mounted) return;
+      switch (choice) {
+        case CloudChangeChoice.useLocal:
+          await controller.resolveCloudChange(useLocal: true);
+          break;
+        case CloudChangeChoice.useCloud:
+          await controller.resolveCloudChange(useLocal: false);
+          break;
+        case CloudChangeChoice.cancel:
+          // 「取消」：两端数据都不动，仅清掉待决状态（可稍后再选）。
+          controller.dismissCloudChange();
+          break;
+      }
+    });
   }
 }
 
@@ -402,4 +444,128 @@ class LockActions extends StatelessWidget {
       onPressed: () => controller.lockAllNotebooks(),
     );
   }
+}
+
+// ---- M12（FR-55）：换库（云端实例身份变化）三选一对话框（ui-spec §20.6） ----
+
+/// 换库对话框的三个出口。
+enum CloudChangeChoice {
+  /// 用本地数据补齐到云端（`reconcileAll(pushLocal: true)`）。
+  useLocal,
+
+  /// 以云端为准、不补齐（本地只降级为 `仅本地`，不删除不上传）。
+  useCloud,
+
+  /// 取消：两端数据都不动。
+  cancel,
+}
+
+/// 弹出「云端数据已更换 / 重建」三选一对话框。
+///
+/// 文案兼容两种情形：`change.previous != null`（云端实例已更换）与
+/// `change.previous == null && change.cloudEmpty`（首次连接即发现云端为空而本机有数据）。
+/// **默认焦点在「取消」**、且遮罩点击/`Esc` 一律按「取消」处理——绝不默认上传（AC-191）。
+Future<CloudChangeChoice> showCloudInstanceChangeDialog(
+  BuildContext context,
+  CloudInstanceChange change,
+) async {
+  final firstConnect = change.previous == null;
+  final choice = await showDialog<CloudChangeChoice>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) {
+      final theme = Theme.of(dialogContext);
+      return AlertDialog(
+        title: const Text('云端数据已更换 / 重建'),
+        content: SizedBox(
+          width: 560,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  firstConnect
+                      ? '检测到当前连接的服务端云端为空，而本机已有数据。'
+                          '在你选择之前，不会上传任何本地数据，也不会清空任何一端数据。'
+                      : '检测到当前连接的服务端数据与本机上次同步的实例不是同一个'
+                          '（数据目录被更换或重建）。'
+                          '在你选择之前，不会上传任何本地数据，也不会清空任何一端数据。',
+                  style: theme.textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '本机记录：${_shortInstance(change.previous)}'
+                  '　云端：${_shortInstance(change.current)}',
+                  style: theme.textTheme.labelSmall,
+                ),
+                const SizedBox(height: 12),
+                _CloudChangeOption(
+                  icon: Icons.cloud_upload_outlined,
+                  title: '用本地数据补齐到云端',
+                  description: '把本机存活实体逐项核对后上行补齐。云端将新增本机的笔记 / 笔记本；'
+                      '云端已有的同项按既有合并策略处理，不会丢字。',
+                  onTap: () =>
+                      Navigator.of(dialogContext).pop(CloudChangeChoice.useLocal),
+                ),
+                _CloudChangeOption(
+                  icon: Icons.cloud_download_outlined,
+                  title: '以云端为准（不补齐）',
+                  description: '本机数据不删除、不覆盖：保留在本机并标注为「仅本地」，不自动上传；'
+                      '可随时另存 / 导出，也可稍后再改为「用本地数据补齐」。',
+                  onTap: () =>
+                      Navigator.of(dialogContext).pop(CloudChangeChoice.useCloud),
+                ),
+                _CloudChangeOption(
+                  icon: Icons.close,
+                  title: '取消',
+                  description: '关闭对话框，两端数据都不动，维持当前状态；可稍后再选。',
+                  // 非破坏性默认：焦点落在「取消」（ui-spec §20.6）。
+                  autofocus: true,
+                  onTap: () =>
+                      Navigator.of(dialogContext).pop(CloudChangeChoice.cancel),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    },
+  );
+  return choice ?? CloudChangeChoice.cancel;
+}
+
+/// 三个选项的呈现（图标 + 标题 + 风险提示，可点整行）。
+class _CloudChangeOption extends StatelessWidget {
+  const _CloudChangeOption({
+    required this.icon,
+    required this.title,
+    required this.description,
+    required this.onTap,
+    this.autofocus = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+  final VoidCallback onTap;
+  final bool autofocus;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(icon),
+      title: Text(title),
+      subtitle: Text(description),
+      autofocus: autofocus,
+      onTap: onTap,
+    );
+  }
+}
+
+/// 实例身份只做「可辨认」呈现，不展示完整串（避免误当机密传播）。
+String _shortInstance(String? id) {
+  if (id == null || id.isEmpty) return '（无记录）';
+  return id.length <= 12 ? id : '${id.substring(0, 12)}…';
 }

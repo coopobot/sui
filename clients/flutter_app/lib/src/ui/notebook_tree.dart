@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:note_core/note_core.dart';
 
 import 'app_controller.dart';
+// 单项「立即上传 / 重试」菜单项与笔记行尾菜单**同源**（命令单一来源，ADR-011 决策 5）。
+import 'note_list.dart';
+import 'sync_status_icon.dart';
 import 'tag_overview.dart';
 
 /// FR-28：左栏深色配色（RGB(34,34,38)）与高对比前景色。
@@ -235,40 +238,13 @@ class _NotebookNode extends StatelessWidget {
           iconColor: _sidebarFgDim,
           selectedColor: Colors.white,
           selectedTileColor: Colors.white12,
-          trailing: PopupMenuButton<String>(
-            iconColor: _sidebarFgDim,
-            onSelected: (v) async {
-              switch (v) {
-                case 'rename':
-                  await _rename(context);
-                  break;
-                case 'newchild':
-                  await _addChild(context);
-                  break;
-                case 'up':
-                  await controller.moveNotebookUp(nb.id);
-                  break;
-                case 'down':
-                  await controller.moveNotebookDown(nb.id);
-                  break;
-                case 'encrypt':
-                  await _setEncrypted(context);
-                  break;
-                case 'delete':
-                  await _confirmDelete(context);
-                  break;
-              }
-            },
-            itemBuilder: (_) => [
-              const PopupMenuItem(value: 'rename', child: Text('重命名')),
-              const PopupMenuItem(value: 'newchild', child: Text('新建子笔记本')),
-              const PopupMenuItem(value: 'up', child: Text('上移')),
-              const PopupMenuItem(value: 'down', child: Text('下移')),
-              // M10-T29（FR-51 §5.1）：「设为加密笔记本」为**一次性**动作，已加密则不再出现。
-              if (!nb.encrypted)
-                const PopupMenuItem(
-                    value: 'encrypt', child: Text('设为加密笔记本')),
-              const PopupMenuItem(value: 'delete', child: Text('删除')),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // M12（FR-53 / ui-spec §20.2）：状态图标在**节点右侧**，折叠态也显示；
+              // 与 §19.1 的锁形图标并存（锁在 leading、状态在 trailing，互不替代）。
+              _syncStatusIcon(context),
+              _nodeMenu(context),
             ],
           ),
           onTap: () => controller.selectNotebook(nb.id),
@@ -284,6 +260,93 @@ class _NotebookNode extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+
+  /// 节点右侧同步状态（M12 / FR-53 / ui-spec §20.2 / §20.3）。
+  ///
+  /// * **空笔记本同样显示**：不因「里面没有笔记」而省略（AC-180）；
+  /// * 左栏深色底上取**高对比前景色**（色相仍取自 `ColorScheme`，仅提亮）；
+  /// * 窄屏（抽屉）按 §20.3 收敛为**单一状态点**；
+  /// * 未配置同步时按「仅本地」弱化呈现（BR-53.6，**不伪造已同步**）；
+  /// * 加密笔记本未解锁照常显示状态（判定不依赖明文，BR-53.5 / AC-184）。
+  Widget _syncStatusIcon(BuildContext context) {
+    final narrow = MediaQuery.sizeOf(context).width < 900;
+    return SyncStatusIcon(
+      state: displaySyncState(nb.syncState,
+          configured: controller.syncConfigured),
+      error: nb.syncError,
+      errorAt: nb.syncErrorAt,
+      checkedAt: controller.lastReconcileAt,
+      kind: SyncEntityKind.notebook,
+      encryptedLocked: nb.encrypted && !controller.isNotebookUnlocked(nb.id),
+      size: narrow ? 12 : 16,
+      dotOnly: narrow,
+      onDark: true,
+    );
+  }
+
+  /// 节点菜单：既有整理 / 加密 / 删除项 + M12 单项「立即上传 / 重试」
+  /// （可用性由 [syncMenuItem] 按 `offersManualUpload` 统一裁决，ui-spec §20.4）。
+  Widget _nodeMenu(BuildContext context) {
+    return PopupMenuButton<String>(
+      iconColor: _sidebarFgDim,
+      onSelected: (v) async {
+        switch (v) {
+          case 'rename':
+            await _rename(context);
+            break;
+          case 'newchild':
+            await _addChild(context);
+            break;
+          case 'up':
+            await controller.moveNotebookUp(nb.id);
+            break;
+          case 'down':
+            await controller.moveNotebookDown(nb.id);
+            break;
+          case 'encrypt':
+            await _setEncrypted(context);
+            break;
+          case 'delete':
+            await _confirmDelete(context);
+            break;
+          case 'sync':
+            await _retrySync(context);
+            break;
+        }
+      },
+      itemBuilder: (_) => [
+        const PopupMenuItem(value: 'rename', child: Text('重命名')),
+        const PopupMenuItem(value: 'newchild', child: Text('新建子笔记本')),
+        const PopupMenuItem(value: 'up', child: Text('上移')),
+        const PopupMenuItem(value: 'down', child: Text('下移')),
+        // M10-T29（FR-51 §5.1）：「设为加密笔记本」为**一次性**动作，已加密则不再出现。
+        if (!nb.encrypted)
+          const PopupMenuItem(
+              value: 'encrypt', child: Text('设为加密笔记本')),
+        const PopupMenuItem(value: 'delete', child: Text('删除')),
+        const PopupMenuDivider(),
+        // M12（FR-54 / ui-spec §20.4）：与笔记行尾菜单**同一项、同一命令**。
+        syncMenuItem(nb.syncState),
+      ],
+    );
+  }
+
+  /// 单项「立即上传 / 重试」（笔记本）：只影响该节点（BR-54.1），结果以 SnackBar 呈现。
+  Future<void> _retrySync(BuildContext context) async {
+    if (!nb.syncState.offersManualUpload) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(syncMenuHint(nb.syncState))),
+      );
+      return;
+    }
+    final error =
+        await controller.retrySyncFor(SyncEntityKind.notebook, nb.id);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(error ?? '已上传笔记本「${nb.name}」')),
     );
   }
 

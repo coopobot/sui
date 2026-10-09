@@ -32,11 +32,15 @@ void main() {
       expect(tree, hasLength(2));
     });
 
-    test('重命名递增版本', () async {
+    test('重命名不改基线版本、只置「待上传」', () async {
       final nb = await repo.createNotebook(name: '旧');
       final renamed = await repo.renameNotebook(nb.id, '新');
       expect(renamed.name, '新');
-      expect(renamed.version, greaterThan(nb.version));
+      // M12：`Notebooks.version` 是**服务端基线镜像**（与 Notes.version 同口径，见 B9），
+      // 本地编辑不得推进它；本地改动由同步状态表达。
+      // 新建的笔记本尚无云端基线（version == 0）→ 「仅本地」。
+      expect(renamed.version, nb.version);
+      expect(renamed.syncState, EntitySyncState.localOnly);
     });
 
     test('新建同级笔记本 sortOrder 递增，列表按创建顺序返回', () async {
