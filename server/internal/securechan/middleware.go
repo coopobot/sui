@@ -61,10 +61,16 @@ func MiddlewareWithReplay(key *Key, next http.Handler, replay *ReplayCache) http
 			writeChannelError(w)
 			return
 		}
-		plain, err := Open(k, string(body), aad)
-		if err != nil {
-			writeChannelError(w)
-			return
+		// **无正文**请求（GET/HEAD 等）：浏览器 fetch 不允许这两类方法带 body，故客户端在这类
+		// 请求上只声明通道、不发封装——此时明文正文就是空，无需解封；**响应照旧加密**。
+		// 兼容：旧客户端仍会发「空明文的封装」，走下面这条解封分支。
+		var plain []byte
+		if len(body) > 0 {
+			plain, err = Open(k, string(body), aad)
+			if err != nil {
+				writeChannelError(w)
+				return
+			}
 		}
 		// 重放检查放在**解密成功之后**：否则攻击者可用随机 reqId 灌满缓存。
 		if replay.Seen(reqID) {

@@ -136,12 +136,7 @@ class SecureChannelClient extends http.BaseClient {
 
     final reqId = base64.encode(randomBytes(16, null));
     final plain = await request.finalize().toBytes();
-    final envelope = await _seal(
-      key,
-      randomBytes(EnvelopeFormat.nonceLength, null),
-      plain,
-      channelAad(request.method, request.url.path, reqId),
-    );
+    final aad = channelAad(request.method, request.url.path, reqId);
 
     final headers = Map<String, String>.from(request.headers)
       ..[kHeaderChannelEnc] = '1'
@@ -149,8 +144,19 @@ class SecureChannelClient extends http.BaseClient {
       ..[kHeaderChannelReqID] = reqId
       ..remove('content-length');
     final wrapped = http.Request(request.method, request.url)
-      ..headers.addAll(headers)
-      ..bodyBytes = utf8.encode(envelope);
+      ..headers.addAll(headers);
+    // **只在确有正文时才发封装**：浏览器 fetch 不允许 GET/HEAD 带 body
+    // （`Request with GET/HEAD method cannot have body`），而同步 pull 正是 GET。
+    // 无正文请求仍然声明通道，以便照样拿到**加密响应**（否则数据会明文回来）；
+    // 服务端把「声明通道 + 空正文」视为**空明文**（见 securechan/middleware.go）。
+    if (plain.isNotEmpty) {
+      wrapped.bodyBytes = utf8.encode(await _seal(
+        key,
+        randomBytes(EnvelopeFormat.nonceLength, null),
+        plain,
+        aad,
+      ));
+    }
 
     final resp = await _inner.send(wrapped);
     if (_header(resp.headers, kHeaderChannelEnc) != '1') {

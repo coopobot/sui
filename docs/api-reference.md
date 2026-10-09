@@ -80,6 +80,9 @@ GET /api/v1/crypto/handshake            # 公开；返回 serverPub + fingerprin
   放行 / 暴露白名单里（v0.11.2 起）。若在中间层（nginx 等）自行处理 CORS，**必须**同样放行
   `X-Sui-Enc` / `X-Sui-Eph` / `X-Sui-Req-Id` 并暴露 `X-Sui-Enc`，否则预检失败、或前端读不到
   密文标记而把密文当明文解析。
+* **无正文请求（GET/HEAD）**：浏览器 `fetch` 不允许这两类方法带 body，故客户端在无正文请求上
+  **只声明通道、不发封装**（正文为空）；服务端把「声明通道 + 空正文」视为**空明文**，**响应照旧加密**。
+  自建客户端须遵循同一契约（否则 GET 带 body 在浏览器里会直接失败）。
 
 ## push 请求体
 

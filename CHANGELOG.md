@@ -7,6 +7,33 @@
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-10-08
+
+M10 补丁：**无正文请求（GET/HEAD）不再携带密文正文**（Flutter Web 适配）。用户在 Web 端验证时，
+同步 `pull` 直接报 `ClientException: Failed to execute 'fetch' on 'Window': Request with GET/HEAD
+method cannot have body` —— 通道包装层给**每个**请求都塞了密文正文，而 `pull` 是 GET；原生
+`package:http` 允许 GET 带 body，故 Dart e2e 全过而浏览器直接拒绝。
+
+### 修复
+
+- **客户端**（`note_core/lib/src/crypto/secure_channel.dart`）：只在**确有正文**时发封装；无正文请求
+  仍带三个通道头，以便照样拿到**加密响应**（否则同步数据会明文返回）。
+- **服务端**（`server/internal/securechan/middleware.go`）：`X-Sui-Enc: 1` + **空正文** → 视为
+  **空明文**（跳过解封），响应照旧加密；旧客户端发的「空明文封装」仍走解封分支——**向后兼容，
+  两端无需同步升级**。
+
+### 测试
+
+- 新增 `server/internal/securechan/middleware_bodiless_test.go`：空正文的通道请求被接受、下游看到
+  `ContentLength=0`、响应仍被加密且可用同一 `K_chan` + AAD 解封。
+- 新增 `note_core/test/secure_channel_bodiless_test.dart`（**2 项**）：**GET 不发正文但仍带通道头**
+  且响应可解封；**POST 仍发封装**（特例不波及有正文请求）。
+
+### 文档
+
+- `docs/api-reference.md`：受保护通道章节写明「无正文请求只声明通道、正文为空封装」这一**契约**，
+  避免第三方实现踩同一个坑。
+
 ## [0.11.2] - 2026-10-08
 
 M10 补丁：**CORS 放行受保护通道的自定义头**（Flutter Web 跨源适配）。用户在 Web 端验证时发现

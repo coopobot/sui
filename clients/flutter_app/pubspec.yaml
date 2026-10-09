@@ -6,7 +6,7 @@ publish_to: "none"
 #   +BN    → Android versionCode，规则 BN = major*10000 + minor*100 + patch（如 0.11.0 → 1100）
 # 改版本号请用 `scripts/version.sh set <x.y.z>`（会同步 server/internal/version/version.go），
 # 并用 `scripts/version.sh check` 校验与 CHANGELOG / git tag 一致。
-version: 0.11.2+1102
+version: 0.11.3+1103
 environment:
   sdk: ^3.3.0
 
