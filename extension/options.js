@@ -6,6 +6,12 @@ const statusEl = document.getElementById('status');
 
 // 加载已有设置
 document.addEventListener('DOMContentLoaded', async () => {
+  // FR-56（BR-56.4）：版本号与弹出面板同源——运行时读清单，不硬编码。
+  const extVersionEl = document.getElementById('extVersion');
+  if (extVersionEl) {
+    extVersionEl.textContent = '版本 ' + chrome.runtime.getManifest().version;
+  }
+
   const settings = await chrome.storage.local.get(['serverUrl', 'token']);
   if (settings.serverUrl) serverUrlInput.value = settings.serverUrl;
   if (settings.token) tokenInput.value = settings.token;

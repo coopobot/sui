@@ -16,6 +16,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('pageTitle').textContent = tab.title || '(无标题)';
   $('pageUrl').textContent = tab.url || '';
 
+  // FR-56（BR-56.4）：版本号运行时读**清单实际版本**，不硬编码。
+  $('extVersion').textContent = 'v' + chrome.runtime.getManifest().version;
+
   // 恢复上次选择（默认 article）
   currentMode = await suiGetLastMode();
   renderMode();

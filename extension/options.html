@@ -75,6 +75,16 @@
     }
     .status.success { display: block; background: #e8f5e9; color: #2e7d32; }
     .status.error { display: block; background: #ffebee; color: #c62828; }
+    .about {
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid #eee;
+      text-align: center;
+      font-size: 12px;
+      color: #888;
+      line-height: 1.6;
+    }
+    .about-name { color: #555; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -94,6 +104,10 @@
       <button type="submit" class="btn">保存设置</button>
       <div class="status" id="status"></div>
     </form>
+    <div class="about">
+      <div class="about-name">随手记 Sui · 网页剪藏</div>
+      <div id="extVersion">版本 —</div>
+    </div>
   </div>
   <script src="options.js"></script>
 </body>

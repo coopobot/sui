@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../platform/desktop_platform.dart';
 import 'app_controller.dart';
 import 'app_menu_bar.dart';
+import 'desktop_commands.dart';
 import 'note_editor.dart';
 import 'note_list.dart';
 import 'notebook_tree.dart';
@@ -109,6 +110,8 @@ class _WideLayout extends StatelessWidget {
           LockActions(controller: controller),
           SyncActions(controller: controller),
           _newNoteAction(context),
+          // 非桌面外壳（Web 宽屏）没有应用菜单栏，故在此给同源的帮助入口（FR-56 / §21.1）。
+          if (!showDesktopChrome) HelpActions(controller: controller),
         ],
       ),
       body: Row(
@@ -213,6 +216,8 @@ class _NarrowLayout extends StatelessWidget {
                 icon: const Icon(Icons.note_add_outlined),
                 onPressed: () => controller.createNote(),
               ),
+            // 窄屏（移动端 / 桌面窗口收窄）没有菜单栏：帮助入口收在「更多」里（FR-56）。
+            HelpActions(controller: controller),
           ],
         ),
         drawer: editorOpen ? null : NoteTreeDrawer(controller: controller),
@@ -229,6 +234,36 @@ class _NarrowLayout extends StatelessWidget {
                     : NoteEditor(key: ValueKey(controller.selectedNoteId)))
                 : NoteList(controller: controller),
       ),
+    );
+  }
+}
+
+/// 「更多」溢出菜单：非桌面外壳布局的帮助入口（FR-56 / ui-spec §21.1）。
+///
+/// 桌面外壳走应用菜单栏的「帮助」组（[AppMenuBar]），此处为**窄屏移动端 / Web 端**
+/// 以及**桌面窗口收窄后**提供同一份「使用文档 / 关于随手记 Sui」——两项均调用与
+/// 桌面菜单**同一个**命令实现（[desktopCommands]），故版本呈现逐字一致（BR-56.3）。
+class HelpActions extends StatelessWidget {
+  const HelpActions({super.key, required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<DesktopCommandId>(
+      tooltip: '更多',
+      icon: const Icon(Icons.more_vert),
+      onSelected: (id) => desktopCommands[id]?.invoke(context, controller),
+      itemBuilder: (context) => const [
+        PopupMenuItem<DesktopCommandId>(
+          value: DesktopCommandId.openDocs,
+          child: Text('使用文档'),
+        ),
+        PopupMenuItem<DesktopCommandId>(
+          value: DesktopCommandId.about,
+          child: Text('关于随手记 Sui'),
+        ),
+      ],
     );
   }
 }

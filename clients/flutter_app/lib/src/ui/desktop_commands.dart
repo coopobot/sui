@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../app_version.dart';
 import '../platform/desktop_platform.dart';
 import 'app_controller.dart';
 import 'markdown_editor.dart';
@@ -308,17 +309,30 @@ final Map<DesktopCommandId, DesktopCommand> desktopCommands = {
   DesktopCommandId.about: DesktopCommand(
     label: '关于随手记 Sui',
     isEnabled: (_) => true,
-    invoke: (context, controller) => showAboutDialog(
-      context: context,
-      applicationName: '随手记 Sui',
-      applicationLegalese: '自托管 · 离线优先 · 多端同步的 Markdown 笔记应用',
-      children: const [
-        SizedBox(height: 12),
-        Text('Markdown 为唯一正本；本地 SQLite 离线优先；自研 push/pull 协议多端同步，数据完全自持。'),
-      ],
-    ),
+    // FR-56（ADR-020）：桌面菜单栏与移动端 / Web 的「更多」菜单**共用同一份**对话框，
+    // 版本号来自构建期常量 [`kAppVersion`]，各端显示值逐字一致（BR-56.3 / AC-199）。
+    invoke: (context, controller) => showSuiAboutDialog(context),
   ),
 };
+
+/// 「帮助 → 关于随手记 Sui」：**各端共用**的关于对话框（FR-56 / ADR-020 / ui-spec §21.2）。
+///
+/// 版本号取自构建期常量 [`kAppVersion`]（真源：`clients/flutter_app/pubspec.yaml`，
+/// 由 `scripts/version.sh` 同步），故桌面 / 移动 / Web 显示值**逐字一致**且**离线可见**：
+/// 不发请求、不读服务端、不降级为「未知」（AC-200 / AC-201）。
+void showSuiAboutDialog(BuildContext context) {
+  showAboutDialog(
+    context: context,
+    applicationName: '随手记 Sui',
+    // 「版本 x.y.z」紧邻应用名呈现；**不含** `+BN` 构建号（BR-56.2）。
+    applicationVersion: '版本 $kAppVersion',
+    applicationLegalese: '自托管 · 离线优先 · 多端同步的 Markdown 笔记应用',
+    children: const [
+      SizedBox(height: 12),
+      Text('Markdown 为唯一正本；本地 SQLite 离线优先；自研 push/pull 协议多端同步，数据完全自持。'),
+    ],
+  );
+}
 
 /// 「帮助 → 使用文档」：产品文档随代码仓库发布，此处给出入口清单。
 ///
@@ -329,16 +343,7 @@ void showDocsDialog(BuildContext context) {
     builder: (context) => AlertDialog(
       title: const Text('使用文档'),
       content: const SelectableText(
-        '随手记 Sui 的使用文档随代码仓库发布，位于 docs/ 目录：\n'
-        '\n'
-        '· docs/index.md           文档导航与现状速览\n'
-        '· docs/getting-started.md 环境搭建、构建、快速上手\n'
-        '· docs/guides/user-guide.md   使用指南\n'
-        '· docs/guides/web-clipper.md  网页剪藏\n'
-        '· docs/architecture.md    架构、数据模型、同步协议\n'
-        '· docs/api-reference.md   服务端 API 参考\n'
-        '· docs/deployment.md      部署说明\n'
-        '· docs/troubleshooting.md 常见问题排查\n',
+        '随手记 Sui 的使用文档，请访问 https://coopobot.github.io/sui/',
       ),
       actions: [
         TextButton(
