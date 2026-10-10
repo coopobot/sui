@@ -103,12 +103,13 @@ void main() {
     await _settle(tester);
     expect(find.text('注册并连接'), findsOneWidget);
 
-    // 对话框内文本框顺序：服务端地址 / 用户名 / 密码 / Token / 缓存上限(MB)
+    // 对话框内文本框顺序：服务端地址 / 用户名 / 密码 / 缓存上限(MB)
+    // M12 修订 / FR-57（AC-205）：**Token 输入已移除** → 文本框由 5 个减为 4 个。
     final fields = find.descendant(
       of: find.byType(AlertDialog),
       matching: find.byType(TextField),
     );
-    expect(fields, findsNWidgets(5));
+    expect(fields, findsNWidgets(4));
     await tester.enterText(fields.at(0), serverUrl);
     await tester.enterText(fields.at(1), username);
     await tester.enterText(fields.at(2), password);

@@ -85,9 +85,9 @@
 | 文件 | 职责 |
 |------|------|
 | `manifest.json` | MV3 清单：权限（activeTab / storage / scripting / contextMenus）+ **`optional_host_permissions`（`http/https`，按需申请）** |
-| `shared.js` | 共享逻辑：设置读取、模式记忆、整页采集（懒加载触发）、剪藏请求与结果文案（popup 与 service worker 共用） |
+| `shared.js` | 共享逻辑：**会话层**（账号密码登录、双令牌存取、401 单飞刷新 + 重放一次、明文地址警示）、模式记忆、整页采集（懒加载触发）、剪藏请求与结果文案（popup 与 service worker 共用） |
 | `popup.html/js` | 弹窗：模式分段控件 + 当前页信息 + 剪藏按钮 + 状态反馈 |
-| `options.html/js` | 设置页：serverUrl + token 配置 + 连接验证（`chrome.storage.local`） |
+| `options.html/js` | 设置页：**服务端地址 + 账号 + 密码登录**（v0.12.2 起不再手填 Token）、已登录态与退出登录、明文地址警示（凭据存 `chrome.storage.local`） |
 | `background.js` | service worker：右键菜单创建 + 菜单剪藏（沿用上次模式）+ badge 状态 |
 
 ### 4.3 剪藏数据流
@@ -105,7 +105,22 @@ popup/background
   → WebSocket 广播 changed → 客户端收件箱自动刷新
 ```
 
-### 4.4 添加图标（可选）
+### 4.4 自动化门禁
+
+会话层（登录 / 刷新 / 明文警示）有 **Node 侧自动化用例**，无需浏览器即可跑：
+
+```bash
+node --test extension/test/session_test.mjs   # Node >= 18，无第三方依赖
+```
+
+覆盖 9 项：登录写入双令牌且**不落口令**、登录失败 / 锁定文案、访问令牌到期前**主动刷新**、
+401（`token-expired`）**单飞刷新 + 重放一次**、**并发只刷一次**、刷新被拒清令牌并保留地址、
+未登录提示、明文地址警示（公网 `http` 警示 / 本机与私网不警示）、剪藏请求带会话与模式。
+
+> 仍需**真机手测**的部分：popup / options 界面呈现、站点权限按需申请弹窗、
+> 浏览器重启后的免密剪藏 — 清单见 [故障排查](../troubleshooting.md) 与本版交付记录。
+
+### 4.5 添加图标（可选）
 
 manifest 可声明 `action.default_icon` / `icons`；生成 16/32/48/128px PNG 放入
 `extension/icons/` 并在 manifest 引用。

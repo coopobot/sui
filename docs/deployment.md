@@ -484,7 +484,7 @@ sui.example.com {
 | 1 | 密码存储 | **PBKDF2 加盐哈希**（M4 落地） | 保持；后续可评估 Argon2id |
 | 2 | 令牌与会话 | **30 分钟访问令牌 + 可撤销刷新令牌**（M10 / FR-49；单次使用轮换、重放即吊销会话、与 WS 连接绑定） | — |
 | 3 | HTTPS | 无内置 TLS；`http://` 下客户端启用**应用层受保护通道**（M10 / FR-50，TOFU + 逐请求 AEAD） | 公网仍**建议强制 TLS**：通道保护内容，TLS 另外提供服务器身份与合规性 |
-| 4 | 限流 | 无 | `register` / `login` 加速率限制，防爆破 |
+| 4 | 限流 | **登录失败防护已落地**（v0.12.2 / FR-59：失败计数 + 指数退避 + 锁定 + 审计，见 §11）；`register` / `refresh` 仍建议由**反向代理**限流兜底 | 按 §11 配置 nginx `limit_req` / `limit_conn` |
 | 5 | WebSocket 鉴权 | **请求头 / 子协议携带令牌且与会话绑定**（M4 + M10 §4.5；会话吊销即断开） | 升级头不在通道内 → 可改为经通道换取**一次性短时 ticket** |
 | 6 | CORS | **来源白名单精确匹配，未配置 = 默认拒绝**（M10-T23；`SUI_ALLOWED_ORIGINS`，且受保护通道的 `X-Sui-Enc`/`X-Sui-Eph`/`X-Sui-Req-Id` 与响应标记头 `X-Sui-Enc` 已列入放行/暴露白名单，v0.11.2） | 生产只配自己的前端来源；Web 端跨源必须配置 |
 | 7 | 资源上限 | 请求体 / 单 blob / 条目数上限与**大传输路由单独延长读写期限**（M10-T25） | nginx `client_max_body_size` 与上表对齐（双层限长） |
@@ -494,6 +494,74 @@ sui.example.com {
 
 ## 10. 客户端接入
 
-部署完成后，在客户端「同步设置」对话框填入服务端地址与 Token 即可（见
+部署完成后，在客户端「同步设置」对话框填入**服务端地址**，再用「注册并连接」（首启建号）或
+「登录并连接」（已有账号）建立会话即可（见
 [用户指南 · 连接服务端](guides/user-guide.md#23-连接服务端首次配置)）；
+**v0.12.2 起客户端与扩展都不再手工粘贴令牌**——令牌由登录后自动持有与透明刷新。
 浏览器扩展的配置见[网页剪藏](guides/web-clipper.md)。
+
+## 11. 登录失败防护与反向代理限流（v0.12.2 / FR-59）
+
+`POST /api/v1/login` 内置**进程内**登录失败防护：按「用户名 + 来源地址」统计连续失败，
+达到阈值后先**指数退避**、再**锁定**，并写审计日志。状态只驻内存，
+**服务端重启即解锁**（单用户自托管场景下避免把自己永久锁在门外）。
+
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `SUI_LOGIN_GUARD` | 开 | 置 `0` 关闭整个防护 |
+| `SUI_LOGIN_BACKOFF_AFTER` | `5` | 连续失败达到该次数后开始退避 |
+| `SUI_LOGIN_BACKOFF_BASE` | `1s` | 退避基数（第 5 次延迟 1s、第 6 次 2s、第 7 次 4s…） |
+| `SUI_LOGIN_BACKOFF_MAX` | `30s` | 单次退避上限 |
+| `SUI_LOGIN_LOCK_AFTER` | `10` | 连续失败达到该次数后锁定 |
+| `SUI_LOGIN_LOCK_FOR` | `15m` | 锁定时长 |
+| `SUI_LOGIN_GUARD_MAX_KEYS` | `4096` | 计数键表上限（LRU 淘汰，防内存增长） |
+| `SUI_TRUST_PROXY_HEADERS` | 关 | 置 `1` 时按 `X-Forwarded-For` **最右侧**一跳计数（**仅**在可信反代后开启） |
+
+响应口径：失败仍为 `401 invalid credentials`（不区分账号是否存在）；锁定期为
+`429` + `Retry-After: <秒>`，且**锁定期内正确口令同样被拒绝**。
+
+### 11.1 nginx 反向代理限流（纵深防御第二层）
+
+> 反代限流按**来源地址**，应用内限流按**账号 + 来源**，两者互补；**不可只依赖反代**
+> （直连端口仍可达）。反代后若要按真实客户端计数，须给服务端设 `SUI_TRUST_PROXY_HEADERS=1`。
+
+```nginx
+# http 段
+limit_req_zone $binary_remote_addr zone=sui_login:10m rate=5r/m;   # 登录：每分钟 5 次
+limit_req_zone $binary_remote_addr zone=sui_api:10m   rate=60r/m;  # 其它接口
+limit_conn_zone $binary_remote_addr zone=sui_conn:10m;
+
+server {
+    listen 80;
+    server_name your.domain;
+
+    # 登录端点单独收紧
+    location = /api/v1/login {
+        limit_req  zone=sui_login burst=3 nodelay;
+        limit_conn sui_conn 5;
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /api/v1/ {
+        limit_req  zone=sui_api burst=30;
+        limit_conn sui_conn 20;
+        client_max_body_size 40m;   # 与 §9 资源上限对齐
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+被锁定时的处置（详见 [故障排查](troubleshooting.md)）：等待锁定窗口到期，或**重启服务端**
+（计数清零），或用 `SUI_LOGIN_GUARD=0` 临时关闭防护后再排查。

@@ -43,7 +43,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tokenResponse(pair, req.Username))
 }
 
-// handleLogin 用户登录，返回新 token（简化：密码明文比对）。
+// handleLogin 用户登录，返回双令牌（M12 修订 / FR-59：含登录失败防护）。
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
@@ -57,12 +57,26 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "username/password required"})
 		return
 	}
+	// M12 修订 / FR-59（BR-59.1~59.4）：登录失败防护 —— **先**判定锁定与同键串行化，
+	// **再**校验口令；锁定期内即使口令正确也拒绝（AC-226）。
+	release, locked, retryAfter := s.guard.begin(req.Username, r)
+	defer release()
+	if locked {
+		writeLoginLocked(w, retryAfter)
+		return
+	}
 	// 校验 PBKDF2 密码哈希（M4/BR-36.1），成功则签发新会话 token。
 	pair, err := s.store.LoginUser(req.Username, req.Password)
 	if err != nil {
+		// 失败记账：达到阈值则退避（failure 内部已延迟）或锁定（BR-59.2）。
+		if _, nowLocked, lockRetry := s.guard.failure(req.Username, r); nowLocked {
+			writeLoginLocked(w, lockRetry)
+			return
+		}
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid credentials"})
 		return
 	}
+	s.guard.success(req.Username, r)
 	writeJSON(w, http.StatusOK, tokenResponse(pair, req.Username))
 }
 

@@ -152,7 +152,7 @@
 | `revisions` | 修订历史（快照 + diff 增量） | ✅ |
 | `attachments` | 附件元数据（字节存 BlobStore，此处只存引用 + sha256） | ✅（映射随笔记） |
 | `blob_refs` | 本机附件缓存记账（LRU 元数据 + `uploaded_at` 待上传标记） | ❌ 本机缓存状态 |
-| `settings` | 应用级键值配置（服务端地址 / Token / deviceId；M12 增 `sync.instanceId` / `sync.lastPull` / `sync.lastReconcileAt`） | ❌ 设备级偏好 |
+| `settings` | 应用级键值配置（服务端地址 / 会话令牌 / deviceId；M12 增 `sync.instanceId` / `sync.lastPull` / `sync.lastReconcileAt`） | ❌ 设备级偏好 |
 
 > M1 起服务端补齐 `notebooks` / `tags` / `note_tags` 三表：`notebooks` / `tags` 随 sync/push、
 > sync/pull 净荷上下行（与笔记一样携带 `version` / `is_deleted` / 来源设备与墓碑机制）；
@@ -186,7 +186,7 @@
 | `note_window.dart` | **独立笔记窗口**内容（复用 `NoteEditor`，按笔记 id 装载）；窗口内以视图键 `setActiveViewKey` 认领命令、关闭经 `closeCurrentWindow` 释放 |
 | `desktop_commands.dart` | 桌面命令**单一来源**（`DesktopCommandId` / `DesktopCommand` / `desktopCommands` 注册表）+ `EditorCommandTarget` 接口桥；菜单项 / 顶栏图标按钮 / 快捷键**同源**（多窗口下按当前**聚焦视图**路由命令） |
 | `app_menu_bar.dart` | 桌面端自绘菜单栏「文件 / 编辑 / 视图 / **同步** / 帮助」（M12 增「同步 → 全部重新同步」）+ 顶栏折叠切换控件 `PanelToggles`（窄屏 / 非桌面**不渲染**） |
-| `sync_settings_dialog.dart` | 同步设置对话框（服务端地址 / Token / 设备 ID 的录入与校验）+ M12 的「全部重新同步」面板（进度 / 逐项结果 / 失败项重试，桌面菜单同名命令共用同一实现） |
+| `sync_settings_dialog.dart` | 同步设置对话框（服务端地址 + **账号密码登录** / 设备 ID / 附件缓存上限）+ M12 的「全部重新同步」面板 + **桌面端「本地存储」区**（v0.12.2：路径 / 占用 / 迁移入口；窄屏与 Web 不渲染） |
 | `sync_status_icon.dart` | 逐项同步状态的**就地呈现**（五态图标 + tooltip 缘由 + 未同步计数角标；窄屏降级为状态点）——图标与文案的单一来源在 `note_core`（M12 / FR-53） |
 | `platform/attachment_picker.dart` | 跨端文件选择（`file_picker`，返回文件名 + 字节） |
 | `platform/app_lifecycle.dart`（+ `_io` / `_web`） | 桌面退出前落库接缝（条件导入）：桌面实现「`flushPendingEdits` → 尽力推送 → 退出」，其他平台降级为空实现 |
@@ -492,7 +492,7 @@ sui/
 - **note_core**：329/329 测试通过（仓储 CRUD / 标签 / 搜索 / 修订 / 同步 / 附件引用计数与上传 /
   缓存 LRU / 配置存取 / 落盘持久化 / 笔记本排序 / 编辑器格式化（含图片块级插入）/
   逐项同步状态与核对补齐 + e2e 同步等）。
-- **flutter_app**：171/171 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
+- **flutter_app**：189/189 测试通过（含**真服务端**端到端：注册连接 → 本地新建 → 同步 →
   第二台设备拉取到；格式模式图片渲染与尺寸手柄、块级图片下方留出行高；编辑器增强的快捷键 /
   勾选框 / 高亮与「打开不编辑」保真用例；窄屏紧凑模式行与附件弹窗；窄屏历史入口（整页推入
   修订面板、返回两级）；桌面外壳 12 项：折叠 /
@@ -709,3 +709,33 @@ sui/
 | 形态转换 | 移入/移出加密笔记本**就地加解密**（含既有修订）；同本移动幂等；解锁态不可得时**拒绝移动** |
 | 冲突合并 | 加密笔记的合并**在明文层**完成；未解锁端**不就地合并**（保持排队），保证「绝不丢字」 |
 | 重放防护 | 刷新令牌**单次使用 + 轮换 + 旧哈希留存**；通道请求 id**有界缓存**去重 |
+
+### 8.9 M12 修订（`v0.12.2`）：会话入口统一、本地存储位置与登录防护
+
+三项用户诉求归口，均**不改变** Markdown 唯一正本与同步协议净荷（FR-57 / FR-58 / FR-59）：
+
+- **会话入口统一（FR-57）**：客户端「同步设置」删除手工令牌输入（`connectWithToken` 保留为
+  内部 / 测试装配 API）；剪藏扩展新增账号密码登录，令牌（访问 + 刷新）存 `chrome.storage.local`，
+  请求 401 时**单飞刷新 + 重放一次**，刷新失败即清令牌并要求重新登录，**不保存口令**。
+  扩展**不实现**应用层受保护通道（内容本身公开、简化设计）→ 公网必须使用 `https://`，
+  设置页对 `http://` 非本机地址给出警示。
+- **桌面端本地存储位置（FR-58）**：数据目录由**库外引导指针** `<应用支持根>/storage.json`
+  （原子写）决定；「同步设置 → 本地存储」可把 `sui.sqlite` 与 `blobs/` 迁移到任意可写目录，
+  过程为「落盘（`wal_checkpoint`）→ 复制 → 校验（关键表行数 + 附件数与总字节）→ 原子切换指针
+  → 重启生效」事务，**失败不切换指针**、旧目录保留。指针目录不可用时启动**整屏阻断**并三选一
+  （重试 / 改回默认目录 / 重新指定），**绝不静默回落**默认目录。迁移期间控制器进入维护态，
+  暂停同步调度；与本机目录无关的服务端数据 / 会话 / 设备 ID 均保持不变。
+- **登录失败防护（FR-59）**：`server/internal/api/login_guard.go` 在 `POST /api/v1/login` 前置判定，
+  键 = `lower(username) + 来源`；≥5 次起指数退避（上限 30s），≥10 次锁定 15 分钟，
+  锁定返回 `429` + `Retry-After` 且**正确口令同样被拒**，成功即清零；**同键串行化**防止并发
+  请求把延迟放大为 DoS；键表 LRU 有界。状态只驻内存（**重启即解锁**，单用户自托管逃生口），
+  失败 / 锁定 / 解锁写审计日志且**不含口令**；阈值环境变量化、时钟可注入（门禁不因真实等待变慢）。
+  部署侧配套 nginx `limit_req` / `limit_conn` 作为第二层（详见部署文档 §11）。
+
+**测试现状（本版新增）**：服务端新增 `m12_login_guard_test.go` **10 项**（退避 / 锁定 /
+锁定拒绝正确口令 / 成功清零 / 重启解锁 / 审计不含口令 / 账号存在性响应一致 / 默认不信任
+`X-Forwarded-For` / 开启信任后按最右跳 / 关闭防护），`go vet` 与 `go test ./...` 全绿；
+`flutter_app` 新增 `storage_location_test.dart` **10 项**与 `storage_settings_test.dart` **6 项**，
+`flutter analyze` 无问题；扩展侧新增 Node 自动化门禁 `extension/test/session_test.mjs` **9 项**
+（登录 / 主动刷新 / 401 单飞刷新重放 / 并发单飞 / 刷新被拒清令牌 / 明文警示 / 剪藏带会话，
+`node --test` 运行），**popup 界面与站点权限弹窗仍为真机手测**。

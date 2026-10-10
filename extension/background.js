@@ -15,8 +15,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== 'sui-clip') return;
   if (!tab?.id) return;
 
-  const settings = await suiGetSettings();
-  if (!settings.serverUrl || !settings.token) {
+  // M12 修订 / FR-57：判据改为「已登录会话」（地址 + 刷新令牌），不再是手填 Token。
+  if (!(await suiIsLoggedIn())) {
     chrome.action.openPopup();
     return;
   }
@@ -28,7 +28,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       throw new Error('采集页面内容失败');
     }
     const mode = await suiGetLastMode();
-    await suiPostClip(settings, pageData, mode);
+    await suiPostClip(pageData, mode);
 
     setBadge(tab.id, '✓', '#4caf50', 2000);
   } catch (err) {

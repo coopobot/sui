@@ -31,10 +31,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     openOptions();
   });
 
-  // 检查是否已配置服务端
-  const settings = await suiGetSettings();
-  if (!settings.serverUrl || !settings.token) {
-    showStatus('请先配置服务端地址和 Token', 'error');
+  // M12 修订 / FR-57：凭据判据由「地址 + 手填 Token」改为「地址 + 已登录会话」（AC-210）。
+  const session = await suiGetSession();
+  if (!session.serverUrl) {
+    showStatus('请先在设置中填写服务端地址', 'error');
+    $('clipBtn').disabled = true;
+  } else if (!session.refreshToken) {
+    showStatus('请先在设置中登录', 'error');
     $('clipBtn').disabled = true;
   }
 });
@@ -67,9 +70,9 @@ async function handleClip() {
     }
 
     showStatus('正在剪藏...', 'loading');
-    const settings = await suiGetSettings();
     const mode = await suiSetLastMode(currentMode);
-    const data = await suiPostClip(settings, pageData, mode);
+    // 会话由 shared.js 的 suiApiFetch 自动携带，并在 401 时单飞刷新后重放一次（AC-212）。
+    const data = await suiPostClip(pageData, mode);
 
     // 结果反馈：附「未本地化」计数附注（§5）
     showStatus('✓ ' + suiBuildResultMessage(data), 'success');

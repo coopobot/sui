@@ -2,10 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:note_core/note_core.dart';
 import 'package:provider/provider.dart';
 
+import '../platform/desktop_platform.dart';
+import '../platform/storage_location.dart';
 import 'app_controller.dart';
+import 'storage_settings.dart';
 import 'sync_status_icon.dart';
 
-/// 打开「同步设置」对话框：服务端地址 / 账号 / Token / 附件缓存上限。
+/// 打开「同步设置」对话框：服务端地址 / 账号 / 本地存储（桌面端）/ 设备 ID / 附件缓存上限。
+///
+/// M12 修订 / FR-57（AC-205）：**不再提供 Token 输入** —— 令牌由客户端在账号密码登录后
+/// 自动持有并透明刷新（BR-57.1），用户无需接触令牌。
 Future<void> showSyncSettingsDialog(
   BuildContext context,
   AppController controller,
@@ -33,8 +39,6 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
       TextEditingController(text: _defaultBaseUrl());
   final TextEditingController _username = TextEditingController();
   final TextEditingController _password = TextEditingController();
-  late final TextEditingController _token =
-      TextEditingController(text: _c.syncConfig.token);
   late final TextEditingController _cacheMb =
       TextEditingController(text: '${_c.cacheLimitBytes ~/ (1024 * 1024)}');
 
@@ -85,7 +89,6 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
     _baseUrl.dispose();
     _username.dispose();
     _password.dispose();
-    _token.dispose();
     _cacheMb.dispose();
     super.dispose();
   }
@@ -142,14 +145,6 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
         ),
         '登录成功，已连接',
       );
-
-  Future<void> _saveToken() => _run(() async {
-        await _c.connectWithToken(
-          baseUrl: _baseUrl.text,
-          token: _token.text.trim(),
-        );
-        return _c.syncConfig.isConfigured ? null : '地址或 Token 为空';
-      }, '已连接并完成首次同步');
 
   Future<void> _saveCacheLimit() async {
     final mb = int.tryParse(_cacheMb.text.trim());
@@ -244,21 +239,10 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
                 ),
               ],
               const Divider(height: 28),
-              TextField(
-                controller: _token,
-                decoration: const InputDecoration(
-                  labelText: 'Token（已有账号可直接粘贴）',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 8),
+              // M12 修订 / FR-57（AC-205）：**不再有 Token 输入与「保存并连接」**——
+              // 建立连接的路径只有「注册并连接」/「登录并连接」，令牌由客户端自动持有与刷新。
               Row(
                 children: [
-                  FilledButton(
-                    onPressed: _busy ? null : _saveToken,
-                    child: const Text('保存并连接'),
-                  ),
-                  const SizedBox(width: 8),
                   if (connected)
                     TextButton(
                       onPressed: _busy
@@ -277,6 +261,10 @@ class _SyncSettingsDialogState extends State<_SyncSettingsDialog> {
                 _c.syncConfig.deviceId,
                 style: theme.textTheme.bodySmall,
               ),
+              // M12 修订 / FR-58（ui-spec §22.2）：桌面端的「本地存储」区；
+              // 窄屏与 Web 不渲染（BR-58.8 / AC-223）。
+              if (isDesktopPlatform && supportsStorageLocation)
+                StorageSettingsSection(controller: _c),
               const SizedBox(height: 12),
               Text(
                 '附件缓存：${_fmtBytes(_usedBytes)} / ${_fmtBytes(_c.cacheLimitBytes)}',

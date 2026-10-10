@@ -28,6 +28,9 @@ type Server struct {
 	// chanKey 是**受保护通道**的服务端长期密钥（M10-T27 / FR-50，auth.md §9）。
 	// nil = 通道未启用：握手返回 503，加密请求一律拒绝，**明文请求照常**（通道是加成而非强制）。
 	chanKey *securechan.Key
+	// guard 是**登录失败防护**状态（M12 修订 / FR-59，auth.md §10）。
+	// 进程内、不落库：服务端重启即清零（刻意的逃生口，BR-59.5）。
+	guard *loginGuard
 }
 
 // New 创建带依赖的 API Server。
@@ -37,6 +40,7 @@ func New(st *store.Store, blobs blob.Store) *Server {
 		blobs: blobs,
 		sync:  sync.New(st),
 		hub:   ws.NewHub(),
+		guard: newLoginGuard(),
 	}
 }
 

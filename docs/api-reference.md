@@ -315,6 +315,8 @@ curl -X POST http://localhost:8080/api/v1/clips \
 | 场景 | HTTP 状态 |
 |------|-----------|
 | 未携带 / 携带坏 Token | 401 |
+| 登录失败（含账号不存在，响应一致） | 401（`invalid credentials`） |
+| 登录失败次数过多（锁定期内，**正确口令同样被拒**） | 429（`too-many-attempts`，含 `Retry-After: <秒>`） |
 | 已建号后重复注册 | 403（`already-initialized`） |
 | 请求体格式错误 | 400 |
 | 资源不存在 | 404 |

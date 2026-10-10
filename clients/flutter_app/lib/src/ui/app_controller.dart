@@ -7,6 +7,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../platform/app_lifecycle.dart';
 import '../platform/attachment_opener.dart';
+import '../platform/storage_location.dart';
 import 'desktop_commands.dart';
 import 'markdown_editor.dart';
 import 'note_window_manager.dart';
@@ -148,12 +149,14 @@ class AppController extends ChangeNotifier {
     required NoteRepository repository,
     required AppDatabase database,
     String? dataDir,
+    StorageResolution? storageResolution,
     NoteWindowManager? windowManager,
     WindowEventHub? windowEventHub,
     Duration? autoRelockIdle,
   })  : _repository = repository,
         _db = database,
         _dataDir = dataDir,
+        _storageResolution = storageResolution,
         _windowManager = windowManager,
         _autoRelockIdle = autoRelockIdle ?? const Duration(minutes: 15) {
     // 订阅窗口事件枢纽（M8 · 详细设计 §4 / §5.1）。
@@ -174,6 +177,12 @@ class AppController extends ChangeNotifier {
 
   /// 原生平台的数据目录（用于附件缓存落盘）；Web 为 null。
   final String? _dataDir;
+
+  /// 存储位置解析结果（M12 修订 / FR-58）：桌面端用于「本地存储」设置区与阻断提示。
+  final StorageResolution? _storageResolution;
+
+  /// 迁移维护态：为真时暂停同步调度（迁移期间不得有新写入，BR-58.3 / §4）。
+  bool _storageMaintenance = false;
 
   /// 独立笔记窗口管理器（M8 · 详细设计 §4）。
   ///
@@ -955,6 +964,8 @@ class AppController extends ChangeNotifier {
   Future<void> syncNow() async {
     final client = _syncClient;
     if (client == null) return;
+    // M12 修订 / FR-58：迁移维护态下不得有新写入（否则复制出的库可能少最后几条）。
+    if (_storageMaintenance) return;
     if (_syncState == SyncState.syncing) return;
 
     final generation = _connGeneration;
@@ -1143,6 +1154,10 @@ class AppController extends ChangeNotifier {
 
   /// 直接以「地址 + 已有令牌」连接。
   ///
+  /// **仅供测试 / 内部装配**：自 `v0.12.2` 起用户路径只有账号密码登录（FR-57 / BR-57.1），
+  /// 界面**不再提供**手工粘贴令牌的入口；保留本方法是为了让既有单测与 e2e 脚手架
+  /// 仍能直接装配一个已连接的客户端。
+  ///
   /// [refreshToken] 可选：留空则只能用到访问令牌过期为止（M10 起访问令牌默认 30 分钟），
   /// 之后须重新登录。
   Future<void> connectWithToken({
@@ -1179,6 +1194,86 @@ class AppController extends ChangeNotifier {
   }
 
   String _blobRoot() => _dataDir == null ? '' : p.join(_dataDir, 'blobs');
+
+  // ---- M12 修订 / FR-58：本地存储位置与迁移（ADR-022 / local-storage.md）----
+
+  /// 当前数据目录（Web 为 null）。
+  String? get dataDir => _dataDir;
+
+  /// 存储位置解析结果（桌面端用于「本地存储」区与阻断提示）。
+  StorageResolution? get storageResolution => _storageResolution;
+
+  /// 数据目录不可用 → 界面**整屏阻断**（BR-58.7 / AC-222）。
+  bool get storageBlocked {
+    final res = _storageResolution;
+    return res != null && !res.usable;
+  }
+
+  /// 迁移维护态（迁移进行中为真；界面据此禁用编辑与存储操作）。
+  bool get storageMaintenance => _storageMaintenance;
+
+  /// 结束所有视图编辑器尚未落库的防抖内容（迁移前调用，避免迁移丢最后几次按键）。
+  Future<void> flushEditors() async {
+    await Future.wait(
+      _editorTargets.values.map((t) => t.flushPendingEdits()),
+    );
+  }
+
+  /// 数据目录当前占用（库 + 附件），供界面显示（AC-216）。
+  Future<({int databaseBytes, int blobBytes})> readStorageUsage() async {
+    final dir = _dataDir;
+    if (dir == null) return (databaseBytes: 0, blobBytes: 0);
+    return storageUsage(dir);
+  }
+
+  /// 迁移到新的存储位置：「复制—校验—原子切换指针」，**失败不切指针**（BR-58.2）。
+  ///
+  /// 迁移期间进入维护态：暂停同步调度；界面以忙碌态阻断编辑（§4）。
+  /// 迁移完成后**需重启应用生效**（ADR-022 决策 7）——本方法不做热切换。
+  Future<StorageMigrationResult> migrateStorageTo(
+    String targetDir, {
+    void Function(StorageMigrationStage stage)? onStage,
+  }) async {
+    final dir = _dataDir;
+    final res = _storageResolution;
+    if (dir == null || res == null) {
+      return const StorageMigrationResult(
+        ok: false,
+        error: '本地存储位置仅桌面端支持',
+      );
+    }
+    _storageMaintenance = true;
+    notifyListeners();
+    try {
+      return await migrateStorage(
+        fromDir: dir,
+        toDir: targetDir,
+        pointerPath: res.pointerPath,
+        checkpoint: _checkpointWal,
+        sourceTableCounts: _verifiedTableCounts,
+        onStage: onStage,
+      );
+    } finally {
+      _storageMaintenance = false;
+      notifyListeners();
+    }
+  }
+
+  /// 把 `-wal` 中的写入并入主库，确保随后复制的库是完整的（BR-58.3）。
+  Future<void> _checkpointWal() async {
+    await _db.customStatement('PRAGMA wal_checkpoint(TRUNCATE)');
+  }
+
+  /// 关键表行数（迁移校验的源侧口径，BR-58.4）。
+  Future<Map<String, int>> _verifiedTableCounts() async {
+    final out = <String, int>{};
+    for (final table in kVerifiedTables) {
+      final row =
+          await _db.customSelect('SELECT COUNT(*) AS c FROM $table').getSingle();
+      out[table] = row.read<int>('c');
+    }
+    return out;
+  }
 
   /// 账号客户端（M10-T27 / FR-50）：`http://` 地址自动套**受保护通道**传输接缝
   /// （握手 + TOFU 指纹核对 + 逐请求 AEAD）；`https` 走 TLS，不叠加。

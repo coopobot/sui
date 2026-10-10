@@ -49,6 +49,7 @@ class SharedAppScope extends StatelessWidget {
         repository: storage.repository,
         database: storage.db,
         dataDir: storage.dataDir,
+        storageResolution: storage.resolution,
         windowManager: windowManager,
         windowEventHub: windowEventHub,
       )..bootstrap(),

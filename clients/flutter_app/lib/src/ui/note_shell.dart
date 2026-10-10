@@ -10,6 +10,7 @@ import 'note_editor.dart';
 import 'note_list.dart';
 import 'notebook_tree.dart';
 import 'revision_panel.dart';
+import 'storage_settings.dart';
 import 'sync_settings_dialog.dart';
 
 /// 应用主界面外壳：响应式三栏（笔记本树 / 笔记列表 / 编辑区）。
@@ -27,10 +28,15 @@ class _NoteShellState extends State<NoteShell> {
 
   @override
   Widget build(BuildContext context) {
+    final controller = context.watch<AppController>();
+    // M12 修订 / FR-58（BR-58.7 / AC-222）：数据目录不可用时**整屏阻断**——
+    // 在用户做出选择前不读写用户数据，且**绝不静默改用默认目录**。
+    if (controller.storageBlocked) {
+      return const StorageUnavailableScreen();
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= 900;
-        final controller = context.watch<AppController>();
         // M12（FR-55 / ui-spec §20.6）：换库 / 重建告知——不在 build 里直接 showDialog，
         // 而是帧后回调，避免「build 期间导航」。
         _maybePromptCloudChange(context, controller);

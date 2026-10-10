@@ -52,6 +52,28 @@
       color: #888;
       margin-top: 4px;
     }
+    .warn {
+      display: none;
+      margin-top: 6px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #fff8e1;
+      color: #8d6e63;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .account {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 20px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #f7f7fa;
+      font-size: 13px;
+      color: #555;
+    }
     .btn {
       width: 100%;
       padding: 11px 16px;
@@ -65,6 +87,14 @@
       transition: opacity 0.2s;
     }
     .btn:hover { opacity: 0.9; }
+    .btn-link {
+      width: auto;
+      padding: 4px 10px;
+      background: transparent;
+      color: #667eea;
+      font-size: 12px;
+      font-weight: 500;
+    }
     .status {
       margin-top: 16px;
       padding: 10px 14px;
@@ -90,18 +120,27 @@
 <body>
   <div class="container">
     <h1>随手记 Sui — 扩展设置</h1>
+    <div class="account">
+      <span id="accountState">未登录</span>
+      <button type="button" class="btn btn-link" id="logoutBtn">退出登录</button>
+    </div>
     <form id="settingsForm">
       <div class="field">
         <label for="serverUrl">服务端地址</label>
         <input type="text" id="serverUrl" placeholder="http://localhost:8080">
         <div class="hint">你的 Sui 同步服务地址</div>
+        <div class="warn" id="plaintextWarn"></div>
       </div>
       <div class="field">
-        <label for="token">访问 Token</label>
-        <input type="password" id="token" placeholder="粘贴你的访问令牌">
-        <div class="hint">在 App 中注册账号后获取</div>
+        <label for="username">用户名</label>
+        <input type="text" id="username" placeholder="与服务端一致的账号" autocomplete="username">
       </div>
-      <button type="submit" class="btn">保存设置</button>
+      <div class="field">
+        <label for="password">密码</label>
+        <input type="password" id="password" placeholder="登录密码（不会被保存）" autocomplete="current-password">
+        <div class="hint">密码仅用于换取令牌，登录后即丢弃；令牌自动续期。</div>
+      </div>
+      <button type="submit" class="btn">登录并保存</button>
       <div class="status" id="status"></div>
     </form>
     <div class="about">
@@ -109,6 +148,7 @@
       <div id="extVersion">版本 —</div>
     </div>
   </div>
+  <script src="shared.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

@@ -3,7 +3,8 @@
 /// - 原生：`exit(0)` 结束进程。
 /// - Web：空实现——Web 下菜单栏本就不呈现，此分支仅作编译兜底。
 ///
-/// 与既有 `data_dir.dart` 同一模式：把 `dart:io` 隔离在条件导入之后，
+/// 与既有 `storage_location.dart` / `directory_picker.dart` 同一模式：
+/// 把 `dart:io` 隔离在条件导入之后，
 /// 避免 Web 构建因直接引用 `dart:io` 而失败。
 library;
 
