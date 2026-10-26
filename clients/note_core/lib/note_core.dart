@@ -1,0 +1,37 @@
+/// 随手记 Sui — note_core
+///
+/// 多端共享的核心逻辑包。不依赖 Flutter，仅依赖 Dart SDK 与本地存储。
+/// 提供：数据模型、本地库（drift/SQLite）、Blob 存储抽象、仓储服务、同步引擎、加密笔记本接缝。
+library;
+
+export 'src/blob/blob_store.dart';
+export 'src/blob/cached_blob_store.dart';
+export 'src/blob/local_blob_store.dart';
+export 'src/blob/sqlite_blob_cache_meta.dart';
+export 'src/crypto/notebook_crypto.dart';
+export 'src/crypto/notebook_key_store.dart';
+export 'src/crypto/secure_channel.dart';
+export 'src/crypto/channel_payload.dart';
+export 'src/import/html_to_markdown.dart';
+export 'src/import/import_service.dart';
+export 'src/import/import_types.dart';
+export 'src/import/source_document.dart';
+export 'src/import/text_decoding.dart';
+export 'src/models/attachment.dart';
+export 'src/models/note.dart';
+export 'src/models/notebook.dart';
+export 'src/models/revision.dart';
+export 'src/models/sync_config.dart';
+export 'src/models/tag.dart';
+export 'src/models/tag_summary.dart';
+export 'src/format/editor_format.dart';
+export 'src/format/snapshot_html.dart';
+export 'src/repository/note_repository.dart';
+export 'src/repository/settings_store.dart';
+export 'src/db/app_database.dart';
+export 'src/util/hashes.dart';
+export 'src/util/ids.dart';
+export 'src/util/mime_kind.dart';
+export 'src/sync/auth_client.dart';
+export 'src/sync/entity_sync_state.dart';
+export 'src/sync/sync_client.dart';

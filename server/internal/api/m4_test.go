@@ -1,0 +1,176 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"nhooyr.io/websocket"
+)
+
+// M4/BR-33.4：ping 报告 initialized，供客户端判断是否仍可注册。
+func TestPingInitialized(t *testing.T) {
+	srv := newTestServer(t)
+	ping := func() bool {
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/ping", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("ping status %d", rec.Code)
+		}
+		var body Payload
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Msg != "pong" {
+			t.Fatalf("expected msg=pong, got %q", body.Msg)
+		}
+		return body.Initialized
+	}
+	if ping() {
+		t.Fatal("fresh instance should report initialized=false")
+	}
+	register(t, srv)
+	if !ping() {
+		t.Fatal("after first account should report initialized=true")
+	}
+}
+
+// M4/BR-33.2：首启建号后关闭自助注册。
+func TestRegisterGatewayClosed(t *testing.T) {
+	srv := newTestServer(t)
+	register(t, srv)
+
+	body, _ := json.Marshal(map[string]string{"username": "u2", "password": "pw2"})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body)))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 after first account, got %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.Error != "already-initialized" {
+		t.Fatalf("expected already-initialized, got %q", resp.Error)
+	}
+}
+
+// M4/BR-36.1：密码以哈希存储，错误密码被拒、正确密码可登录。
+func TestLoginRejectsWrongPassword(t *testing.T) {
+	srv := newTestServer(t)
+	register(t, srv)
+
+	body, _ := json.Marshal(map[string]string{"username": "u1", "password": "wrong"})
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewReader(body)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong password, got %d", rec.Code)
+	}
+	if tok := login(t, srv, "u1", "pw"); tok == "" {
+		t.Fatal("expected token for correct password")
+	}
+}
+
+// M4/BR-35.x + M10（auth.md §4.5）：WS 端点须鉴权——令牌走**请求头 / 子协议**，
+// 查询串 `?token=` 在 M10 已移除（会进访问日志 / 浏览器历史）。
+func TestWsAuthRequired(t *testing.T) {
+	srv := newTestServer(t)
+	token := register(t, srv)
+
+	hs := httptest.NewServer(srv.Router())
+	defer hs.Close()
+	wsBase := "ws" + strings.TrimPrefix(hs.URL, "http")
+
+	// 1) 无令牌 → 握手被拒
+	if c, _, err := websocket.Dial(context.Background(), wsBase+"/api/v1/ws", nil); err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("expected WS handshake rejection without token")
+	}
+
+	// 2) 查询串承载令牌 → 必须被拒（M10 移除）
+	if c, _, err := websocket.Dial(context.Background(), wsBase+"/api/v1/ws?token="+token, nil); err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("expected WS handshake rejection for ?token= (removed in M10)")
+	}
+
+	// 3) Authorization 头（桌面 / 移动 / 命令行）
+	c, _, err := websocket.Dial(context.Background(), wsBase+"/api/v1/ws",
+		&websocket.DialOptions{HTTPHeader: http.Header{"Authorization": []string{"Bearer " + token}}})
+	if err != nil {
+		t.Fatalf("expected WS upgrade with Authorization header, got %v", err)
+	}
+	c.Close(websocket.StatusNormalClosure, "")
+
+	// 4) 子协议（浏览器唯一可用通道）：服务端须回选同一子协议，否则浏览器会拒绝握手。
+	//    此处刻意写**字面量** "bearer."：它钉住浏览器端实际使用的线上格式。
+	proto := "bearer." + token
+	c2, resp, err := websocket.Dial(context.Background(), wsBase+"/api/v1/ws",
+		&websocket.DialOptions{Subprotocols: []string{proto}})
+	if err != nil {
+		t.Fatalf("expected WS upgrade via subprotocol, got %v", err)
+	}
+	defer c2.Close(websocket.StatusNormalClosure, "")
+	if got := resp.Header.Get("Sec-WebSocket-Protocol"); got != proto {
+		t.Errorf("服务端应回选子协议 %q，实际 %q", proto, got)
+	}
+}
+
+// M4 / v0.13.3（FR-34 修订）/ AC-98：剪藏 id ≥128 bit，且**唯一性按 noteId** ——
+// 同一个 URL 重复剪藏**各自成篇**（不再更新既有笔记）；`source_url` 仅作来源标记。
+func TestClipIDUniqueness(t *testing.T) {
+	srv := newTestServer(t)
+	token := register(t, srv)
+
+	post := func(url string) (string, int) {
+		body, _ := json.Marshal(map[string]string{"url": url, "title": "T", "html": "<article><h1>H</h1><p>正文</p></article>"})
+		rec := authReq(srv, token, http.MethodPost, "/api/v1/clips", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("clip failed: %d %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			NoteID  string `json:"noteId"`
+			Version int    `json:"version"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp.NoteID, resp.Version
+	}
+
+	id1, v1 := post("https://example.com/a")
+	if !strings.HasPrefix(id1, "clip-") || len(id1)-len("clip-") < 32 {
+		t.Fatalf("clip id must carry >=128-bit id, got %q", id1)
+	}
+	if v1 != 1 {
+		t.Fatalf("新建剪藏应为 version=1，实际 %d", v1)
+	}
+
+	// 同 URL 再剪一次：必须**新笔记**（v0.13.3 起不再按 URL 判重）。
+	id2, v2 := post("https://example.com/a")
+	if id1 == id2 {
+		t.Fatalf("同一 URL 重复剪藏必须产生新 id，实际两次都是 %q", id1)
+	}
+	if v2 != 1 {
+		t.Fatalf("新笔记应为 version=1，实际 %d", v2)
+	}
+	if id3, _ := post("https://example.com/b"); id3 == id1 || id3 == id2 {
+		t.Fatalf("不同 URL 应各自成篇，实际 %q 与既有 id 重复", id3)
+	}
+
+	// 三条剪藏都在库里；两篇同 URL 的 `source_url` 都登记了来源标记。
+	notes := pullV0132(t, srv, token)
+	if len(notes) != 3 {
+		t.Fatalf("期望 3 条剪藏笔记（同 URL 两条），实际 %d", len(notes))
+	}
+	byURL := map[string]int{}
+	for _, n := range notes {
+		byURL[n.SourceURL]++
+	}
+	if byURL["https://example.com/a"] != 2 {
+		t.Fatalf("同一 URL 的两条笔记都应带 source_url（来源标记），实际分布 %v", byURL)
+	}
+}

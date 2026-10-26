@@ -1,0 +1,94 @@
+{
+  "suite": "sui-crypto-v1",
+  "note": "Spike-003 实测固化（2026-10-08）。所有二进制一律 hex 小写；Argon2id 版本固定 0x13（19）。该文件是 T29/T27 编码阶段两端单测的**共同基线**。",
+  "measured": {
+    "dart": "cryptography 2.9.0（Dart 3.13 / linux x64 VM）",
+    "go": "Go 1.26.0 标准库（crypto/ecdh、crypto/hkdf、crypto/aes+cipher）",
+    "argon2idCrossCheck": "Python argon2-cffi（仅 PoC，不入产品依赖）——与 Dart 侧同值"
+  },
+  "x25519": {
+    "reference": "RFC 7748 §6.1 固定私钥对（公开向量，用作独立校验）",
+    "alicePriv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+    "bobPriv": "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+    "alicePub": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+    "bobPub": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+    "expectedShared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+  },
+  "hkdf": [
+    {
+      "name": "rfc5869-a1",
+      "reference": "RFC 5869 附录 A.1（公开向量）",
+      "hash": "sha256",
+      "ikm": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "salt": "000102030405060708090a0b0c",
+      "info": "f0f1f2f3f4f5f6f7f8f9",
+      "outLen": 42,
+      "expected": "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+    },
+    {
+      "name": "app-notebook-key",
+      "ikmRef": "x25519.expectedShared",
+      "salt": "00112233445566778899aabbccddeeff",
+      "info": "sui-notebook-v1",
+      "outLen": 32,
+      "expected": "04da26d6647c364b952145871cc6cf3f547700e1096d0a209b75a71762767fde"
+    }
+  ],
+  "aesgcm": {
+    "keyRef": "hkdf[1].expected",
+    "nonce": "000000000000000000000001",
+    "aadUtf8": "nb-1|note-1|content",
+    "plaintextUtf8": "随手记 Sui spike-003",
+    "expectedCt": "3b450ce39a1793c59f4db6f9ea4ca96905c7815c1b5784",
+    "expectedTag": "dfe7679472aa5e6dfc6daebad1a9692b"
+  },
+  "chacha20poly1305": {
+    "reference": "RFC 8439 §2.8.2（公开向量；**服务端不参与**——Go 标准库无此原语）",
+    "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "nonce": "070000004041424344454647",
+    "aad": "50515253c0c1c2c3c4c5c6c7",
+    "plaintextUtf8": "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.",
+    "expectedCt": "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116",
+    "expectedTag": "1ae10b594f09e26a7e902ecbd0600691"
+  },
+  "argon2id": {
+    "reference": "Dart cryptography 2.9.0；经 Python argon2-cffi（type=ID, version=19）独立复核同值",
+    "password": "lock-password-spike003",
+    "salt": "8899aabbccddeeff0011223344556677",
+    "memoryKiB": 65536,
+    "iterations": 3,
+    "parallelism": 1,
+    "version": 19,
+    "outLen": 32,
+    "expected": "3b7a99c051fa401b368fa951a16ad18d8fcae42e5181ff2f462f6fe338e6c52a"
+  },
+  "envelope": {
+    "layout": "ver(1B) | alg(1B) | nonce(12B) | ct | tag(16B)",
+    "ver": 1,
+    "alg": 1,
+    "algName": "AES-256-GCM",
+    "nonceRef": "aesgcm.nonce",
+    "ctRef": "aesgcm.expectedCt",
+    "tagRef": "aesgcm.expectedTag",
+    "expectedBase64": "AQEAAAAAAAAAAAAAAAE7RQzjmheTxZ9NtvnqTKlpBceBXBtXhN/nZ5Ryql5t/G2uutGpaSs="
+  },
+  "latencyMs": {
+    "host": "WSL2 Ubuntu-22.04 VM（非移动端，仅参考）",
+    "argon2id_64MiB_t3_p1": 937,
+    "argon2id_1MiB_t3_p1": 14,
+    "ratioCheck": "≈64:1 —— 证实 `memory` 以 KiB 计（1 MiB vs 64 MiB）"
+  },
+  "notebookKey": {
+    "note": "**组合向量**（T29 编码阶段新增）：Argon2id 输出作 HKDF 的 IKM、HKDF salt 为空、info=\"sui-notebook-v1\" → K_nb；verifier = HKDF(K_nb, info=\"sui-notebook-verifier\")。Argon2id 仅 Dart 侧参与，故本段是**客户端回归基线**（非跨语言互操作）。",
+    "password": "lock-password-spike003",
+    "saltRef": "argon2id.salt",
+    "memoryKiB": 65536,
+    "iterations": 3,
+    "parallelism": 1,
+    "hkdfInfo": "sui-notebook-v1",
+    "hkdfSalt": "",
+    "expectedK": "0f0e06873af0cba5cd1b9ee51f07f069b4a542dc77509bfe956e916f54e22ac1",
+    "verifierInfo": "sui-notebook-verifier",
+    "expectedVerifier": "17d489fc39d82f1d3ed37f1804295c2e117ab43a3c978b07c620f66de1274152"
+  }
+}

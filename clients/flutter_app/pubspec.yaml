@@ -1,0 +1,46 @@
+name: sui_flutter_app
+description: 随手记 Sui — 多端客户端（离线优先笔记：本地 SQLite + 多端同步）
+publish_to: "none"
+# 版本号是**本仓库的单一真源**（见 ADR-018 / technology/design/low-level-design/windows-packaging.md）：
+#   x.y.z  → Windows exe 的 FileVersion/ProductVersion、Android versionName、安装包版本
+#   +BN    → Android versionCode，规则 BN = major*10000 + minor*100 + patch（如 0.11.0 → 1100）
+# 改版本号请用 `scripts/version.sh set <x.y.z>`（会同步 server/internal/version/version.go），
+# 并用 `scripts/version.sh check` 校验与 CHANGELOG / git tag 一致。
+version: 0.16.5+1605
+environment:
+  sdk: ^3.3.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  note_core:
+    path: ../note_core
+  flutter_markdown: ^0.7.0
+  # 预览态 `==高亮==` 需要自定义行内语法，直接依赖 markdown 的子包类型
+  # （InlineSyntax / Element），与 flutter_markdown 所用版本保持一致。
+  markdown: ^7.1.1
+  provider: ^6.1.0
+  intl: ^0.19.0
+  path: ^1.9.0
+  path_provider: ^2.1.0
+  web_socket_channel: ^3.0.0
+  # 附件选择：一套 API 覆盖 Web / 桌面 / 移动（`withData: true` 直接拿字节，
+  # 因此客户端无需 `dart:io`，Web 构建不受影响）。
+  file_picker: ^8.1.0
+  sqlite3_flutter_libs: ^0.5.0
+  # 桌面端多窗口（单引擎多视图）：笔记独立窗口（M8 · FR-42/FR-43 · ADR-012）。
+  # 版本由 Spike-002 在 Flutter 3.47.5 / Dart 3.13.4 上实测后锁定。
+  multiview_desktop: ^2.0.0
+  # M16 / FR-83：网页剪藏原件内嵌预览（Windows / Android / iOS / macOS / Web）。
+  # 用户已批准新增依赖；Linux 无实现，运行时降级为截图 + 外部浏览器。
+  flutter_inappwebview: ^6.1.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  sqlite3: ^2.4.0
+
+flutter:
+  uses-material-design: true

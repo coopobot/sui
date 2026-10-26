@@ -1,0 +1,79 @@
+# 随手记 Sui · 文档站配置（Zensical）
+#
+# 说明：
+#   1. Zensical 直接读取本文件；配置沿用 MkDocs 的 `mkdocs.yml` 格式与目录约定，
+#      便于将来必要时切到 MkDocs 1.x 作为兜底（该兜底路径未实测）。
+#   2. 文档源就是仓库内的 docs/，不搬迁、不改造任何现有 Markdown。
+#   3. 构建产物为 site/（已在 .gitignore 中忽略），由 GitHub Actions 生成并发布，
+#      不进入仓库。
+#   4. 本地预览：pip install zensical==0.0.68 && zensical serve
+#
+# ⚠️ 两条实测踩坑（2026-10-06），改动本文件前务必先读：
+#
+#  (1) **声明 `markdown_extensions` 会「替换」内置默认扩展集**（MkDocs 是可加的内建项，
+#      两者语义不同）。只写少量扩展会把默认集里的 `pymdownx.superfences` /
+#      `pymdownx.highlight` 一并顶掉，后果是：**代码围栏退化成行内代码 → 换行被压平、
+#      语法高亮与行号全部丢失**；块内含空行或含 `#` 开头的行时，反引号还会原样漏成文本、
+#      块内 `# 注释` 被渲染成标题。因此必须把需要的扩展**显式列全**。
+#      （`theme.features` 没有这个问题，实测声明前后组件集合一致。）
+#
+#  (2) **不要启用 `pymdownx.betterem`**：它按西文词边界判断强调，遇 CJK 失效——
+#      实测 `决策的**背景与权衡**见` 的星号会原样漏出（中文加粗必须两侧有空格或标点才生效）。
+#      同理不启用 `pymdownx.smartsymbols`：它会把 `-->`/`(c)`/`1/2` 静默改写为 `→`/`©`/`½`，
+#      导致站点渲染与 Gitee/GitHub 上的仓库渲染不一致。
+
+site_name: 随手记 Sui
+# 待确认：GitHub 账号。该值决定 canonical URL / sitemap / instant navigation。
+site_url: https://coopobot.github.io/sui/
+site_description: 自托管 · 离线优先 · 多端同步的现代 Markdown 笔记应用
+
+# 源码仓库入口（渲染为页头右上角的仓库按钮）。
+# 图标按域名识别，故指向 GitHub；注意与 site_url（站点地址，决定 sitemap/canonical）是两件事。
+repo_url: https://github.com/coopobot/sui
+repo_name: coopobot/sui
+docs_dir: docs
+site_dir: site
+
+theme:
+  language: zh
+  # 站点左上角图标。必须是 docs_dir 内的路径，指向 docs/assets/logo.svg——
+  # 与仓库根 README 引用的是同一个文件（单一来源，不复制第二份）。
+  logo: assets/logo.svg
+  # 浏览器标签页图标。用 PNG（48×48，取自品牌资产 dist/png/icon-48.png）：
+  # SVG favicon 在部分浏览器不被支持，故不拿 logo.svg 兼任。
+  favicon: assets/favicon.png
+  features:
+    - search.highlight
+    - content.code.copy
+
+markdown_extensions:
+  # 标题锚点：默认 slug 会丢弃 CJK（`## 4. 同步协议与冲突解决` 退化成 id="4"，
+  # 纯中文标题更退化成 id="_2" 这类无语义且互相碰撞的锚点），
+  # 导致文档里既有的 `#4-同步协议与冲突解决` 一类链接全部失效。此项为必需，不是美化。
+  - toc:
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+      permalink: true
+  # 表格与代码：superfences 负责围栏解析，highlight 负责语法高亮与行号。
+  - tables
+  - attr_list
+  - md_in_html
+  - admonition
+  - def_list
+  - footnotes
+  - abbr
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  # 与项目自身 Markdown 方言对齐：`==高亮==`、GFM 任务列表（`- [ ]`）、`~~删除~~`。
+  - pymdownx.mark
+  - pymdownx.tilde
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+# 刻意不声明 nav：导航由 docs/ 目录树自动生成，
+# 避免后续文档增删导致配置漂移、站点缺页。

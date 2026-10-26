@@ -1,0 +1,1887 @@
+import 'package:drift/drift.dart';
+
+import '../crypto/notebook_crypto.dart';
+import '../sync/entity_sync_state.dart';
+import '../crypto/notebook_key_store.dart';
+import '../db/app_database.dart';
+import '../models/attachment.dart';
+import '../models/note.dart';
+import '../models/notebook.dart';
+import '../models/revision.dart';
+import '../models/tag.dart';
+import '../models/tag_summary.dart';
+import '../util/ids.dart';
+
+/// 笔记仓储：对本地库（drift/SQLite）的领域操作。
+///
+/// M1 聚焦离线完整的本地增删改查；同步（M2）将基于此处的能力扩展。
+//
+// BUG5：根级笔记本 parentId 必须统一为 null——空串会被 UI 判为非根节点，
+// 导致「创建后闪没 / 多端不同步」。
+String? _normalizeParentId(String? value) =>
+    (value == null || value.isEmpty) ? null : value;
+
+class NoteRepository {
+  final AppDatabase db;
+  final String deviceId;
+
+  /// 解锁态的 `K_nb` **内存映射**（M10-T29 / FR-51）：不落库、不上行，回锁即删。
+  final NotebookKeyStore keyStore;
+
+  /// 未解锁时的占位标题（§6.3）。
+  static const lockedPlaceholderTitle = '🔒 加密笔记';
+
+  /// 密文损坏 / 篡改时的占位标题（§11：既**不**当明文，也不让用户误以为是密码错）。
+  static const damagedPlaceholderTitle = '⚠️ 加密笔记无法解密';
+
+  NoteRepository(this.db, {this.deviceId = '', NotebookKeyStore? keyStore})
+      : keyStore = keyStore ?? NotebookKeyStore();
+
+  // ---- 加密笔记本：解锁 / 回锁 / 展示形态（M10-T29 / FR-51） ----
+
+  /// 解锁加密笔记本：读 `crypto_meta` → 派生 `K_nb` → 驻留内存。
+  ///
+  /// 密码错误抛 [NotebookUnlockException]；`crypto_meta` 缺失 / 损坏抛
+  /// [CryptoMetaFormatException]（§11：**不**静默当明文）。
+  Future<void> unlockNotebook(String notebookId, String password) async {
+    final nb = await getNotebook(notebookId);
+    if (nb == null) {
+      throw StateError('笔记本不存在：$notebookId');
+    }
+    if (!nb.encrypted) {
+      throw StateError('该笔记本不是加密笔记本：$notebookId');
+    }
+    final meta = CryptoMeta.fromJson(nb.cryptoMeta);
+    keyStore.unlock(
+      notebookId,
+      await NotebookCrypto.unlock(password: password, meta: meta),
+    );
+  }
+
+  /// 回锁单个笔记本（手动「锁定」按钮 / 切换笔记本时的可选立即回锁）。
+  bool lockNotebook(String notebookId) => keyStore.lock(notebookId);
+
+  /// 全部回锁（登出 / 关闭应用 / 会话结束）。
+  void lockAllNotebooks() => keyStore.lockAll();
+
+  /// 该笔记本当前是否已解锁。
+  bool isNotebookUnlocked(String notebookId) => keyStore.isUnlocked(notebookId);
+
+  /// 把笔记本**设为加密笔记本**（M10-T29 / FR-51，详细设计 §5.1）。
+  ///
+  /// 一次性动作（设计里无「取消加密」的反向流程）：
+  ///   1. 派生 `K_nb`（随机 `salt`）并**先放入内存**——接下来的转换需要目标笔记本的密钥；
+  ///   2. 该笔记本内**现有**笔记及其**全部修订**就地加密（与 [moveNoteToNotebook] 同口径：
+  ///      加密笔记本里绝不留明文历史）；
+  ///   3. 写 `notebooks.encrypted` / `crypto_meta`（并推进版本，供上行冲突判定）；
+  ///   4. 笔记本随后保持**已解锁**（用户刚设定的密码，不必再输一次）。
+  ///
+  /// **入队上行由调用方负责**（仓储不持有同步客户端，与 [createNote] 同口径）。
+  /// 任一步失败即**撤销内存密钥**并原样抛出，不留「未加密却已解锁」的中间态。
+  Future<({Notebook notebook, List<Note> converted})> setNotebookEncrypted(
+    String notebookId,
+    String password,
+  ) async {
+    final nb = await getNotebook(notebookId);
+    if (nb == null) throw StateError('笔记本不存在：$notebookId');
+    if (nb.encrypted) throw StateError('该笔记本已是加密笔记本：$notebookId');
+
+    final created = await NotebookCrypto.create(password: password);
+    keyStore.unlock(notebookId, created.key);
+    try {
+      final rows = await (db.select(db.notes)
+            ..where((n) => n.notebookId.equals(notebookId)))
+          .get();
+
+      // 先算完全部密文再进事务：事务内不做异步密码学运算（与 moveNoteToNotebook 同口径）。
+      final noteWrites = <({String id, String title, String content})>[];
+      final revWrites = <({String id, String title, String content})>[];
+      for (final row in rows) {
+        // 本笔记本此前未加密，理论上不会有已加密行；出现即跳过，绝不重复加密。
+        if (row.encrypted) continue;
+        final enc = await _toStorage(
+          notebookId: notebookId,
+          noteId: row.id,
+          title: row.title,
+          content: row.contentMarkdown,
+          encrypted: true,
+        );
+        noteWrites.add((id: row.id, title: enc.title, content: enc.content));
+        final revRows = await (db.select(db.revisions)
+              ..where((r) => r.noteId.equals(row.id)))
+            .get();
+        for (final r in revRows) {
+          final revEnc = await _toStorage(
+            notebookId: notebookId,
+            noteId: row.id,
+            title: r.title,
+            content: r.contentMarkdown,
+            encrypted: true,
+          );
+          revWrites.add((id: r.id, title: revEnc.title, content: revEnc.content));
+        }
+      }
+
+      final t = DateTime.now();
+      await db.transaction(() async {
+        for (final n in noteWrites) {
+          await (db.update(db.notes)..where((x) => x.id.equals(n.id)))
+              .write(NotesCompanion(
+            title: Value(n.title),
+            contentMarkdown: Value(n.content),
+            encrypted: const Value(true),
+            updatedAt: Value(t),
+          ));
+        }
+        for (final r in revWrites) {
+          await (db.update(db.revisions)..where((x) => x.id.equals(r.id)))
+              .write(RevisionsCompanion(
+            title: Value(r.title),
+            contentMarkdown: Value(r.content),
+          ));
+        }
+        await (db.update(db.notebooks)..where((x) => x.id.equals(notebookId)))
+            .write(NotebooksCompanion(
+          encrypted: const Value(true),
+          cryptoMeta: Value(created.meta.toJson()),
+          updatedAt: Value(t),
+          version: Value(nb.version + 1),
+        ));
+      });
+
+      final converted = <Note>[];
+      for (final n in noteWrites) {
+        converted.add((await getNote(n.id))!);
+      }
+      // M12：加密开关与被就地加解密的笔记都属「本端改动」，需上行。
+      for (final n in converted) {
+        await _markLocallyChanged(SyncEntityKind.note, n.id);
+      }
+      await _markLocallyChanged(SyncEntityKind.notebook, notebookId);
+      return (notebook: (await getNotebook(notebookId))!, converted: converted);
+    } catch (_) {
+      keyStore.lock(notebookId);
+      rethrow;
+    }
+  }
+
+  /// 把**存储形态**的笔记转成**展示形态**。
+  ///
+  /// * 未加密 → 原样返回；
+  /// * 已加密且已解锁 → 解密为明文（编辑器 / 合并逻辑仍以 Markdown 明文为正本，§6.2）；
+  /// * 已加密但**未解锁** → 返回占位并置 [Note.locked]；
+  /// * 密文**损坏 / 被篡改**（含 AAD 绑定不符）→ 同样占位（用 [damagedPlaceholderTitle] 区分）。
+  ///
+  /// 任何分支都**不会**把密文当作明文交给上层。
+  Future<Note> toDisplayNote(Note stored) async {
+    if (!stored.encrypted) return stored;
+    final key = keyStore.keyFor(stored.notebookId);
+    if (key == null) return _placeholderNote(stored);
+    final cipher = NotebookFieldCipher(key);
+    final nbId = stored.notebookId ?? '';
+    try {
+      return stored.copyWith(
+        title: await _decryptField(
+            cipher, nbId, stored.id, NotebookField.title, stored.title),
+        contentMarkdown: await _decryptField(
+            cipher, nbId, stored.id, NotebookField.content, stored.contentMarkdown),
+      );
+    } on NotebookDecryptException {
+      return _placeholderNote(stored, damaged: true);
+    }
+  }
+
+  static Future<String> _decryptField(NotebookFieldCipher cipher, String notebookId,
+      String noteId, NotebookField field, String stored) async {
+    if (stored.isEmpty) return '';
+    return cipher.decrypt(
+        notebookId: notebookId, noteId: noteId, field: field, envelope: stored);
+  }
+
+  Note _placeholderNote(Note stored, {bool damaged = false}) => stored.copyWith(
+        title: damaged ? damagedPlaceholderTitle : lockedPlaceholderTitle,
+        contentMarkdown: '',
+        locked: true,
+      );
+
+  /// 本地写入时把**明文**字段转成**存储形态**（笔记本加密且已解锁 → 密文；否则原样）。
+  ///
+  /// 未解锁的加密笔记本**拒绝写入**（§11）：否则会把占位文本当成内容覆盖掉密文。
+  /// 空串保持空串（不产出「空明文的封装」）。
+  Future<({String title, String content})> _toStorage({
+    required String? notebookId,
+    required String noteId,
+    required String title,
+    required String content,
+    required bool encrypted,
+  }) async {
+    if (!encrypted) return (title: title, content: content);
+    final key = keyStore.keyFor(notebookId);
+    if (key == null) {
+      throw const NotebookDecryptException('加密笔记本未解锁，拒绝写入（会破坏端到端加密）');
+    }
+    final cipher = NotebookFieldCipher(key);
+    final nbId = notebookId ?? '';
+    return (
+      title: title.isEmpty
+          ? ''
+          : await cipher.encrypt(
+              notebookId: nbId,
+              noteId: noteId,
+              field: NotebookField.title,
+              plaintext: title),
+      content: content.isEmpty
+          ? ''
+          : await cipher.encrypt(
+              notebookId: nbId,
+              noteId: noteId,
+              field: NotebookField.content,
+              plaintext: content),
+    );
+  }
+
+  /// 读取**存储形态**的笔记（不经展示接缝）——仅供同步层使用。
+  ///
+  /// 同步层必须拿密文（净荷与库内都是存储形态）；若误用 [getNote]（解锁态返回明文），
+  /// 就会把**明文推上网络**——这正是「Outbox 存存储形态」这条口径要防的事。
+  Future<Note?> getStoredNote(String id) async {
+    final row = await (db.select(db.notes)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    return row?.toModel();
+  }
+
+  /// 把**存储形态**的标题 / 正文解密为明文——供同步层在**明文层**合并冲突（§8）。
+  ///
+  /// 未解锁时抛 [NotebookDecryptException]：调用方必须据此**放弃就地合并**并保持排队，
+  /// 否则会把密文当正文合并、再被写入接缝加密一次（直接损坏笔记）。
+  Future<({String title, String content})> decryptStoredFields({
+    required String notebookId,
+    required String noteId,
+    required String title,
+    required String content,
+  }) async {
+    final key = keyStore.keyFor(notebookId);
+    if (key == null) {
+      throw const NotebookDecryptException('加密笔记本未解锁，无法在明文层合并');
+    }
+    final cipher = NotebookFieldCipher(key);
+    return (
+      title: title.isEmpty
+          ? ''
+          : await cipher.decrypt(
+              notebookId: notebookId,
+              noteId: noteId,
+              field: NotebookField.title,
+              envelope: title),
+      content: content.isEmpty
+          ? ''
+          : await cipher.decrypt(
+              notebookId: notebookId,
+              noteId: noteId,
+              field: NotebookField.content,
+              envelope: content),
+    );
+  }
+
+  /// 加密行由 Dart 侧对**解密后明文**再判定；明文行的命中已由 SQL 保证。
+  static bool _matchesSearch(Note n, String? search) {
+    if (search == null || search.isEmpty) return true;
+    if (!n.encrypted) return true;
+    final s = search.toLowerCase();
+    return n.title.toLowerCase().contains(s) ||
+        n.contentMarkdown.toLowerCase().contains(s);
+  }
+
+  /// 下一条本地修订编号：`max(现存 revision.version) + 1`。
+  ///
+  /// 与 `Notes.version`（服务端基线镜像）解耦：本地多次编辑不会把编号推到服务端
+  /// 版本之上，也不会与服务端下发的版本号撞号（sync-protocol §3）。
+  Future<int> _nextRevisionVersion(String noteId) async {
+    final row = await (db.selectOnly(db.revisions)
+          ..addColumns([db.revisions.version.max()])
+          ..where(db.revisions.noteId.equals(noteId)))
+        .getSingle();
+    return (row.read(db.revisions.version.max()) ?? 0) + 1;
+  }
+
+  /// 同步上行成功后回写服务端基线镜像（`Notes.version = appliedVersion`）。
+  Future<void> setNoteServerVersion(String id, int version) async {
+    await (db.update(db.notes)..where((n) => n.id.equals(id)))
+        .write(NotesCompanion(version: Value(version)));
+  }
+
+  /// ---- 笔记本 ----
+
+  Future<Notebook> createNotebook({
+    String? id,
+    String? parentId,
+    required String name,
+    int? sortOrder,
+    DateTime? now,
+    bool encrypted = false,
+    String cryptoMeta = '',
+  }) async {
+    final t = now ?? DateTime.now();
+    final nid = id ?? newId();
+    final pid = _normalizeParentId(parentId);
+    final order = sortOrder ?? await _nextNotebookSortOrder(pid);
+    await db.into(db.notebooks).insert(NotebooksCompanion.insert(
+          id: nid,
+          parentId: Value(pid),
+          name: name,
+          sortOrder: Value(order),
+          // 服务端基线镜像：本地新建尚未同步 → 0（与 createNote 同口径）。
+          version: const Value(0),
+          encrypted: Value(encrypted),
+          cryptoMeta: Value(cryptoMeta),
+          createdAt: t,
+          updatedAt: t,
+        ));
+    await _markLocallyChanged(SyncEntityKind.notebook, nid);
+    return (await getNotebook(nid))!;
+  }
+
+  /// 同级下一条排序权重：`max(现存 sortOrder) + 1`（含墓碑，避免复号）。
+  ///
+  /// 新建笔记本据此追加到同级末尾。若一律写默认 0，同级会全部并列，
+  /// 上移 / 下移交换等值等于空操作，顺序永远不变（笔记本排序失效的根因）。
+  Future<int> _nextNotebookSortOrder(String? parentId) async {
+    final maxExpr = db.notebooks.sortOrder.max();
+    final q = db.selectOnly(db.notebooks)..addColumns([maxExpr]);
+    if (parentId == null) {
+      q.where(db.notebooks.parentId.isNull());
+    } else {
+      q.where(db.notebooks.parentId.equals(parentId));
+    }
+    final row = await q.getSingle();
+    return (row.read(maxExpr) ?? -1) + 1;
+  }
+
+  Future<Notebook?> getNotebook(String id) async {
+    final row = await (db.select(db.notebooks)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    return row?.toModel();
+  }
+
+  Future<List<Notebook>> listNotebooks({bool includeDeleted = false}) async {
+    final q = db.select(db.notebooks)
+      ..orderBy([
+        (t) => OrderingTerm.asc(t.sortOrder),
+        (t) => OrderingTerm.asc(t.createdAt),
+        (t) => OrderingTerm.asc(t.id),
+      ]);
+    if (!includeDeleted) {
+      q.where((t) => t.isDeleted.equals(false));
+    }
+    final rows = await q.get();
+    return rows.map((r) => r.toModel()).toList();
+  }
+
+  Future<List<Notebook>> listNotebooksTree(
+      {bool includeDeleted = false}) async {
+    final all = await listNotebooks(includeDeleted: includeDeleted);
+    // 返回排序后的平铺列表；树形组装由 UI 层按 parentId 递归完成
+    return all;
+  }
+
+  Future<Notebook> renameNotebook(String id, String name) async {
+    await _markLocallyChanged(SyncEntityKind.notebook, id);
+    final notebook = await getNotebook(id);
+    if (notebook == null) throw StateError('notebook not found: $id');
+    await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
+        .write(NotebooksCompanion(
+      name: Value(name),
+      updatedAt: Value(DateTime.now()),
+      // M12：`version` 是**服务端基线镜像**，本地编辑不得推进（与 Notes.version 同口径）；
+      // 本地改动由 `sync_state`（待上传）表达。
+    ));
+    return (await getNotebook(id))!;
+  }
+
+  Future<void> removeNotebook(String id) async {
+    await _markLocallyChanged(SyncEntityKind.notebook, id);
+    final notebook = await getNotebook(id);
+    if (notebook == null) return;
+    await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
+        .write(NotebooksCompanion(
+      isDeleted: const Value(true),
+      updatedAt: Value(DateTime.now()),
+    ));
+  }
+
+  /// 修改笔记本在同级中的排序权重（BR-20.2：sortOrder 随 FR-19 同步）。
+  ///
+  /// 仅写 sortOrder + version + updatedAt；UI 负责计算目标位置与兄弟交换。
+  /// 不删除 / 不重命名，故无需写 revision（笔记本无修订表）。
+  Future<Notebook> reorderNotebook(String id, int sortOrder) async {
+    await _markLocallyChanged(SyncEntityKind.notebook, id);
+    final notebook = await getNotebook(id);
+    if (notebook == null) throw StateError('notebook not found: $id');
+    await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
+        .write(NotebooksCompanion(
+      sortOrder: Value(sortOrder),
+      updatedAt: Value(DateTime.now()),
+    ));
+    return (await getNotebook(id))!;
+  }
+
+  /// 把笔记本挂到新的父节点下（级联删除时把子笔记本上提到被删节点的父级）。
+  ///
+  /// 不校验循环引用：调用方（AppController.deleteNotebook）保证目标 parentId
+  /// 是被删节点的父级，结构上不可能形成环。
+  Future<Notebook> reparentNotebook(String id, String? parentId) async {
+    await _markLocallyChanged(SyncEntityKind.notebook, id);
+    final notebook = await getNotebook(id);
+    if (notebook == null) throw StateError('notebook not found: $id');
+    await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
+        .write(NotebooksCompanion(
+      parentId: Value(_normalizeParentId(parentId)),
+      updatedAt: Value(DateTime.now()),
+    ));
+    return (await getNotebook(id))!;
+  }
+
+  /// ---- 标签 ----
+
+  Future<Tag> createTag(
+      {String? id, required String name, DateTime? now}) async {
+    final t = now ?? DateTime.now();
+    final tagId = id ?? newId();
+    await db.into(db.tags).insert(TagsCompanion.insert(
+          id: tagId,
+          name: name,
+          // 服务端基线镜像：本地新建尚未同步 → 0（与 createNote / createNotebook 同口径）。
+          version: const Value(0),
+          createdAt: t,
+          updatedAt: t,
+        ));
+    await _markLocallyChanged(SyncEntityKind.tag, tagId);
+    return (await getTag(tagId))!;
+  }
+
+  Future<Tag?> getTag(String id) async {
+    final row = await (db.select(db.tags)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    return row?.toModel();
+  }
+
+  Future<List<Tag>> listTags({bool includeDeleted = false}) async {
+    final q = db.select(db.tags);
+    if (!includeDeleted) {
+      q.where((t) => t.isDeleted.equals(false));
+    }
+    final rows = await q.get();
+    return rows.map((r) => r.toModel()).toList();
+  }
+
+  Future<List<Tag>> fetchOrCreateTags(List<String> names) async {
+    final out = <Tag>[];
+    for (final name in names.map((e) => e.trim()).where((e) => e.isNotEmpty)) {
+      final existing = await (db.select(db.tags)
+            ..where((t) => t.name.equals(name) & t.isDeleted.equals(false)))
+          .getSingleOrNull();
+      out.add(
+          existing != null ? existing.toModel() : await createTag(name: name));
+    }
+    return out;
+  }
+
+  Future<void> removeTag(String id) async {
+    await _markLocallyChanged(SyncEntityKind.tag, id);
+    final tag = await getTag(id);
+    if (tag == null) return;
+    await (db.update(db.tags)..where((t) => t.id.equals(id)))
+        .write(TagsCompanion(
+      isDeleted: const Value(true),
+      updatedAt: Value(DateTime.now()),
+    ));
+  }
+
+  /// 列出全部标签及其关联笔记数量（FR-22 / BR-22.1）。
+  ///
+  /// 数量只统计**未软删除**的笔记；已软删除的笔记不计入。
+  /// 无关联笔记的标签也会返回（count=0），便于在总览中展示但置灰。
+  Future<List<TagSummary>> listTagSummaries() async {
+    final tags = await listTags();
+    final out = <TagSummary>[];
+    for (final tag in tags) {
+      final rows = await (db.select(db.noteTags).join([
+        innerJoin(db.notes, db.notes.id.equalsExp(db.noteTags.noteId)),
+      ])
+            ..where(db.noteTags.tagId.equals(tag.id))
+            ..where(db.notes.isDeleted.equals(false)))
+          .get();
+      out.add(TagSummary(tag: tag, noteCount: rows.length));
+    }
+    return out;
+  }
+
+  /// ---- 笔记 ----
+
+  Future<Note> createNote({
+    String? id,
+    String? notebookId,
+    String title = '',
+    String contentMarkdown = '',
+    List<String> tags = const [],
+    bool pinned = false,
+    bool archived = false,
+    DateTime? now,
+    String? sourceDevice,
+    String sourceUrl = '',
+    int? version,
+    bool encrypted = false,
+    bool fromWire = false,
+  }) async {
+    final t = now ?? DateTime.now();
+    final nid = id ?? newId();
+    final src = sourceDevice ?? deviceId;
+    // 接缝（§6.2）：**本地**入口由所属笔记本派生加密态，输入是明文；**线上**入口
+    // （pull 下行 / 剪藏，`fromWire: true`）输入已是存储形态（密文即是密文），原样落库。
+    final target = notebookId == null ? null : await getNotebook(notebookId);
+    final isEncrypted = fromWire ? encrypted : (target?.encrypted ?? false);
+    final stored = fromWire
+        ? (title: title, content: contentMarkdown)
+        : await _toStorage(
+            notebookId: notebookId,
+            noteId: nid,
+            title: title,
+            content: contentMarkdown,
+            encrypted: isEncrypted,
+          );
+    // Notes.version 是服务端基线镜像：本地新建（尚未同步）基线为 0；
+    // 由 pull 落库的远端笔记以服务端版本为基线。首条修订独立编号：
+    // 新建时为 1，远端落库时沿用服务端版本号（sync-protocol §3）。
+    final baseVersion = version ?? 0;
+    final firstRevision = version ?? 1;
+    await db.transaction(() async {
+      await db.into(db.notes).insert(NotesCompanion.insert(
+            id: nid,
+            notebookId: Value(notebookId),
+            title: Value(stored.title),
+            contentMarkdown: Value(stored.content),
+            pinned: Value(pinned),
+            archived: Value(archived),
+            version: Value(baseVersion),
+            encrypted: Value(isEncrypted),
+            createdAt: t,
+            updatedAt: t,
+            sourceDevice: Value(src),
+            sourceUrl: Value(sourceUrl),
+          ));
+      // M12：本地新建 → 需要上行；下行落库（fromWire）→ 已同步，避免拉一次又回推。
+      if (fromWire) {
+        await markSynced(SyncEntityKind.note, nid, serverVersion: baseVersion);
+      } else {
+        await _markLocallyChanged(SyncEntityKind.note, nid);
+      }
+      if (tags.isNotEmpty) {
+        await _replaceTags(nid, tags);
+      }
+      // 首条修订：pull 落库时 server_version = 服务端版本；本地新建为 null（§9.4）
+      // 修订与笔记**同形态**：加密笔记本内的历史同样存密文（§6.2）。
+      await db.into(db.revisions).insert(RevisionsCompanion.insert(
+            id: newId(),
+            noteId: nid,
+            version: firstRevision,
+            title: Value(stored.title),
+            contentMarkdown: stored.content,
+            sourceDevice: Value(src),
+            serverVersion: version != null ? Value(version) : const Value.absent(),
+            createdAt: t,
+          ));
+      await (db.update(db.notes)..where((n) => n.id.equals(nid)))
+          .write(NotesCompanion(revisionCount: const Value(1)));
+    });
+    return (await getNote(nid))!;
+  }
+
+  /// 本库全部**导入内容指纹**（M13 / FR-62）：导入开始时**一次**载入，避免逐篇查询。
+  ///
+  /// 空串（非导入产生的笔记 / 老数据）不入集合——它们**不参与**去重。
+  /// **墓碑（`is_deleted = 1`）也不入集合**：用户删掉导入结果后重新导入应当能重新落库
+  /// （否则「删了再导」会被自己的墓碑指纹挡住，补救路径被堵死）。
+  Future<Set<String>> listImportFingerprints() async {
+    final rows = await db.customSelect(
+      "SELECT DISTINCT import_fingerprint FROM notes "
+      "WHERE import_fingerprint IS NOT NULL AND import_fingerprint <> '' "
+      "AND is_deleted = 0",
+    ).get();
+    return {
+      for (final r in rows) r.read<String>('import_fingerprint'),
+    };
+  }
+
+  /// M13（FR-60.6）：**单事务**创建「笔记 + 首条修订 + 附件映射（含 refcount）+ 导入指纹」。
+  ///
+  /// 与 [createNote] 的差别只有三点：① 允许一次带若干 [PendingAttachment]；
+  /// ② 可写入**本地导入指纹**（纯本地记账，不进净荷）；③ 全过程在**同一个事务**里——
+  /// 任一步失败都不会留下「有修订 / 有附件、却无正文」这类中间态。
+  ///
+  /// 加密接缝与 [createNote] 一致：本地入口由所属笔记本派生加密态、明文进密文落；
+  /// 未解锁的加密笔记本会抛 [NotebookDecryptException]（调用方据此记该篇失败）。
+  Future<Note> createNoteWithAttachments({
+    String? notebookId,
+    String title = '',
+    String contentMarkdown = '',
+    List<PendingAttachment> attachments = const [],
+    String importFingerprint = '',
+    DateTime? now,
+  }) async {
+    final t = now ?? DateTime.now();
+    final nid = newId();
+    final src = deviceId;
+    final target = notebookId == null ? null : await getNotebook(notebookId);
+    final isEncrypted = target?.encrypted ?? false;
+    final stored = await _toStorage(
+      notebookId: notebookId,
+      noteId: nid,
+      title: title,
+      content: contentMarkdown,
+      encrypted: isEncrypted,
+    );
+    await db.transaction(() async {
+      await db.into(db.notes).insert(NotesCompanion.insert(
+            id: nid,
+            notebookId: Value(notebookId),
+            title: Value(stored.title),
+            contentMarkdown: Value(stored.content),
+            version: const Value(0),
+            encrypted: Value(isEncrypted),
+            importFingerprint: Value(importFingerprint),
+            createdAt: t,
+            updatedAt: t,
+            sourceDevice: Value(src),
+          ));
+      // 本地新建 → 需要上行（M12：状态即队列，无需内存 Outbox）。
+      await _markLocallyChanged(SyncEntityKind.note, nid);
+      await db.into(db.revisions).insert(RevisionsCompanion.insert(
+            id: newId(),
+            noteId: nid,
+            version: 1,
+            title: Value(stored.title),
+            contentMarkdown: stored.content,
+            sourceDevice: Value(src),
+            createdAt: t,
+          ));
+      await (db.update(db.notes)..where((n) => n.id.equals(nid)))
+          .write(NotesCompanion(revisionCount: const Value(1)));
+      for (final a in attachments) {
+        await db.into(db.attachments).insert(AttachmentsCompanion.insert(
+              id: newId(),
+              noteId: Value(nid),
+              filename: a.filename,
+              mimeKind: a.mimeKind,
+              byteSize: Value(a.byteSize),
+              sha256: a.sha256,
+              storageRef: a.sha256,
+              createdAt: t,
+            ));
+        if (a.sha256.isNotEmpty) {
+          await _adjustBlobRef(a.sha256, 1, byteSize: a.byteSize);
+        }
+      }
+    });
+    return (await getNote(nid))!;
+  }
+
+  Future<Note?> getNote(String id) async {
+    final row = await (db.select(db.notes)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    if (row == null) return null;
+    // 接缝：存储形态 → 展示形态（解锁则解密；未解锁 / 损坏则占位）。所有返回笔记的
+    // API（createNote / updateNoteContent / moveNoteToNotebook / restoreNote /
+    // restoreRevision）最终都经过这里，故接缝只需一处。
+    return toDisplayNote(row.toModel());
+  }
+
+  Future<NoteSummary?> getNoteSummary(String id) async {
+    final note = await getNote(id);
+    if (note == null) return null;
+    final tags = await tagsOfNote(id);
+    return NoteSummary(note: note, tags: tags.map((t) => t.name).toList());
+  }
+
+  Future<List<Tag>> tagsOfNote(String noteId) async {
+    final rows = await (db.select(db.tags).join([
+      innerJoin(db.noteTags, db.noteTags.tagId.equalsExp(db.tags.id)),
+    ])
+          ..where(db.noteTags.noteId.equals(noteId))
+          ..where(db.tags.isDeleted.equals(false)))
+        .get();
+    return rows.map((r) => r.readTable(db.tags).toModel()).toList();
+  }
+
+  /// 更新笔记正文（同时写一条修订）。
+  /// 返回更新后的 [Note]。
+  Future<Note> updateNoteContent(
+    String id, {
+    String? title,
+    String? contentMarkdown,
+    List<String>? tags,
+    DateTime? now,
+  }) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
+    final t = now ?? DateTime.now();
+    final note = await getNote(id);
+    if (note == null) throw StateError('note not found: $id');
+    if (note.locked) {
+      // §11：未解锁不得写入——此时的 note 是**占位**，写下去等于把占位当内容覆盖密文。
+      throw const NotebookDecryptException('加密笔记本未解锁，拒绝写入');
+    }
+
+    final nextTitle = title ?? note.title;
+    final nextContent = contentMarkdown ?? note.contentMarkdown;
+    // 接缝（§6.2）：本地编辑入口收到的是**明文**（编辑器以 Markdown 为正本），
+    // 落库前加密为存储形态。
+    final stored = await _toStorage(
+      notebookId: note.notebookId,
+      noteId: id,
+      title: nextTitle,
+      content: nextContent,
+      encrypted: note.encrypted,
+    );
+    // 本地修订编号取 max(现存 revision.version) + 1，与「服务端基线镜像」
+    // （Notes.version）解耦；本地编辑不得推进 Notes.version（sync-protocol §3）。
+    final nextVersion = await _nextRevisionVersion(id);
+
+    await db.transaction(() async {
+      await _replaceTags(
+          id,
+          tags ??
+              await tagsOfNote(id).then((v) => v.map((e) => e.name).toList()));
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        title: Value(stored.title),
+        contentMarkdown: Value(stored.content),
+        updatedAt: Value(t),
+      ));
+      await db.into(db.revisions).insert(RevisionsCompanion.insert(
+            id: newId(),
+            noteId: id,
+            version: nextVersion,
+            title: Value(stored.title),
+            contentMarkdown: stored.content,
+            sourceDevice: Value(deviceId),
+            // 本地编辑产生的草稿：server_version = null（§9.4）
+            serverVersion: const Value.absent(),
+            createdAt: t,
+          ));
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(revisionCount: Value(note.revisionCount + 1)));
+    });
+    return (await getNote(id))!;
+  }
+
+  Future<List<NoteSummary>> listNotes({
+    String? notebookId,
+    String? search,
+    bool includeArchived = false,
+  }) async {
+    final notes$ = db.notes;
+    final q = db.select(notes$)..where((n) => n.isDeleted.equals(false));
+    if (notebookId != null) {
+      q.where((n) => n.notebookId.isValue(notebookId));
+    }
+    if (!includeArchived) {
+      q.where((n) => n.archived.equals(false));
+    }
+    if (search != null && search.isNotEmpty) {
+      final like = '%${search.toLowerCase()}%';
+      // 加密行的密文不可能匹配明文关键词，故整体取出，稍后对**解密后明文**过滤（§9.2）。
+      q.where((n) =>
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
+    }
+    q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
+
+    final summaries = <NoteSummary>[];
+    for (final r in await q.get()) {
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
+      summaries.add(NoteSummary(
+          note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
+    }
+    return summaries;
+  }
+
+  /// 按多个标签筛选笔记（BR-22.2：多标签取**交集**）。
+  ///
+  /// 与 [listNotes] 共用过滤条件（笔记本 / 搜索 / 归档），额外要求每条笔记
+  /// 同时关联 `tagNames` 中的**全部**标签。空 tagNames 时退化为 [listNotes]。
+  /// 仅返回未软删除的笔记。
+  Future<List<NoteSummary>> listNotesByTags(
+    List<String> tagNames, {
+    String? notebookId,
+    String? search,
+    bool includeArchived = false,
+  }) async {
+    final names = tagNames.where((n) => n.trim().isNotEmpty).toList();
+    if (names.isEmpty) {
+      return listNotes(
+        notebookId: notebookId,
+        search: search,
+        includeArchived: includeArchived,
+      );
+    }
+    // 分别取每个标签关联的 noteId 集合，然后求交集——在 Dart 层做集合运算，
+    // 避免构造复杂的 EXISTS 子查询。交集语义满足 BR-22.2。
+    Set<String>? intersection;
+    for (final name in names) {
+      final rows = await (db.select(db.noteTags).join([
+        innerJoin(db.tags, db.tags.id.equalsExp(db.noteTags.tagId)),
+        innerJoin(db.notes, db.notes.id.equalsExp(db.noteTags.noteId)),
+      ])
+            ..where(db.tags.name.equals(name))
+            ..where(db.notes.isDeleted.equals(false)))
+          .get();
+      final ids = rows
+          .map((r) => r.read(db.noteTags.noteId))
+          .whereType<String>()
+          .toSet();
+      if (intersection == null) {
+        intersection = ids;
+      } else {
+        intersection = intersection.intersection(ids);
+      }
+      // 中途交集为空，提前退出。
+      if (intersection.isEmpty) return const [];
+    }
+    if (intersection == null || intersection.isEmpty) return const [];
+    final ids = intersection;
+
+    // 在交集内按笔记本 / 搜索 / 归档二次过滤，再排序。
+    final notes$ = db.notes;
+    final q = db.select(notes$)
+      ..where((n) => n.isDeleted.equals(false))
+      ..where((n) => n.id.isIn(ids));
+    if (notebookId != null) {
+      q.where((n) => n.notebookId.isValue(notebookId));
+    }
+    if (!includeArchived) {
+      q.where((n) => n.archived.equals(false));
+    }
+    if (search != null && search.isNotEmpty) {
+      final like = '%${search.toLowerCase()}%';
+      // 与 listNotes 同口径：加密行整体取出，Dart 侧对**解密后明文**过滤（§9.2）。
+      q.where((n) =>
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
+    }
+    q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
+
+    final summaries = <NoteSummary>[];
+    for (final r in await q.get()) {
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
+      summaries.add(NoteSummary(
+          note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
+    }
+    return summaries;
+  }
+
+  /// 用户发起的归档/取消归档（FR-25）：写入归档位，让 sync 感知到这次变更
+  /// （BR-19.7）。
+  ///
+  /// 与 [applyRemoteArchived] 区别：后者用于同步下行。
+  /// 不写 revision：归档不属于内容修订，避免污染版本链。
+  /// 不改 `version`：它是服务端基线镜像，本地编辑不得推进（sync-protocol §3）。
+  Future<void> archiveNote(String id, bool archived) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
+    final note = await getNote(id);
+    if (note == null) throw StateError('note not found: $id');
+    await (db.update(db.notes)..where((n) => n.id.equals(id)))
+        .write(NotesCompanion(
+      archived: Value(archived),
+      updatedAt: Value(DateTime.now()),
+    ));
+  }
+
+  /// 同步下行：应用远端归档状态（不改 version，版本由同步层统一维护）。
+  Future<void> applyRemoteArchived(
+    String id,
+    bool archived, {
+    DateTime? updatedAt,
+  }) async {
+    await (db.update(db.notes)..where((n) => n.id.equals(id)))
+        .write(NotesCompanion(
+      archived: Value(archived),
+      updatedAt: Value(updatedAt ?? DateTime.now()),
+    ));
+  }
+
+  /// 同步下行：应用远端笔记的正文与标题，并以服务端版本为权威写回版本号。
+  ///
+  /// pull 的「本地已有」分支原先只落归档/笔记本/标签/附件，从不写正文，
+  /// 导致对端编辑后本端正文永不更新（带附件时尤为明显：附件映射已更新、
+  /// 正文却停留在旧版本）。这里按服务端版本写回，并**幂等**补一条同版本
+  /// 修订，保证本地历史链与版本号一致（AC-29）。
+  ///
+  /// 与 [updateNoteContent] 区别：后者面向本地编辑，版本自增并触发推送；
+  /// 本方法用于同步下行，版本取服务端值，不触发推送。
+  Future<void> applyRemoteNoteContent(
+    String id, {
+    required String title,
+    required String contentMarkdown,
+    required int version,
+    required DateTime updatedAt,
+    String? sourceDevice,
+    String? sourceUrl,
+  }) async {
+    final note = await getNote(id);
+    if (note == null) return;
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        title: Value(title),
+        contentMarkdown: Value(contentMarkdown),
+        version: Value(version),
+        updatedAt: Value(updatedAt),
+        sourceDevice: (sourceDevice != null && sourceDevice.isNotEmpty)
+            ? Value(sourceDevice)
+            : const Value.absent(),
+        sourceUrl: (sourceUrl != null && sourceUrl.isNotEmpty)
+            ? Value(sourceUrl)
+            : const Value.absent(),
+      ));
+      // 撞号安全：历史遗留库可能对同一 (noteId, version) 存有重复行，
+      // 用 get() 判空而非 getSingleOrNull()，避免 "Too many elements"。
+      final exists = await (db.select(db.revisions)
+            ..where((r) => r.noteId.equals(id) & r.version.equals(version))
+            ..limit(1))
+          .get();
+      if (exists.isEmpty) {
+        await db.into(db.revisions).insert(RevisionsCompanion.insert(
+              id: newId(),
+              noteId: id,
+              version: version,
+              title: Value(title),
+              contentMarkdown: contentMarkdown,
+              sourceDevice: Value(sourceDevice ?? note.sourceDevice),
+              // 远端内容落库：server_version = 服务端版本（§9.4，幂等跳过已存在版本）
+              serverVersion: Value(version),
+              createdAt: updatedAt,
+            ));
+        await (db.update(db.notes)..where((n) => n.id.equals(id)))
+            .write(
+                NotesCompanion(revisionCount: Value(note.revisionCount + 1)));
+      }
+    });
+  }
+
+  Future<void> pinNote(String id, bool pinned) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
+    await (db.update(db.notes)..where((n) => n.id.equals(id)))
+        .write(NotesCompanion(
+      pinned: Value(pinned),
+      updatedAt: Value(DateTime.now()),
+    ));
+  }
+
+  /// 用户发起的「移动到…」：写入新的 notebookId，让 sync 感知笔记变更
+  /// （BR-19.7 / BR-20.1）。
+  ///
+  /// 与 [updateNoteNotebook] 区别：后者用于同步下行。
+  /// 不写 revision：归属变更不属于内容修订，避免污染版本链。
+  /// 不改 `version`：它是服务端基线镜像，本地编辑不得推进（sync-protocol §3）。
+  Future<Note> moveNoteToNotebook(String id, String? notebookId) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
+    final stored = await getStoredNote(id);
+    if (stored == null) throw StateError('note not found: $id');
+
+    Future<Note> reparentOnly() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        notebookId: Value(notebookId),
+        updatedAt: Value(DateTime.now()),
+      ));
+      return (await getNote(id))!;
+    }
+
+    // 同本移动（幂等）：形态不变，直接返回——**不**因为未解锁而拒绝，否则 UI 的无害重排会报错。
+    if (stored.notebookId == notebookId) return reparentOnly();
+
+    final target = notebookId == null ? null : await getNotebook(notebookId);
+    final targetEncrypted = target?.encrypted ?? false;
+    final sourceEncrypted = stored.encrypted;
+
+    // 普通 → 普通：未跨加密边界，形态不变。
+    if (!sourceEncrypted && !targetEncrypted) return reparentOnly();
+
+    // 跨加密边界（或加密换本）：**形态必须就地转换**。
+    //  · 移入加密笔记本：明文 → 目标 `K_nb` 加密（AAD 绑定的是**目标** notebookId）；
+    //  · 移出到普通笔记本：密文 → 解密为明文；
+    //  · 加密 → 加密换本：旧密钥解密 → 目标密钥重新加密（密钥与 AAD 都变了）。
+    // 任一侧缺解锁态都会由下面两个调用抛出 [NotebookDecryptException]：既不能把明文留在
+    // 加密笔记本内，也不能把密文留在普通笔记本里（§6.2）。
+    final srcPlain = sourceEncrypted
+        ? await decryptStoredFields(
+            notebookId: stored.notebookId ?? '',
+            noteId: id,
+            title: stored.title,
+            content: stored.contentMarkdown,
+          )
+        : (title: stored.title, content: stored.contentMarkdown);
+    final dest = await _toStorage(
+      notebookId: notebookId,
+      noteId: id,
+      title: srcPlain.title,
+      content: srcPlain.content,
+      encrypted: targetEncrypted,
+    );
+
+    // 既有修订一并转换：否则加密笔记本里会留下**明文历史**（反之亦然）。
+    // 先全部算好再进事务，避免事务内做异步密码学运算。
+    final revRows =
+        await (db.select(db.revisions)..where((r) => r.noteId.equals(id))).get();
+    final converted = <({String id, String title, String content})>[];
+    for (final r in revRows) {
+      final plain = sourceEncrypted
+          ? await decryptStoredFields(
+              notebookId: stored.notebookId ?? '',
+              noteId: id,
+              title: r.title,
+              content: r.contentMarkdown,
+            )
+          : (title: r.title, content: r.contentMarkdown);
+      final conv = await _toStorage(
+        notebookId: notebookId,
+        noteId: id,
+        title: plain.title,
+        content: plain.content,
+        encrypted: targetEncrypted,
+      );
+      converted.add((id: r.id, title: conv.title, content: conv.content));
+    }
+
+    final t = DateTime.now();
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        notebookId: Value(notebookId),
+        title: Value(dest.title),
+        contentMarkdown: Value(dest.content),
+        encrypted: Value(targetEncrypted),
+        updatedAt: Value(t),
+      ));
+      for (final c in converted) {
+        await (db.update(db.revisions)..where((x) => x.id.equals(c.id)))
+            .write(RevisionsCompanion(
+          title: Value(c.title),
+          contentMarkdown: Value(c.content),
+        ));
+      }
+    });
+    return (await getNote(id))!;
+  }
+
+  /// 逻辑删除笔记（墓碑，保持跨端同步收敛），并连带墓碑化它的附件映射。
+  ///
+  /// 附件映射必须一起墓碑化：否则对端拉到笔记墓碑后本地附件行仍然「活着」，
+  /// 引用计数不减、映射也收敛不到删除态。
+  Future<void> markNoteDeleted(String id,
+      {DateTime? now, bool fromRemote = false}) async {
+    final t = now ?? DateTime.now();
+    // 上行（本地删除）→ 待上传；下行（远端墓碑）→ 由同步层随后置「已同步」。
+    if (!fromRemote) {
+      await _markLocallyChanged(SyncEntityKind.note, id);
+    }
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        isDeleted: const Value(true),
+        deletedAt: Value(t),
+        updatedAt: Value(t),
+      ));
+      final atts = await (db.select(db.attachments)
+            ..where((r) => r.noteId.isValue(id) & r.isDeleted.equals(false)))
+          .get();
+      for (final a in atts) {
+        await (db.update(db.attachments)..where((r) => r.id.equals(a.id)))
+            .write(const AttachmentsCompanion(isDeleted: Value(true)));
+        if (a.sha256.isNotEmpty) await _adjustBlobRef(a.sha256, -1);
+      }
+    });
+  }
+
+  /// 列出归档笔记（FR-25 归档视图）：未删除且已归档。
+  Future<List<NoteSummary>> listArchivedNotes({String? search}) async {
+    final notes$ = db.notes;
+    final q = db.select(notes$)
+      ..where((n) => n.isDeleted.equals(false))
+      ..where((n) => n.archived.equals(true));
+    if (search != null && search.isNotEmpty) {
+      final like = '%${search.toLowerCase()}%';
+      q.where((n) =>
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
+    }
+    q.orderBy([(n) => OrderingTerm.desc(n.updatedAt)]);
+    final summaries = <NoteSummary>[];
+    for (final r in await q.get()) {
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
+      summaries.add(NoteSummary(
+          note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
+    }
+    return summaries;
+  }
+
+  /// 列出回收站笔记（FR-26）：已软删除（墓碑）。
+  Future<List<NoteSummary>> listDeletedNotes({String? search}) async {
+    final notes$ = db.notes;
+    final q = db.select(notes$)..where((n) => n.isDeleted.equals(true));
+    if (search != null && search.isNotEmpty) {
+      final like = '%${search.toLowerCase()}%';
+      q.where((n) =>
+          n.encrypted.equals(true) |
+          n.title.lower().like(like) |
+          n.contentMarkdown.lower().like(like));
+    }
+    q.orderBy([(n) => OrderingTerm.desc(n.deletedAt)]);
+    final summaries = <NoteSummary>[];
+    for (final r in await q.get()) {
+      final n = await toDisplayNote(r.toModel());
+      if (!_matchesSearch(n, search)) continue;
+      summaries.add(NoteSummary(
+          note: n, tags: (await tagsOfNote(n.id)).map((t) => t.name).toList()));
+    }
+    return summaries;
+  }
+
+  /// 从回收站还原笔记（FR-26）：清除墓碑；若原笔记本已不存在则归入「全部笔记」。
+  ///
+  /// 还原会同时把该笔记的附件映射去墓碑，并补回引用计数。
+  Future<Note?> restoreNote(String id) async {
+    await _markLocallyChanged(SyncEntityKind.note, id);
+    final note = await getNote(id);
+    if (note == null) return null;
+    String? notebookId = note.notebookId;
+    if (notebookId != null) {
+      final nb = await getNotebook(notebookId);
+      if (nb == null || nb.isDeleted) notebookId = null;
+    }
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(id)))
+          .write(NotesCompanion(
+        isDeleted: const Value(false),
+        deletedAt: const Value<DateTime?>(null),
+        notebookId: Value(notebookId),
+        updatedAt: Value(DateTime.now()),
+      ));
+      final atts = await (db.select(db.attachments)
+            ..where((r) => r.noteId.isValue(id) & r.isDeleted.equals(true)))
+          .get();
+      for (final a in atts) {
+        await (db.update(db.attachments)..where((r) => r.id.equals(a.id)))
+            .write(const AttachmentsCompanion(isDeleted: Value(false)));
+        if (a.sha256.isNotEmpty) {
+          await _adjustBlobRef(a.sha256, 1, byteSize: a.byteSize);
+        }
+      }
+    });
+    return getNote(id);
+  }
+
+  Future<List<Revision>> listRevisions(String noteId) async {
+    final rows = await (db.select(db.revisions)
+          ..where((t) => t.noteId.equals(noteId))
+          ..orderBy([(t) => OrderingTerm.desc(t.version)]))
+        .get();
+    return rows.map((r) => r.toModel()).toList();
+  }
+
+  /// 获取指定版本的修订。
+  ///
+  /// 撞号安全：历史遗留库可能有重复行，取其中一条，避免 getSingleOrNull()
+  /// 抛 "Too many elements"。
+  Future<Revision?> getRevision(String noteId, int version) async {
+    final row = await (db.select(db.revisions)
+          ..where((t) => t.noteId.equals(noteId) & t.version.equals(version))
+          ..limit(1))
+        .getSingleOrNull();
+    return row?.toModel();
+  }
+
+  /// 列出本地已同步的修订行（`server_version IS NOT NULL`）——离线历史骨架。
+  ///
+  /// 在线时历史以服务端 `GET /notes/{id}/revisions` 为准；离线回退用本方法
+  /// 取本地已落库的版本节点（sync-protocol §8.3）。
+  Future<List<Revision>> listSyncedRevisions(String noteId) async {
+    final rows = await (db.select(db.revisions)
+          ..where((t) => t.noteId.equals(noteId) & t.serverVersion.isNotNull())
+          ..orderBy([(t) => OrderingTerm.desc(t.serverVersion)]))
+        .get();
+    return rows.map((r) => r.toModel()).toList();
+}
+
+  /// 列出最近一次已同步版本**之后**的本地草稿（未同步分组）。
+  ///
+  /// 取 `server_version IS NULL` 且 `version > MAX(server_version IS NOT NULL`
+  /// 的行) 的行；按 `version ASC` 返回，用于未同步分组逐条展示（§8.3）。
+  Future<List<Revision>> listUnsyncedRevisions(String noteId) async {
+    final maxSynced = await (db.selectOnly(db.revisions)
+          ..addColumns([db.revisions.version.max()])
+          ..where(db.revisions.noteId.equals(noteId) &
+              db.revisions.serverVersion.isNotNull()))
+        .getSingle();
+    final baseVersion = maxSynced.read(db.revisions.version.max()) ?? 0;
+    final rows = await (db.select(db.revisions)
+          ..where((t) =>
+              t.noteId.equals(noteId) &
+              t.serverVersion.isNull() &
+              t.version.isBiggerThanValue(baseVersion))
+          ..orderBy([(t) => OrderingTerm.asc(t.version)]))
+        .get();
+    return rows.map((r) => r.toModel()).toList();
+}
+
+  /// push 成功后回填 `server_version = appliedVersion` 到指定修订行（§9.5）。
+  ///
+  /// 精确回填到 `pushedRevisionVersion` 对应的那条，不受在途期间新编辑
+  /// 产生的更高 version revision 干扰。
+  Future<void> setRevisionServerVersion(
+    String noteId,
+    int revisionVersion,
+    int serverVersion,
+) async {
+    await (db.update(db.revisions)
+          ..where((t) =>
+              t.noteId.equals(noteId) & t.version.equals(revisionVersion)))
+        .write(RevisionsCompanion(serverVersion: Value(serverVersion)));
+}
+
+  /// 当前本地最大修订号 `MAX(revisions.version)`（无则 0）。
+  /// 供 SyncClient 在 enqueue 时记录 `pushedRevisionVersion`（§9.5）。
+  Future<int> maxRevisionVersion(String noteId) async {
+    final row = await (db.selectOnly(db.revisions)
+          ..addColumns([db.revisions.version.max()])
+          ..where(db.revisions.noteId.equals(noteId)))
+        .getSingle();
+    return row.read(db.revisions.version.max()) ?? 0;
+}
+
+  /// 恢复到指定历史版本：以旧内容创建一个新版本（不重写历史）。
+  ///
+  /// 返回恢复后的新 Note。
+  Future<Note> restoreRevision(String noteId, int version) async {
+    await _markLocallyChanged(SyncEntityKind.note, noteId);
+    final rev = await getRevision(noteId, version);
+    if (rev == null) {
+      throw StateError('revision not found: note=$noteId ver=$version');
+    }
+    final note = await getNote(noteId);
+    if (note == null) throw StateError('note not found: $noteId');
+
+    final t = DateTime.now();
+    // 恢复到历史版本 = 一次本地内容编辑：修订编号取 max(现存)+1，
+    // 不改 Notes.version（服务端基线镜像，sync-protocol §3）。
+    final nextVersion = await _nextRevisionVersion(noteId);
+
+    await db.transaction(() async {
+      await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
+          .write(NotesCompanion(
+        title: Value(rev.title),
+        contentMarkdown: Value(rev.contentMarkdown),
+        updatedAt: Value(t),
+      ));
+      await db.into(db.revisions).insert(RevisionsCompanion.insert(
+            id: newId(),
+            noteId: noteId,
+            version: nextVersion,
+            title: Value(rev.title),
+            contentMarkdown: rev.contentMarkdown,
+            sourceDevice: Value(deviceId),
+            // 还原后内容需重新 push：server_version = null（§9.4）
+            serverVersion: const Value.absent(),
+            createdAt: t,
+          ));
+      await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
+          .write(NotesCompanion(revisionCount: Value(note.revisionCount + 1)));
+    });
+    return (await getNote(noteId))!;
+  }
+
+  Future<List<Attachment>> listAttachments({
+    String? noteId,
+    bool includeDeleted = false,
+  }) async {
+    final q = db.select(db.attachments);
+    if (!includeDeleted) {
+      q.where((t) => t.isDeleted.equals(false));
+    }
+    if (noteId != null) {
+      q.where((t) => t.noteId.isValue(noteId));
+    }
+    final rows = await q.get();
+    return rows.map((r) => r.toModel()).toList();
+  }
+
+  /// 应用一条远端附件映射（以 id 为键 upsert，幂等）。
+  ///
+  /// 与 [addAttachment] 的分工：这是同步下行路径，除了写 `attachments` 表，
+  /// 还要维护 `blob_refs` 引用计数——否则本地 LRU 会把仍被笔记引用的附件
+  /// 当孤儿淘汰掉（方案 B 的记账侧）。
+  Future<void> upsertRemoteAttachment(Attachment att) async {
+    await db.transaction(() async {
+      final prev = await (db.select(db.attachments)
+            ..where((t) => t.id.equals(att.id)))
+          .getSingleOrNull();
+
+      if (prev == null) {
+        await db.into(db.attachments).insert(AttachmentsCompanion.insert(
+              id: att.id,
+              noteId: Value(att.noteId),
+              filename: att.filename,
+              mimeKind: att.mimeKind,
+              byteSize: Value(att.byteSize),
+              sha256: att.sha256,
+              storageRef: att.storageRef,
+              thumbnailRef: Value(att.thumbnailRef),
+              embeddedPos: Value(att.embeddedPos),
+              isDeleted: Value(att.isDeleted),
+              createdAt: att.createdAt,
+            ));
+      } else {
+        await (db.update(db.attachments)..where((t) => t.id.equals(att.id)))
+            .write(AttachmentsCompanion(
+          noteId: Value(att.noteId),
+          filename: Value(att.filename),
+          mimeKind: Value(att.mimeKind),
+          byteSize: Value(att.byteSize),
+          sha256: Value(att.sha256),
+          storageRef: Value(att.storageRef),
+          thumbnailRef: Value(att.thumbnailRef),
+          embeddedPos: Value(att.embeddedPos),
+          isDeleted: Value(att.isDeleted),
+        ));
+      }
+
+      final wasActive =
+          prev != null && !prev.isDeleted && prev.sha256.isNotEmpty;
+      final nowActive = !att.isDeleted && att.sha256.isNotEmpty;
+      if (!wasActive && nowActive) {
+        await _adjustBlobRef(att.sha256, 1, byteSize: att.byteSize);
+      } else if (wasActive && !nowActive) {
+        await _adjustBlobRef(prev.sha256, -1);
+      } else if (wasActive && nowActive && prev.sha256 != att.sha256) {
+        await _adjustBlobRef(prev.sha256, -1);
+        await _adjustBlobRef(att.sha256, 1, byteSize: att.byteSize);
+      }
+    });
+  }
+
+  /// 调整本地 `blob_refs` 引用计数（不存在且 delta>0 时补建记账行）。
+  Future<void> _adjustBlobRef(
+    String sha256,
+    int delta, {
+    int byteSize = 0,
+  }) async {
+    if (sha256.isEmpty || delta == 0) return;
+    final existing = await (db.select(db.blobRefs)
+          ..where((t) => t.sha256.equals(sha256)))
+        .getSingleOrNull();
+    if (existing == null) {
+      if (delta < 0) return;
+      await db.into(db.blobRefs).insert(BlobRefsCompanion.insert(
+            sha256: sha256,
+            byteSize: Value(byteSize),
+            lastAccessAt: DateTime.now(),
+            refCount: Value(delta),
+          ));
+      return;
+    }
+    final next = existing.refCount + delta;
+    await (db.update(db.blobRefs)..where((t) => t.sha256.equals(sha256)))
+        .write(BlobRefsCompanion(refCount: Value(next < 0 ? 0 : next)));
+  }
+
+  /// 为笔记挂载一个附件（写入附件元数据行 + 本地引用计数 +1）。
+  ///
+  /// [sha256] 为内容地址；字节本身已通过 BlobStore 落盘（此处只管引用）。
+  /// 计数是方案 B 的关键一环：没有它，新挂载的附件会被 LRU 当孤儿淘汰。
+  /// 返回新创建的 [Attachment]。
+  Future<Attachment> addAttachment({
+    String? id,
+    required String noteId,
+    required String filename,
+    required String mimeKind,
+    int byteSize = 0,
+    required String sha256,
+    String? storageRef,
+    String? thumbnailRef,
+    int embeddedPos = 0,
+    DateTime? now,
+  }) async {
+    await _markLocallyChanged(SyncEntityKind.note, noteId);
+    final t = now ?? DateTime.now();
+    final aid = id ?? newId();
+    await db.transaction(() async {
+      await db.into(db.attachments).insert(AttachmentsCompanion.insert(
+            id: aid,
+            noteId: Value(noteId),
+            filename: filename,
+            mimeKind: mimeKind,
+            byteSize: Value(byteSize),
+            sha256: sha256,
+            storageRef: storageRef ?? sha256,
+            thumbnailRef: Value(thumbnailRef),
+            embeddedPos: Value(embeddedPos),
+            createdAt: t,
+          ));
+      if (sha256.isNotEmpty) {
+        await _adjustBlobRef(sha256, 1, byteSize: byteSize);
+      }
+    });
+    return (await _attachmentById(aid))!;
+  }
+
+  /// 软删除附件，并把引用计数减回去。
+  ///
+  /// 不减计数的话 blob 永远成不了孤儿，缓存只增不减（LRU 也救不回来）。
+  Future<void> removeAttachment(String id) async {
+    await db.transaction(() async {
+      final prev = await (db.select(db.attachments)
+            ..where((t) => t.id.equals(id)))
+          .getSingleOrNull();
+      if (prev == null) return;
+      await _markLocallyChanged(SyncEntityKind.note, prev.noteId ?? '');
+      await (db.update(db.attachments)..where((t) => t.id.equals(id)))
+          .write(const AttachmentsCompanion(isDeleted: Value(true)));
+      if (!prev.isDeleted && prev.sha256.isNotEmpty) {
+        await _adjustBlobRef(prev.sha256, -1);
+      }
+    });
+  }
+
+  /// 外部编辑回写（FR-47 / §12.3）：把附件 [id] 的映射换到新内容地址 [newSha256]。
+  ///
+  /// 内容寻址下「同一 sha256 绝不就地覆盖」（BR-47.3 / ADR-013 决策5），故回写的
+  /// 本质是**换引用**：新字节已由调用方经 BlobStore 落盘（天然去重），此处只做
+  /// ① 改 `attachments.sha256`（连带 `byte_size`、`storage_ref`）；
+  /// ② 引用计数迁移——旧 sha −1、新 sha +1（旧值归零后由 LRU / GC 回收）。
+  /// 新旧一致或无该行时视为无变更，返回 `null`。
+  Future<Attachment?> updateAttachmentSha(
+    String id, {
+    required String newSha256,
+    required int newByteSize,
+  }) async {
+    final changed = await db.transaction(() async {
+      final prev = await (db.select(db.attachments)
+            ..where((t) => t.id.equals(id)))
+          .getSingleOrNull();
+      if (prev == null || prev.isDeleted || prev.sha256 == newSha256) {
+        return false;
+      }
+      await _markLocallyChanged(SyncEntityKind.note, prev.noteId ?? '');
+      await (db.update(db.attachments)..where((t) => t.id.equals(id)))
+          .write(AttachmentsCompanion(
+        sha256: Value(newSha256),
+        byteSize: Value(newByteSize),
+        storageRef: Value(newSha256),
+      ));
+      await _adjustBlobRef(prev.sha256, -1);
+      await _adjustBlobRef(newSha256, 1, byteSize: newByteSize);
+      return true;
+    });
+    if (!changed) return null;
+    return _attachmentById(id);
+  }
+
+  Future<Attachment?> _attachmentById(String id) async {
+    final row = await (db.select(db.attachments)..where((t) => t.id.equals(id)))
+        .getSingleOrNull();
+    return row?.toModel();
+  }
+
+  /// ---- 同步下行：远端笔记本 / 标签 / 关联落库 ----
+
+  /// Upsert 远端笔记本（pull 下行）。以 id 为键，version 以服务端为准。
+  Future<void> upsertRemoteNotebook({
+    required String id,
+    String? parentId,
+    required String name,
+    int sortOrder = 0,
+    bool isDeleted = false,
+    int version = 0,
+    DateTime? updatedAt,
+    bool encrypted = false,
+    String cryptoMeta = '',
+  }) async {
+    final t = updatedAt ?? DateTime.now();
+    final existing = await getNotebook(id);
+    final pid = _normalizeParentId(parentId);
+    if (existing == null) {
+      await db.into(db.notebooks).insert(NotebooksCompanion.insert(
+            id: id,
+            parentId: Value(pid),
+            name: name,
+            sortOrder: Value(sortOrder),
+            isDeleted: Value(isDeleted),
+            version: Value(version),
+            encrypted: Value(encrypted),
+            cryptoMeta: Value(cryptoMeta),
+            createdAt: t,
+            updatedAt: t,
+          ));
+    } else {
+      await (db.update(db.notebooks)..where((t) => t.id.equals(id)))
+          .write(NotebooksCompanion(
+        parentId: Value(pid),
+        name: Value(name),
+        sortOrder: Value(sortOrder),
+        isDeleted: Value(isDeleted),
+        version: Value(version),
+        encrypted: Value(encrypted),
+        cryptoMeta: Value(cryptoMeta),
+        updatedAt: Value(t),
+      ));
+    }
+    await markSynced(SyncEntityKind.notebook, id, serverVersion: version);
+  }
+
+  /// 应用远端的「加密态」镜像（M10-T29）：笔记归属的笔记本是否为加密笔记本。
+  ///
+  /// 与正文 / 标题分开落库：未解锁端也要能正确显示占位，故该标记必须**随 pull 立即生效**，
+  /// 不受「有未提交草稿时不覆盖正文」的约束。
+  Future<void> applyRemoteEncrypted(String noteId, bool encrypted) async {
+    await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
+        .write(NotesCompanion(encrypted: Value(encrypted)));
+  }
+
+  /// Upsert 远端标签（pull 下行）。
+  Future<void> upsertRemoteTag({
+    required String id,
+    required String name,
+    bool isDeleted = false,
+    int version = 0,
+    DateTime? updatedAt,
+  }) async {
+    final t = updatedAt ?? DateTime.now();
+    final existing = await getTag(id);
+    if (existing == null) {
+      await db.into(db.tags).insert(TagsCompanion.insert(
+            id: id,
+            name: name,
+            isDeleted: Value(isDeleted),
+            version: Value(version),
+            createdAt: t,
+            updatedAt: t,
+          ));
+    } else {
+      await (db.update(db.tags)..where((t) => t.id.equals(id)))
+          .write(TagsCompanion(
+        name: Value(name),
+        isDeleted: Value(isDeleted),
+        version: Value(version),
+        updatedAt: Value(t),
+      ));
+    }
+    await markSynced(SyncEntityKind.tag, id, serverVersion: version);
+  }
+
+  /// 以笔记为粒度整体替换标签关联（同步下行，按 tag ID 直接关联）。
+  Future<void> syncNoteTags(String noteId, List<String> tagIds) async {
+    await (db.delete(db.noteTags)..where((t) => t.noteId.equals(noteId))).go();
+    for (final tagId in tagIds) {
+      if (tagId.isEmpty) continue;
+      await db.into(db.noteTags).insert(
+            NoteTagsCompanion.insert(noteId: noteId, tagId: tagId),
+          );
+    }
+  }
+
+  /// 更新笔记的所属笔记本（同步下行）。
+  Future<void> updateNoteNotebook(String noteId, String? notebookId) async {
+    await (db.update(db.notes)..where((n) => n.id.equals(noteId)))
+        .write(NotesCompanion(notebookId: Value(notebookId)));
+  }
+
+  Future<void> _replaceTags(String noteId, List<String> tagNames) async {
+    await (db.delete(db.noteTags)..where((t) => t.noteId.equals(noteId))).go();
+    if (tagNames.isEmpty) return;
+    final tags = await fetchOrCreateTags(tagNames);
+    for (final tag in tags) {
+      await db.into(db.noteTags).insert(NoteTagsCompanion.insert(
+            noteId: noteId,
+            tagId: tag.id,
+          ));
+    }
+  }
+  // ---- M12（FR-53 / FR-54 / FR-55）：逐项同步状态与上行队列 ----
+  //
+  // 状态是**纯本地记账**（不入净荷、服务端不存储）；「待上传」意图落库后，
+  // 上行批次由库中状态选取（状态即队列，ADR-019 决策 2），不再依赖内存 Outbox。
+
+  /// 标记「本端有未上传改动」。
+  ///
+  /// 口径：本端已有服务端基线（`version > 0`）→ 待上传；从未被服务端确认
+  /// （`version == 0`，如刚新建）→ 仅本地。两者都属「需要上行」，区别只在语义与文案。
+  Future<void> _markLocallyChanged(SyncEntityKind kind, String id) async {
+    if (id.isEmpty) return;
+    await db.customStatement(
+      'UPDATE ${kind.table} SET '
+      'sync_state = CASE WHEN version > 0 THEN 1 ELSE 2 END, '
+      "sync_error = '', sync_error_at = NULL WHERE id = ?",
+      [id],
+    );
+  }
+
+  Future<void> _writeSyncState(
+    SyncEntityKind kind,
+    String id, {
+    required int state,
+    String error = '',
+    DateTime? errorAt,
+    DateTime? checkedAt,
+    int? serverVersion,
+  }) async {
+    final checked = checkedAt ?? DateTime.now();
+    switch (kind) {
+      case SyncEntityKind.note:
+        await (db.update(db.notes)..where((n) => n.id.equals(id)))
+            .write(NotesCompanion(
+          syncState: Value(state),
+          syncError: Value(error),
+          syncErrorAt: Value(error.isEmpty ? null : (errorAt ?? checked)),
+          syncCheckedAt: Value(checked),
+          version: serverVersion == null
+              ? const Value.absent()
+              : Value(serverVersion),
+        ));
+      case SyncEntityKind.notebook:
+        await (db.update(db.notebooks)..where((n) => n.id.equals(id)))
+            .write(NotebooksCompanion(
+          syncState: Value(state),
+          syncError: Value(error),
+          syncErrorAt: Value(error.isEmpty ? null : (errorAt ?? checked)),
+          syncCheckedAt: Value(checked),
+          version: serverVersion == null
+              ? const Value.absent()
+              : Value(serverVersion),
+        ));
+      case SyncEntityKind.tag:
+        await (db.update(db.tags)..where((t) => t.id.equals(id)))
+            .write(TagsCompanion(
+          syncState: Value(state),
+          syncError: Value(error),
+          syncErrorAt: Value(error.isEmpty ? null : (errorAt ?? checked)),
+          syncCheckedAt: Value(checked),
+          version: serverVersion == null
+              ? const Value.absent()
+              : Value(serverVersion),
+        ));
+    }
+  }
+
+  /// 上行成功：置「已同步」，可选回写服务端版本（基线镜像）。
+  Future<void> markSynced(
+    SyncEntityKind kind,
+    String id, {
+    int? serverVersion,
+    DateTime? checkedAt,
+  }) =>
+      _writeSyncState(kind, id,
+          state: EntitySyncState.synced.code,
+          checkedAt: checkedAt,
+          serverVersion: serverVersion);
+
+  /// 置「待上传」（强制，不看基线）。
+  Future<void> markPending(SyncEntityKind kind, String id) =>
+      _writeSyncState(kind, id, state: EntitySyncState.pending.code);
+
+  /// 置「仅本地」（云端从未持有）。
+  ///
+  /// [hold] 为真 = 用户已选择**以云端为准**：保留在本机但**不再自动上行**
+  /// （BR-55.2「不得静默上传」）。
+  Future<void> markLocalOnly(SyncEntityKind kind, String id,
+      {bool hold = false}) async {
+    await _writeSyncState(kind, id, state: EntitySyncState.localOnly.code);
+    await db.customStatement(
+      'UPDATE ${kind.table} SET sync_hold = ? WHERE id = ?',
+      [hold ? 1 : 0, id],
+    );
+  }
+
+  /// 置「冲突」（需合并 / 需先解锁加密笔记本）。
+  Future<void> markConflict(SyncEntityKind kind, String id, {String reason = ''}) =>
+      _writeSyncState(kind, id,
+          state: EntitySyncState.conflict.code, error: reason);
+
+  /// 置「同步失败」并**保留原因与时间**（界面 tooltip 直接展示）。
+  Future<void> markFailed(SyncEntityKind kind, String id, String error) =>
+      _writeSyncState(kind, id,
+          state: EntitySyncState.failed.code, error: error, errorAt: DateTime.now());
+
+  /// 「服务端没有该实体」自愈（ADR-019 决策 3，修永久冲突）：
+  /// 基线归零 + 置待上传，使下一轮以 `baseVersion: 0` 重发即被接受。
+  Future<void> resetSyncBaseline(SyncEntityKind kind, String id) async {
+    await db.customStatement(
+      'UPDATE ${kind.table} SET version = 0, '
+      'sync_state = CASE WHEN 0 > 0 THEN 1 ELSE 2 END, '
+      "sync_error = '', sync_error_at = NULL WHERE id = ?",
+      [id],
+    );
+  }
+
+  /// 当前同步状态（行不存在返回「仅本地」）。
+  Future<EntitySyncState> syncStateOf(SyncEntityKind kind, String id) async {
+    final row = await db.customSelect(
+      'SELECT sync_state FROM ${kind.table} WHERE id = ?',
+      variables: [Variable.withString(id)],
+    ).getSingleOrNull();
+    return EntitySyncState.fromCode(row?.read<int>('sync_state'));
+  }
+
+  /// 需要上行的 id 列表（按最近修改排序，供分批 push）。
+  ///
+  /// [includeHeld] 为真时把「被用户按住」的项（`sync_hold = 1`）也纳入 ——
+  /// 只有**核对补齐**（用户选择「用本地数据补齐」）与**单项重试**才这样取。
+  Future<List<String>> idsNeedingUpload(SyncEntityKind kind,
+      {bool includeHeld = false, int limit = 200}) async {
+    final holdClause = includeHeld ? '' : ' AND sync_hold = 0';
+    final rows = await db.customSelect(
+      'SELECT id FROM ${kind.table} WHERE sync_state IN (1, 2, 3, 4)'
+      '$holdClause ORDER BY updated_at LIMIT ?',
+      variables: [Variable.withInt(limit)],
+    ).get();
+    return rows.map((r) => r.read<String>('id')).toList();
+  }
+
+  /// 待处理条数（界面角标 / `outboxLength` 用）。
+  Future<int> countNeedingUpload(
+      {SyncEntityKind? kind, bool includeHeld = false}) async {
+    final kinds = kind == null ? SyncEntityKind.values : [kind];
+    final holdClause = includeHeld ? '' : ' AND sync_hold = 0';
+    var total = 0;
+    for (final k in kinds) {
+      final row = await db.customSelect(
+        'SELECT COUNT(*) AS c FROM ${k.table} '
+        'WHERE sync_state IN (1, 2, 3, 4)$holdClause',
+      ).getSingle();
+      total += row.read<int>('c');
+    }
+    return total;
+  }
+
+  /// 清除「用户按住」标记（单项重试 / 核对补齐时调用）。
+  Future<void> clearSyncHold(SyncEntityKind kind, String id) async {
+    await db.customStatement(
+      'UPDATE ${kind.table} SET sync_hold = 0 WHERE id = ?',
+      [id],
+    );
+  }
+
+  /// 上行成功后回写笔记本 / 标签的服务端基线镜像（与 [setNoteServerVersion] 同口径）。
+  Future<void> setNotebookServerVersion(String id, int version) async {
+    await (db.update(db.notebooks)..where((n) => n.id.equals(id)))
+        .write(NotebooksCompanion(version: Value(version)));
+  }
+
+  Future<void> setTagServerVersion(String id, int version) async {
+    await (db.update(db.tags)..where((t) => t.id.equals(id)))
+        .write(TagsCompanion(version: Value(version)));
+  }
+
+  /// 某类实体的全部本地 id（核对补齐用；[includeDeleted] 为真时含墓碑）。
+  Future<List<String>> allIds(SyncEntityKind kind,
+      {bool includeDeleted = false}) async {
+    final rows = await db.customSelect(
+      'SELECT id FROM ${kind.table}'
+      '${includeDeleted ? '' : ' WHERE is_deleted = 0'}',
+    ).get();
+    return rows.map((r) => r.read<String>('id')).toList();
+  }
+
+}
+
+// ---- Row → Model 映射（避免 drift 数据类外泄到域层） ----
+
+extension _NotebookRowEx on NotebookRow {
+  Notebook toModel() => Notebook(
+        id: id,
+        parentId: _normalizeParentId(parentId),
+        name: name,
+        sortOrder: sortOrder,
+        isDeleted: isDeleted,
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        version: version,
+        encrypted: encrypted,
+        cryptoMeta: cryptoMeta,
+        syncState: EntitySyncState.fromCode(syncState),
+        syncError: syncError,
+        syncErrorAt: syncErrorAt,
+      );
+}
+
+extension _TagRowEx on TagRow {
+  Tag toModel() => Tag(
+        id: id,
+        name: name,
+        isDeleted: isDeleted,
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        version: version,
+        syncState: EntitySyncState.fromCode(syncState),
+        syncError: syncError,
+        syncErrorAt: syncErrorAt,
+      );
+}
+
+extension _NoteRowEx on NoteRow {
+  Note toModel() => Note(
+        id: id,
+        notebookId: notebookId,
+        title: title,
+        contentMarkdown: contentMarkdown,
+        pinned: pinned,
+        archived: archived,
+        isDeleted: isDeleted,
+        revisionCount: revisionCount,
+        createdAt: createdAt,
+        updatedAt: updatedAt,
+        deletedAt: deletedAt,
+        version: version,
+        sourceDevice: sourceDevice,
+        sourceUrl: sourceUrl,
+        encrypted: encrypted,
+        syncState: EntitySyncState.fromCode(syncState),
+        syncError: syncError,
+        syncErrorAt: syncErrorAt,
+      );
+}
+
+extension _RevisionRowEx on RevisionRow {
+  Revision toModel() => Revision(
+        id: id,
+        noteId: noteId,
+        version: version,
+        title: title,
+        contentMarkdown: contentMarkdown,
+        diffDelta: diffDelta,
+        serverVersion: serverVersion,
+        sourceDevice: sourceDevice,
+        isConflict: isConflict,
+        createdAt: createdAt,
+      );
+}
+
+extension _AttachmentRowEx on AttachmentRow {
+  Attachment toModel() => Attachment(
+        id: id,
+        noteId: noteId,
+        filename: filename,
+        mimeKind: mimeKind,
+        byteSize: byteSize,
+        sha256: sha256,
+        storageRef: storageRef,
+        thumbnailRef: thumbnailRef,
+        embeddedPos: embeddedPos,
+        isDeleted: isDeleted,
+        createdAt: createdAt,
+      );
+}

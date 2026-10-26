@@ -1,0 +1,42 @@
+name: Documentation
+
+# 文档站发布流水线（Zensical → GitHub Pages）
+# 触发：推送到 main（本地双推：Gitee 真源 + GitHub 镜像）
+# 产物：site/ 作为 Actions 产物交给 Pages，不进入仓库
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/configure-pages@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      # 版本固定：0.x 阶段接口与行为仍会变动，pin 是可复现构建的前提。
+      # 2026-11-05 之后评估切到 0.1.0（单独提交）。
+      - run: pip install zensical==0.0.68
+      - run: zensical build --clean
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+      - uses: actions/deploy-pages@v5
+        id: deployment
