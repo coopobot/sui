@@ -6,6 +6,7 @@ import 'bootstrap.dart';
 import 'ui/app_controller.dart';
 import 'ui/note_shell.dart';
 import 'ui/note_window_manager.dart';
+import 'ui/tray_exit_listener.dart';
 
 // 主题构建已迁至 `appearance/app_palette.dart`（M14 / FR-64 / FR-67）：
 // 亮 / 暗两套 + 中性角色覆盖 + 外观扩展 `SuiAppearance`（承载中性色板与笔记正文字体）。
@@ -45,7 +46,17 @@ class SharedAppScope extends StatelessWidget {
         windowManager: windowManager,
         windowEventHub: windowEventHub,
       )..bootstrap(),
-      child: child,
+      child: Builder(
+        builder: (context) {
+          // 上层 Provider 已创建 controller；Windows 托盘退出经此组件回到
+          // `quitApplication()`（M17 / FR-95）。
+          final controller = context.read<AppController>();
+          return TrayExitListener(
+            onExit: controller.quitApplication,
+            child: child,
+          );
+        },
+      ),
     );
   }
 }

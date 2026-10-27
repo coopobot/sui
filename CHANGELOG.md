@@ -7,6 +7,29 @@
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-27
+
+### 新增
+
+- **Windows 后台常驻**：启动后系统通知区域常驻「随手记 Sui」托盘图标；关闭主窗口
+  （标题栏 `×` / `Alt+F4`）只隐藏窗口，进程、Flutter 引擎与后台同步继续运行；
+  左键单击 / 双击托盘图标或右键「显示主窗口」恢复；右键「退出随手记 Sui」先 flush 编辑器并
+  尽力同步，再退出。独立笔记窗口的关闭语义不变；托盘不可用时回退到既有关闭行为。
+  采用 Windows runner 原生 `Shell_NotifyIcon` 实现，**零新增依赖**。
+- **中栏笔记列表宽度可拖动**：宽屏三栏中栏与编辑区之间的分隔线提供约 7px 热区与水平调整列宽
+  指针；宽度实时跟手、最小 **270px**、上限为编辑区 / 右侧栏预留空间；松手后写入本机偏好
+  `ui.noteListWidth`，重启恢复；窄屏、折叠与独立窗口不回归。编辑区模式行在极窄宽度下改为
+  `Wrap`，避免 1000px 窗口 + 270px 中栏时的按钮溢出。
+
+### 测试
+
+- `flutter_app` 新增 `note_list_resize_test.dart`（拖动 / 270px 下限 / 持久化 / 折叠恢复 /
+  窄屏无热区 / 1000px 无溢出）与 `tray_exit_listener_test.dart`（Windows 托盘退出路由 /
+  非 Windows 不注册）；全量测试与 `flutter analyze` 通过。
+- Windows `flutter build windows --debug` / `--release` 通过；真机验证托盘图标、关闭隐藏、
+  进程存活、点击恢复、托盘退出（native → Dart `quitApplication` → 退出码 0）。
+- 服务端 / 同步协议 / drift schema 零改动（`schemaVersion` 仍 10、8 表）。
+
 ## [0.16.5] - 2026-10-23
 
 ### 修复

@@ -1176,3 +1176,18 @@ drift **无迁移**（仍 8 表 / `schemaVersion = 10`）、`pubspec.yaml` 依�
 - **测试门禁（本版收尾）**：`note_core` 全量 **627/627** + `dart analyze` 干净；`flutter_app` 全量
   （`--concurrency=1`）+ `flutter analyze` 干净；服务端 `go test ./...` 全绿；扩展 `node --test` 全绿；
   Windows `flutter build windows` 通过（含 WebView 插件 / WebView2 依赖）。
+
+### 8.17 M17（`v0.17.0`）：Windows 托盘常驻与中栏宽度调节（FR-95 / FR-96）
+
+- **Windows 托盘**：runner 新增 `tray_icon.{h,cpp}`（`Shell_NotifyIconW` / 右键菜单 /
+  `TaskbarCreated` 重注册）。`FlutterWindow::MessageHandler` 在 `multiview_desktop` 之前拦截主窗口
+  `WM_CLOSE` → `ShowWindow(SW_HIDE)`；隐藏不销毁窗口，插件窗口注册表与 `AppController` 的
+  「无窗口即退出」不触发。托盘「退出」先 `NIM_DELETE`，再经 `sui/platform` 调 Dart
+  `trayExitRequested` → `AppController.quitApplication()`（flush + 尽力同步 + `exit(0)`）；
+  通道不可用时 native `PostQuitMessage` 兜底。
+- **中栏拖动**：`AppController` 新增 `noteListWidth`（`ui.noteListWidth` 本机偏好，默认 340、
+  最小 270）；`_WideLayout` 以 `SizedBox` 替代 `Expanded(flex:2)`，约 7px 热区 +
+  `resizeColumn` 指针，拖动过程只改局部状态，松手落盘；上限按窗口宽、左栏、右栏与编辑区
+  最小预留计算。极窄编辑区下模式行动作按钮改 `Wrap` 防溢出。
+- **守线**：零新增依赖、零服务端 / 协议字段、drift 无迁移；独立窗口关闭仍由
+  `multiview_desktop` 处理。

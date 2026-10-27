@@ -23,4 +23,10 @@
 // 实现侧经 `flutter::PluginRegistrarManager` 取对应的 C++ registrar 再拿 messenger。
 void SuiPlatformChannelRegister(FlutterDesktopPluginRegistrarRef registrar);
 
+// M17 / FR-95：托盘「退出随手记 Sui」→ Dart `trayExitRequested`。
+//
+// 返回 true 表示通道已注册、请求已发出（Dart 侧随后走 quitApplication()）；
+// false 表示引擎 / 通道尚未就绪，调用方应回退到原生退出，避免菜单点了没反应。
+bool SuiPlatformRequestTrayExit();
+
 #endif  // RUNNER_SUI_PLATFORM_CHANNEL_H_

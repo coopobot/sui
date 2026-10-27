@@ -47,6 +47,14 @@ enum AttachmentAvailability {
   remoteOnly,
 }
 
+/// 中栏（笔记列表）的**最小宽度**（M17 / FR-96 / BR-96.1）。
+///
+/// UI 的拖动夹取与持久化读取共用此常量，避免在两处各写一份魔数。
+const double kNoteListMinWidth = 270;
+
+/// 中栏（笔记列表）的**默认宽度**（M17 / FR-96）。
+const double kNoteListDefaultWidth = 340;
+
 /// 笔记列表排序方式（M2-T08）。
 ///
 /// 选择记忆为本机偏好：写入 [SettingsStore] 的 `notes.sortMode` 键，重启后保留。
@@ -311,6 +319,12 @@ class AppController extends ChangeNotifier {
   /// 本机偏好键：中栏（笔记列表）是否折叠（M7-T06，FR-40）。值 `'true'` / `'false'`。
   static const _kNoteListCollapsed = 'ui.noteListCollapsed';
 
+  /// 本机偏好键：中栏（笔记列表）宽度（M17 / FR-96）。
+  ///
+  /// 值为整数字符串（逻辑像素）；只在拖动松手后写入，读取时夹到
+  /// `[kNoteListMinWidth, 2000]`，当前窗口可用上限由 UI 每次布局时夹取。
+  static const _kNoteListWidth = 'ui.noteListWidth';
+
   /// 本机偏好键：编辑器三态（M7-T06，FR-41 / 详细设计 §5.1）。值见 [EditorModeName.persistentName]。
   static const _kEditorMode = 'ui.editorMode';
 
@@ -390,6 +404,10 @@ class AppController extends ChangeNotifier {
   /// 中栏（笔记列表）折叠态（M7-T06，FR-40）：`true` = 已折叠隐藏。
   bool _noteListCollapsed = false;
 
+  /// 中栏（笔记列表）宽度（M17 / FR-96）：拖动松手后持久化到
+  /// [_kNoteListWidth]，默认 [kNoteListDefaultWidth]。
+  double _noteListWidth = kNoteListDefaultWidth;
+
   /// 编辑器三态（M7-T06，§5.1）：本地视图偏好，不随切换笔记重置。
   EditorMode _editorMode = EditorMode.formatted;
 
@@ -425,6 +443,9 @@ class AppController extends ChangeNotifier {
 
   /// 中栏笔记列表是否折叠（FR-40）。
   bool get noteListCollapsed => _noteListCollapsed;
+
+  /// 中栏笔记列表的当前宽度（M17 / FR-96）。
+  double get noteListWidth => _noteListWidth;
 
   /// 当前编辑器模式（FR-41 / §5.1）。
   EditorMode get editorMode => _editorMode;
@@ -468,6 +489,16 @@ class AppController extends ChangeNotifier {
   /// 读取布尔型本机偏好：仅 `'true'` 视为真，其余（含 `null` / 非法值）为假。
   static bool _boolPref(String? raw) => raw == 'true';
 
+  /// 读取中栏宽度偏好（M17 / FR-96）。
+  ///
+  /// 非法 / 非有限值回落 [kNoteListDefaultWidth]；小于 [kNoteListMinWidth]
+  /// 的历史值夹到最小宽度；上限 2000 只防脏数据，真实上限在 UI 布局时计算。
+  static double _noteListWidthPref(String? raw) {
+    final parsed = double.tryParse(raw ?? '');
+    if (parsed == null || !parsed.isFinite) return kNoteListDefaultWidth;
+    return parsed.clamp(kNoteListMinWidth, 2000.0).toDouble();
+  }
+
   /// 尽力持久化本机 UI 偏好：**落盘失败只记录、不抛出**。
   ///
   /// UI 刷新不得依赖落盘成功——写库异常（磁盘满 / 数据库被占用 / 表缺失等）若向上
@@ -490,6 +521,7 @@ class AppController extends ChangeNotifier {
     _tagSortMode = tagSortModeFromName(await _settings.get(_kTagSortMode));
     _leftPanelCollapsed = _boolPref(await _settings.get(_kLeftPanelCollapsed));
     _noteListCollapsed = _boolPref(await _settings.get(_kNoteListCollapsed));
+    _noteListWidth = _noteListWidthPref(await _settings.get(_kNoteListWidth));
     _editorMode = editorModeFromName(await _settings.get(_kEditorMode));
     _showPropertiesPanel = _boolPref(await _settings.get(_kPropertiesPanelVisible));
     // M14（FR-64 / FR-65 / FR-66）：外观偏好——主题、界面字体、笔记正文字体与
@@ -1677,6 +1709,19 @@ class AppController extends ChangeNotifier {
     await _persistPref(_kNoteListCollapsed, collapsed ? 'true' : 'false');
   }
 
+  /// 置位中栏宽度并持久化（M17 / FR-96）。
+  ///
+  /// 拖动过程走 UI 局部状态、不调用本方法；松手时调用一次。先刷界面再落盘，
+  /// 落盘失败只记录、不回滚（BR-96.4）。当前窗口可用上限由 UI 层夹取，
+  /// 这里只夹持久化边界，避免脏数据。
+  Future<void> setNoteListWidth(double width) async {
+    final next = width.clamp(kNoteListMinWidth, 2000.0).toDouble();
+    if ((next - _noteListWidth).abs() < 0.5) return;
+    _noteListWidth = next;
+    notifyListeners();
+    await _persistPref(_kNoteListWidth, next.toStringAsFixed(0));
+  }
+
   /// 置位编辑器模式并持久化（详细设计 §5.1）。
   ///
   /// 修正性改进：模式不再随切换笔记重置（视图偏好理应稳定）；三态仍共享同一
@@ -2175,7 +2220,9 @@ class AppController extends ChangeNotifier {
 
   /// 计算附件字节的 sha256：大文件走 [compute]（工作 isolate），小文件同线程。
   Future<String> _hashAttachmentBytes(Uint8List bytes) {
-    if (bytes.length < _hashOffMainThreshold) return Future.value(sha256Hex(bytes));
+    if (bytes.length < _hashOffMainThreshold) {
+      return Future.value(sha256Hex(bytes));
+    }
     // `compute` 在 Web 上退化为同线程执行（浏览器无 isolate），行为一致。
     return compute(sha256Hex, bytes);
   }

@@ -14,6 +14,10 @@ namespace {
 
 constexpr char kChannelName[] = "sui/platform";
 
+// 通道生命周期与引擎绑定：注册后**不能**析构，故有意长期持有。
+// 托盘退出需要由 native 反向调用 Dart（M17 / FR-95），因此提升为文件级指针。
+flutter::MethodChannel<flutter::EncodableValue>* g_channel = nullptr;
+
 // 读剪贴板的 CF_HTML（"HTML Format"）**原始字节**。
 //
 // HGLOBAL 的内容是字节流：ASCII 头部（含 StartFragment / EndFragment 的**字节**偏移）
@@ -60,9 +64,7 @@ void HandleMethodCall(
 }  // namespace
 
 void SuiPlatformChannelRegister(FlutterDesktopPluginRegistrarRef registrar_ref) {
-  // 通道生命周期与引擎绑定：注册后**不能**析构，故有意长期持有。
-  static flutter::MethodChannel<flutter::EncodableValue>* channel = nullptr;
-  if (channel != nullptr) {
+  if (g_channel != nullptr) {
     return;
   }
   // 本工程的引擎由 `multiview_desktop` 插件持有，注册回调给的是 **C 句柄**；经
@@ -70,11 +72,17 @@ void SuiPlatformChannelRegister(FlutterDesktopPluginRegistrarRef registrar_ref) 
   auto* registrar = flutter::PluginRegistrarManager::GetInstance()
                         ->GetRegistrar<flutter::PluginRegistrarWindows>(
                             registrar_ref);
-  channel = new flutter::MethodChannel<flutter::EncodableValue>(
+  g_channel = new flutter::MethodChannel<flutter::EncodableValue>(
       registrar->messenger(), kChannelName,
       &flutter::StandardMethodCodec::GetInstance());
-  channel->SetMethodCallHandler(
+  g_channel->SetMethodCallHandler(
       [](const flutter::MethodCall<flutter::EncodableValue>& call,
          std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
              result) { HandleMethodCall(call, std::move(result)); });
+}
+
+bool SuiPlatformRequestTrayExit() {
+  if (g_channel == nullptr) return false;
+  g_channel->InvokeMethod("trayExitRequested", nullptr);
+  return true;
 }

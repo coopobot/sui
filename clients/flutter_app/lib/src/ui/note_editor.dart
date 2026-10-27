@@ -1162,7 +1162,9 @@ class _NoteEditorState extends State<NoteEditor>
   /// 「build 期间 setState」断言；故只登记一次帧后回调，并用 [_findRefreshPending] 去重。
   void _scheduleFindRefreshIfStale() {
     if (!_findVisible || _findRefreshPending) return;
-    if (_findComputedMode == _mode && _findComputedText == _content.text) return;
+    if (_findComputedMode == _mode && _findComputedText == _content.text) {
+      return;
+    }
     _findRefreshPending = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _findRefreshPending = false;
@@ -2031,13 +2033,38 @@ class _NoteEditorState extends State<NoteEditor>
   ///
   /// 三态按钮在窄屏只留图标：三个带文本标签的分段在手机上会挤出屏幕，
   /// 一旦换行就吃掉一整行编辑高度——这正是本次要修的问题。
+  /// 紧凑模式行单行所需的最小内容宽度（实测：模式切换 + 4 个动作图标约 368px）。
+  static const double _compactBarSingleLineWidth = 368;
+
   Widget _buildCompactModeBar() {
-    return Row(
-      children: [
-        _buildModeSelector(compact: true),
-        const Spacer(),
-        ..._buildActionIcons(),
-      ],
+    // M17 / FR-96：中栏最小宽度 270px 时编辑区可能只有约 356px。此前的
+    // Row + Spacer 会把模式切换与 4 个动作图标挤出 RenderFlex（实测溢出 28px）。
+    // 有足够空间时仍保持原「单行 + 右侧动作」；空间不足才改用 Wrap 换行，
+    // 保证所有入口可见可点（不靠裁剪隐藏）。
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final selector = _buildModeSelector(compact: true);
+        final actions = _buildActionIcons();
+        if (constraints.maxWidth >= _compactBarSingleLineWidth) {
+          return Row(
+            children: [
+              selector,
+              const Spacer(),
+              ...actions,
+            ],
+          );
+        }
+        return Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 4,
+          runSpacing: 4,
+          children: [
+            selector,
+            ...actions,
+          ],
+        );
+      },
     );
   }
 

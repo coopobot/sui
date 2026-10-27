@@ -10,6 +10,7 @@ add_executable(${BINARY_NAME} WIN32
   "flutter_window.cpp"
   "main.cpp"
   "sui_platform_channel.cpp"
+  "tray_icon.cpp"
   "utils.cpp"
   "win32_window.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
@@ -44,6 +45,8 @@ target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 # 故不加这一行会报 LNK2019：PluginRegistrar / PluginRegistrarManager 无法解析）。
 target_link_libraries(${BINARY_NAME} PRIVATE flutter_wrapper_plugin)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+# M17 / FR-95：系统托盘（Shell_NotifyIconW）需要 shell32。
+target_link_libraries(${BINARY_NAME} PRIVATE "shell32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

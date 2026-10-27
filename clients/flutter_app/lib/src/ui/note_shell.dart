@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:note_core/note_core.dart';
@@ -47,6 +50,7 @@ class _NoteShellState extends State<NoteShell> {
           final shell = _WideLayout(
             controller: controller,
             showDesktopChrome: isDesktopPlatform,
+            maxWidth: constraints.maxWidth,
           );
           // M13（FR-60 / ui-spec §23.1）「导入文件…」与 M14（FR-63 / ui-spec §24.1）
           // 「设置…」的**壳层**加速键（`Ctrl/Cmd + Shift + I` / `Ctrl/Cmd + ,`）。
@@ -96,22 +100,101 @@ class _NoteShellState extends State<NoteShell> {
 /// 桌面端判定口径统一收敛到 [`isDesktopPlatform`](../platform/desktop_platform.dart)
 /// （菜单栏与折叠切换仅在桌面三平台渲染，详细设计 §6），避免与命令入口 / 独立窗口
 /// 入口各写一份。
-class _WideLayout extends StatelessWidget {
-  const _WideLayout({required this.controller, required this.showDesktopChrome});
+class _WideLayout extends StatefulWidget {
+  const _WideLayout({
+    required this.controller,
+    required this.showDesktopChrome,
+    required this.maxWidth,
+  });
+
   final AppController controller;
 
   /// 是否渲染桌面外壳（应用菜单栏 + 折叠切换，详细设计 §6）。
   /// 宽屏但非桌面平台（如 Web）为 false：仍出宽屏三栏，但不含菜单栏与切换控件。
   final bool showDesktopChrome;
 
+  /// 当前宽屏可用总宽（来自 `NoteShell` 的 `LayoutBuilder`）。
+  final double maxWidth;
+
+  @override
+  State<_WideLayout> createState() => _WideLayoutState();
+}
+
+class _WideLayoutState extends State<_WideLayout> {
+  /// 中栏与编辑区之间的拖动热区宽度（视觉仍是 1px 分隔线）。
+  static const double _resizeHandleWidth = 7;
+
+  /// 编辑区最小预留宽度：计算中栏上限时扣除，避免把正文挤没。
+  static const double _editorMinWidth = 360;
+
+  /// 左栏宽度（含其右分隔线）；未折叠时占用。
+  static const double _leftPanelWidth = 281;
+
+  /// 右侧属性 / 修订栏宽度（含其左分隔线）。
+  static const double _rightPanelWidth = 321;
+
+  late double _noteListWidth;
+
+  bool _dragging = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _noteListWidth = widget.controller.noteListWidth;
+  }
+
+  @override
+  void didUpdateWidget(covariant _WideLayout oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_dragging && oldWidget.controller != widget.controller) {
+      _noteListWidth = widget.controller.noteListWidth;
+    }
+  }
+
+  /// 当前窗口下中栏可用的最大宽度（FR-96 / BR-96.2）。
+  double _maxNoteListWidth() {
+    final controller = widget.controller;
+    final hasRightPanel = controller.selectedNoteId != null &&
+        (controller.showPropertiesPanel || controller.showRevisionPanel);
+    final reserved = (controller.leftPanelCollapsed ? 0.0 : _leftPanelWidth) +
+        _resizeHandleWidth +
+        _editorMinWidth +
+        (hasRightPanel ? _rightPanelWidth : 0.0);
+    return math.max(kNoteListMinWidth, widget.maxWidth - reserved);
+  }
+
+  void _resizeBy(double currentWidth, double delta, double maxWidth) {
+    final next = (currentWidth + delta)
+        .clamp(kNoteListMinWidth, math.max(kNoteListMinWidth, maxWidth))
+        .toDouble();
+    if ((next - currentWidth).abs() < 0.5) return;
+    setState(() => _noteListWidth = next);
+  }
+
+  void _commitWidth() {
+    _dragging = false;
+    unawaited(widget.controller.setNoteListWidth(_noteListWidth));
+  }
+
   @override
   Widget build(BuildContext context) {
+    final controller = widget.controller;
+    // 控制器外部置位（折叠恢复 / 测试 / 其它入口）时同步局部宽度；拖动中忽略，
+    // 避免落盘通知把正在拖的宽度回弹。
+    if (!_dragging &&
+        (controller.noteListWidth - _noteListWidth).abs() >= 0.5) {
+      _noteListWidth = controller.noteListWidth;
+    }
+    final maxNoteListWidth = _maxNoteListWidth();
+    final noteListWidth = _noteListWidth
+        .clamp(kNoteListMinWidth, maxNoteListWidth)
+        .toDouble();
     return Scaffold(
       appBar: AppBar(
         // 桌面外壳：菜单栏 → 折叠切换（BR-41.5 / AC-117）。
         // 桌面端不再重复呈现应用标题文本（标题由操作系统窗口标题承载）。
-        titleSpacing: showDesktopChrome ? 8 : null,
-        title: showDesktopChrome
+        titleSpacing: widget.showDesktopChrome ? 8 : null,
+        title: widget.showDesktopChrome
             ? Row(
                 children: [
                   AppMenuBar(controller: controller),
@@ -125,7 +208,7 @@ class _WideLayout extends StatelessWidget {
           SyncActions(controller: controller),
           _newNoteAction(context),
           // 非桌面外壳（Web 宽屏）没有应用菜单栏，故在此给同源的帮助入口（FR-56 / §21.1）。
-          if (!showDesktopChrome) HelpActions(controller: controller),
+          if (!widget.showDesktopChrome) HelpActions(controller: controller),
         ],
       ),
       body: Row(
@@ -136,13 +219,19 @@ class _WideLayout extends StatelessWidget {
             SizedBox(width: 280, child: NotebookTree(controller: controller)),
             const VerticalDivider(width: 1),
           ],
-          // 中栏（笔记列表）可折叠（FR-40）。
+          // 中栏（笔记列表）可折叠（FR-40），宽度可拖动调整（M17 / FR-96）。
           if (!controller.noteListCollapsed) ...[
-            Expanded(
-              flex: 2,
+            SizedBox(
+              width: noteListWidth,
               child: NoteList(controller: controller),
             ),
-            const VerticalDivider(width: 1),
+            _NoteListResizeHandle(
+              key: const ValueKey('note-list-resize-handle'),
+              onDragStart: () => _dragging = true,
+              onDelta: (delta) =>
+                  _resizeBy(noteListWidth, delta, maxNoteListWidth),
+              onDragEnd: _commitWidth,
+            ),
           ],
           // 编辑区常驻：折叠只影响前两栏，flex:4 自动吃掉释放出的宽度。
           Expanded(
@@ -187,7 +276,68 @@ class _WideLayout extends StatelessWidget {
     return IconButton(
       tooltip: '新建笔记',
       icon: const Icon(Icons.note_add_outlined),
-      onPressed: () => controller.createNote(),
+      onPressed: () => widget.controller.createNote(),
+    );
+  }
+}
+
+/// 中栏与编辑区之间的拖动热区（M17 / FR-96）。
+///
+/// 视觉上仍是 **1px** 分隔线（[VerticalDivider] 的 `thickness`），外层热区加宽到
+/// **7px** 以便鼠标抓取；指针为水平调整列宽。拖动过程只上报增量，宽度与落盘
+/// 由 [_WideLayoutState] 负责（拖动中不写库）。
+class _NoteListResizeHandle extends StatefulWidget {
+  const _NoteListResizeHandle({
+    super.key,
+    required this.onDragStart,
+    required this.onDelta,
+    required this.onDragEnd,
+  });
+
+  final VoidCallback onDragStart;
+  final ValueChanged<double> onDelta;
+  final VoidCallback onDragEnd;
+
+  @override
+  State<_NoteListResizeHandle> createState() => _NoteListResizeHandleState();
+}
+
+class _NoteListResizeHandleState extends State<_NoteListResizeHandle> {
+  bool _hovering = false;
+  bool _dragging = false;
+
+  void _finishDrag() {
+    if (!_dragging) return;
+    setState(() => _dragging = false);
+    widget.onDragEnd();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final active = _hovering || _dragging;
+    return Semantics(
+      label: '调整笔记列表宽度',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragStart: (_) {
+            setState(() => _dragging = true);
+            widget.onDragStart();
+          },
+          onHorizontalDragUpdate: (details) => widget.onDelta(details.delta.dx),
+          onHorizontalDragEnd: (_) => _finishDrag(),
+          onHorizontalDragCancel: _finishDrag,
+          child: VerticalDivider(
+            width: 7,
+            thickness: 1,
+            color: active ? scheme.primary : scheme.outlineVariant,
+          ),
+        ),
+      ),
     );
   }
 }
