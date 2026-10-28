@@ -3,9 +3,12 @@ import 'package:flutter/material.dart';
 import 'src/app.dart';
 import 'src/bootstrap.dart';
 import 'src/platform/multi_window.dart';
+import 'src/ui/ime_caret_anchor.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // v0.17.1 / FR-98：Windows 中文输入法候选框跟随光标（ADR-035）。
+  ImeCaretAnchor.start();
   final storage = await bootstrapStorage();
   // 桌面端多窗口（M8 · FR-42/FR-43 · ADR-012）：以 runMultiApp 取代 runApp；
   // 其余平台沿用单视图入口（详细设计 §3.4 / §6）。分流经条件导入，Web 构建安全。

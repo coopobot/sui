@@ -4,6 +4,7 @@
 #include <multiview_desktop/multi_view_desktop_plugin.h>
 
 #include "flutter_window.h"
+#include "single_instance.h"
 #include "utils.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
@@ -23,6 +24,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   MultiViewDesktopInitializeShellIntegration();
 
   if (MultiViewDesktopTryForwardTaskbarMenuActivation()) {
+    ::CoUninitialize();
+    return EXIT_SUCCESS;
+  }
+
+  // v0.17.1 / FR-97：后台常驻只允许一个实例（ADR-034）。拿不到「主实例」身份时，
+  // 把已有实例的主窗口唤到前台（托盘隐藏 / 最小化都会先还原）后立刻退出：
+  // 不建引擎、不注册托盘图标，避免出现第二个常驻进程与第二个通知区域图标。
+  if (AcquireSingleInstance() != SingleInstanceResult::kPrimary) {
     ::CoUninitialize();
     return EXIT_SUCCESS;
   }

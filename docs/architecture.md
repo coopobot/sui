@@ -1191,3 +1191,19 @@ drift **无迁移**（仍 8 表 / `schemaVersion = 10`）、`pubspec.yaml` 依�
   最小预留计算。极窄编辑区下模式行动作按钮改 `Wrap` 防溢出。
 - **守线**：零新增依赖、零服务端 / 协议字段、drift 无迁移；独立窗口关闭仍由
   `multiview_desktop` 处理。
+
+### 8.18 补丁 `v0.17.1`：单实例与输入法候选框跟随光标（FR-97 / FR-98）
+
+- **单实例**：runner 新增 `single_instance.{h,cpp}`。`wWinMain` 在建引擎之前
+  `AcquireSingleInstance()`：命名互斥量 `Local\SuiFlutterApp.SingleInstance` 判定唯一实例；
+  二次启动按「exe 全路径 + `FLUTTER_RUNNER_WIN32_WINDOW` / `MULTIVIEW_DESKTOP_HOST_WINDOW`」
+  找到已有主窗口，`AllowSetForegroundWindow` + `RegisterWindowMessage` 消息让其
+  `ShowMainWindow()`（托盘隐藏 / 最小化都还原），随后自身以退出码 0 结束（不建引擎、
+  不注册托盘、不开库）。首实例退出中用互斥量的 `WAIT_ABANDONED` 接替；找窗口 ≈3.6s、
+  接替观察 4s，等待均有上限。`Local\` 前缀 = 每个登录会话一个实例。
+- **输入法候选框**：Windows 引擎只认 `TextInput.setMarkedTextRect`（未实现
+  `setCaretRect`），框架在无组合区时把该矩形回退为 `TextPosition(offset: 0)`（正文起点），
+  导致候选框出现在编辑区左上角。新增 `lib/src/ui/ime_caret_anchor.dart`：每帧（微任务，
+  排在框架 post-frame 回调之后）把聚焦 `EditableText` 的**真实光标矩形**经同一通道回填，
+  引擎组合窗口因此始终停在光标上。仅 Windows 启用；只读 / 预览态不发；通道异常静默。
+- **守线**：零新增依赖、零服务端 / 协议字段、drift 无迁移（`schemaVersion` 仍 10、8 表）。

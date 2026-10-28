@@ -3,6 +3,7 @@
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "single_instance.h"
 #include "sui_platform_channel.h"
 #include "tray_icon.h"
 #include <multiview_desktop/multi_view_desktop_plugin.h>
@@ -101,6 +102,13 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // v0.17.1 / FR-97：二次启动的进程经命名互斥量识别后发来的「唤到前台」请求
+  // （ADR-034）。托盘隐藏 / 最小化的主窗口统一由 ShowMainWindow() 还原、置前并聚焦。
+  if (message == SingleInstanceActivateMessageId()) {
+    ShowMainWindow();
+    return 0;
+  }
+
   // M17 / FR-95：托盘存在时，主窗口关闭 = 隐藏到托盘（不销毁窗口 / 引擎 / 进程）。
   // 必须先于 multiview_desktop 的 WM_CLOSE 处理，否则会进入 softCascade 销毁窗口。
   if (message == WM_CLOSE && !force_close_ && tray_ != nullptr &&
