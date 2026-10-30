@@ -174,6 +174,14 @@ class _NoteEditorState extends State<NoteEditor>
   /// 否则每次敲字触发的保存都会重置标题/正文，selection 被置回 -1，光标跳行首。
   int _pendingSaves = 0;
 
+  /// 保存串行队列（FR-99 / BR-99.1）：同一时刻最多一个保存在途；在途期间的请求合并为
+  /// 「结束后再保存一次」，每次都以最新字面量为准。
+  Future<void>? _saveChain;
+  bool _saveRequested = false;
+
+  /// 标题输入的防抖计时器（正文防抖在 `_SourceEditor` 内，同为 400ms）。
+  Timer? _saveTimer;
+
   /// 已注册到 [AppController] 的命令桥引用（M7-T08，详细设计 §4.2）。
   ///
   /// 注册发生在 `initState`，注销发生在 `dispose`——而 `dispose` 内不能再查 `context`
@@ -219,6 +227,10 @@ class _NoteEditorState extends State<NoteEditor>
       // 带身份校验注销：同视图键下新旧编辑器交替时，旧实例不得删掉新实例的登记。
       controller.unregisterEditorTarget(viewKey, this);
     }
+    _saveTimer?.cancel();
+    // 切换 / 关闭窗口前把最后 ≤400ms 的输入落库（BR-99.1）；此处不能再用 `context`，
+    // 故必须在清空 `_registeredController` **之前**调用。
+    _flushOnDispose();
     _registeredController = null;
     _registeredViewKey = null;
     _title.dispose();
@@ -272,8 +284,10 @@ class _NoteEditorState extends State<NoteEditor>
   void _loadNote() {
     final note = _note;
     if (note != null) {
-      _title.text = note.title;
-      _content.text = note.contentMarkdown;
+      // v0.17.2（FR-99 / BR-99.2）：内容未变不重绑；真正变化时保留选区并按新长度钳制，
+      // 不再把选区置为 -1（那会让光标跳到文末 / 行首）。
+      _bindText(_title, note.title, keepSelection: _loaded);
+      _bindText(_content, note.contentMarkdown, keepSelection: _loaded);
       final s =
           _controller.notes.where((s) => s.note.id == note.id).firstOrNull;
       _tags = s?.tags ?? _controller.tagsById(note.id);
@@ -307,28 +321,113 @@ class _NoteEditorState extends State<NoteEditor>
       note.title != _boundTitle ||
       note.contentMarkdown != _boundContent;
 
-  Future<void> _save() async {
-    final id = _noteId;
-    if (id == null) return;
-    _pendingSaves++;
-    try {
-      await _controller.saveNote(
-        id,
-        title: _title.text,
-        content: _content.text,
-        tags: _tags,
+  /// 把输入框内容重绑到 [next]（FR-99 / BR-99.2）。
+  ///
+  /// 内容未变直接返回（不动选区）；[keepSelection] 为 true 时按新长度钳制保留当前选区，
+  /// 否则沿用「首次载入」语义（无有效选区）。绝不把选区置 -1 后交给框架去推到文末。
+  static void _bindText(
+    TextEditingController controller,
+    String next, {
+    required bool keepSelection,
+  }) {
+    if (controller.text == next) return;
+    final sel = controller.selection;
+    if (keepSelection && sel.isValid) {
+      controller.value = TextEditingValue(
+        text: next,
+        selection: TextSelection(
+          baseOffset: sel.baseOffset.clamp(0, next.length),
+          extentOffset: sel.extentOffset.clamp(0, next.length),
+        ),
       );
-    } finally {
-      _pendingSaves--;
-      // 全部保存落盘后对齐基线，避免后续 build 把自身保存误判为外部变化。
-      if (_pendingSaves == 0) {
-        final note = _note;
-        if (note != null) {
-          _boundTitle = note.title;
-          _boundContent = note.contentMarkdown;
-        }
-      }
+    } else {
+      controller.text = next;
     }
+  }
+
+  /// 请求保存（串行化、最新优先，FR-99 / BR-99.1）。
+  Future<void> _save() {
+    final id = _noteId;
+    if (id == null) return Future<void>.value();
+    _saveRequested = true;
+    final running = _saveChain;
+    if (running != null) return running;
+    final chain = _drainSaves(id, _controller);
+    _saveChain = chain;
+    return chain;
+  }
+
+  Future<void> _drainSaves(String id, AppController controller) async {
+    try {
+      while (_saveRequested) {
+        _saveRequested = false;
+        final title = _title.text;
+        final content = _content.text;
+        final tags = List<String>.of(_tags);
+        _pendingSaves++;
+        try {
+          await controller.saveNote(
+            id,
+            title: title,
+            content: content,
+            tags: tags,
+          );
+        } finally {
+          _pendingSaves--;
+        }
+        // 以**本次捕获**的字面量对齐基线：不用可能过期的列表快照（BR-99.1），
+        // 避免自身保存被误判为外部变化后重绑输入框。
+        _boundTitle = title;
+        _boundContent = content;
+      }
+    } finally {
+      _saveChain = null;
+      // 排空瞬间又有新请求：补跑一轮，保证最新输入一定落库。
+      // State 已销毁时不再走 `_save()`（其 `_noteId` 依赖 context），dispose 已单独直写。
+      if (_saveRequested && mounted) unawaited(_save());
+    }
+  }
+
+  /// 标题输入的防抖保存（与正文同一档 400ms）。
+  void _scheduleSave() {
+    _saveTimer?.cancel();
+    _saveTimer = Timer(
+      const Duration(milliseconds: 400),
+      () => unawaited(_save()),
+    );
+  }
+
+  /// 切换 / 关闭编辑器时把最后一段输入落库（FR-99 / BR-99.1）。
+  ///
+  /// `dispose` 内不能再查 `context`，故用注册时留存的控制器与已绑定笔记 id；
+  /// 不 await（State 正在销毁），由保存链路自行完成。
+  void _flushOnDispose() {
+    final controller = _registeredController;
+    final id = _loadedNoteId;
+    if (controller == null || id == null) return;
+    final title = _title.text;
+    final content = _content.text;
+    if (title == _boundTitle && content == _boundContent) return;
+    final tags = List<String>.of(_tags);
+    final pending = _saveChain;
+    unawaited(() async {
+      // 必须排在在途保存之后：否则旧保存晚到会把刚写下的最新内容回盖（BR-99.1）。
+      try {
+        if (pending != null) await pending;
+      } catch (_) {
+        // 在途保存失败也要继续把最后一段写下去。
+      }
+      try {
+        await controller.saveNote(
+          id,
+          title: title,
+          content: content,
+          tags: tags,
+        );
+      } catch (_) {
+        // 库 / 窗口已销毁（测试 teardown、退出竞态）时静默：正常保存链路已覆盖。
+      }
+    }());
   }
 
   /// 格式工具栏：一行可横向滚动的排版指令。每条指令都只在正本 Markdown 上做
@@ -1447,15 +1546,12 @@ class _NoteEditorState extends State<NoteEditor>
     final sel = _content.value.selection;
     if (!sel.isValid || !sel.isCollapsed) return null;
     final pos = sel.start;
-    final text = _content.text;
-    var from = 0;
-    while (true) {
-      final img = EditorFormat.findImage(text, from);
-      if (img == null) return null;
+    // v0.17.2（FR-99）：读控制器按文本缓存的全量图片，避免每次光标移动都从头扫描。
+    for (final img in _content.imagesFor(_content.text)) {
       final spanEnd = img.attributeEnd > 0 ? img.attributeEnd : img.end;
       if (pos >= img.start && pos <= spanEnd) return img;
-      from = spanEnd;
     }
+    return null;
   }
 
   // ---------------------------------------------------------------------------
@@ -1469,7 +1565,11 @@ class _NoteEditorState extends State<NoteEditor>
     if (_mode == EditorMode.preview) return null;
     final sel = _content.value.selection;
     if (!sel.isValid || !sel.isCollapsed) return null;
-    return EditorFormat.linkAt(_content.text, sel.start);
+    // v0.17.2（FR-99）：复用按文本缓存的链接列表，不再每次全扫。
+    for (final link in _content.linksFor(_content.text)) {
+      if (sel.start >= link.start && sel.start <= link.end) return link;
+    }
+    return null;
   }
 
   /// 打开 [url]（FR-70）。**先分流**：笔记引用 → 库内跳转；其余 → 系统默认浏览器。
@@ -1887,7 +1987,8 @@ class _NoteEditorState extends State<NoteEditor>
                       _contentFocus.requestFocus();
                     }
                   },
-                  onChanged: (_) => _save(),
+                  // v0.17.2（FR-99 / BR-99.1）：标题与正文同一档 400ms 防抖，不再逐字写库。
+                  onChanged: (_) => _scheduleSave(),
                   // M14（FR-65 / AC-286）：笔记**标题**同用「笔记正文字体」。
                   style: SuiAppearance.of(context).applyBodyFont(
                         Theme.of(context)
@@ -2721,8 +2822,8 @@ class _NoteEditorState extends State<NoteEditor>
 
   @override
   Future<void> flushPendingEdits() async {
-    // 本地写入本身不防抖（随编辑即时落库），但编辑器内部对「写回模型」另有一层 400ms
-    // 防抖；退出前补一次 [save]，确保正文以当前字面量落库（详细设计 §7 第 1 步）。
+    // v0.17.2（FR-99）：退出前取消标题防抖并等保存队列排空，确保最后一段输入落库。
+    _saveTimer?.cancel();
     await _save();
   }
 

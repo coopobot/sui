@@ -99,6 +99,49 @@ void main() {
     }
   });
 
+  testWidgets('光标 / 选区未变化时不再重复回填（FR-99 / BR-99.5 节流）',
+      (WidgetTester tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      final TextEditingController controller =
+          TextEditingController(text: '甲乙丙丁戊己庚辛壬癸');
+      final FocusNode focusNode = FocusNode();
+      addTearDown(() {
+        controller.dispose();
+        focusNode.dispose();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: TextField(
+              controller: controller,
+              focusNode: focusNode,
+              maxLines: null,
+            ),
+          ),
+        ),
+      );
+      focusNode.requestFocus();
+      await tester.pump();
+      controller.selection = const TextSelection.collapsed(offset: 2);
+      await tester.pump();
+
+      ImeCaretAnchor.debugReset();
+      expect(ImeCaretAnchor.debugReportCaretRect(), isTrue,
+          reason: '首次回填应当发送真实光标矩形');
+      expect(ImeCaretAnchor.debugReportCaretRect(), isFalse,
+          reason: '光标 / 选区 / 文本 / 矩形都没变时不得重复发通道消息');
+
+      controller.selection = const TextSelection.collapsed(offset: 6);
+      expect(ImeCaretAnchor.debugReportCaretRect(), isTrue,
+          reason: '光标移动后必须重新回填');
+      expect(ImeCaretAnchor.debugReportCaretRect(), isFalse);
+    } finally {
+      ImeCaretAnchor.debugReset();
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
   testWidgets('只读输入框不回填（没有输入连接，避免引擎报无客户端）', (WidgetTester tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     try {

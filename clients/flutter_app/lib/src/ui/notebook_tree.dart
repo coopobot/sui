@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:note_core/note_core.dart';
 
@@ -87,101 +89,113 @@ class _NotebookTreeState extends State<NotebookTree> {
 
     return Material(
       color: _sidebarBg,
-      // M16 / FR-85：整个侧栏改为单一滚动列表——新增搜索框后，短侧栏
-      // （如 400px 的抽屉 / 测试容器）不能再靠固定高度的 Column 硬撑。
-      child: ListView(
+      // M16 / FR-85：树区域是滚动列表；v0.17.2（FR-101）把「全部标签 / 归档 / 回收站」
+      // 移到 Column 的**固定底部区**，不随树滚动（BR-101.1）。
+      child: Column(
         children: [
-          // BUG6：左栏顶部提供「新建笔记」入口。
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                style: TextButton.styleFrom(foregroundColor: _sidebarFg),
-                onPressed: () => controller.createNote(),
-                icon: const Icon(Icons.note_add_outlined, size: 18),
-                label: const Text('新建笔记'),
-              ),
-            ),
-          ),
-          const Divider(height: 1, color: Colors.white24),
-          _SidebarTile(
-            leading: const Icon(Icons.layers_outlined),
-            title: const Text('全部笔记'),
-            selected: controller.isAllNotesView,
-            onTap: () {
-              controller.selectNotebook(null);
-              // 清除搜索以便"全部笔记"可见
-              controller.search('');
-            },
-          ),
-          _SidebarTile(
-            leading: const Icon(Icons.inbox_outlined),
-            title: const Text('收件箱'),
-            subtitle: Text('${_clipCount(controller)} 篇剪藏',
-                style: const TextStyle(fontSize: 11, color: _sidebarFgDim)),
-            selected: controller.inboxMode,
-            onTap: () {
-              controller.selectInbox();
-              controller.search('');
-            },
-          ),
-          const Divider(height: 1, color: Colors.white24),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 6, 8, 4),
-            child: Row(
+          Expanded(
+            child: ListView(
               children: [
-                Expanded(
-                  child: Text('笔记本',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelLarge
-                          ?.copyWith(color: _sidebarFgDim)),
+                // BUG6：左栏顶部提供「新建笔记」入口。
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      style: TextButton.styleFrom(foregroundColor: _sidebarFg),
+                      onPressed: () => controller.createNote(),
+                      icon: const Icon(Icons.note_add_outlined, size: 18),
+                      label: const Text('新建笔记'),
+                    ),
+                  ),
                 ),
-                // BUG7：新建笔记本入口移到「笔记本」栏行尾的「+」图标。
-                IconButton(
-                  tooltip: '新建笔记本',
-                  visualDensity: VisualDensity.compact,
-                  color: _sidebarFgDim,
-                  icon: const Icon(Icons.add, size: 18),
-                  onPressed: () => showCreateNotebookDialog(context, controller),
+                const Divider(height: 1, color: Colors.white24),
+                _SidebarTile(
+                  leading: const Icon(Icons.layers_outlined),
+                  title: const Text('全部笔记'),
+                  selected: controller.isAllNotesView,
+                  onTap: () {
+                    // 先清搜索再切视图：否则后一次 refreshNotes 会把「默认打开第一篇」
+                    // 的 selectFirstNote 请求判为过期（FR-104 / BR-104.1）。
+                    controller.search('');
+                    controller.selectNotebook(null);
+                  },
                 ),
+                _SidebarTile(
+                  leading: const Icon(Icons.inbox_outlined),
+                  title: const Text('收件箱'),
+                  subtitle: Text('${_clipCount(controller)} 篇剪藏',
+                      style:
+                          const TextStyle(fontSize: 11, color: _sidebarFgDim)),
+                  selected: controller.inboxMode,
+                  onTap: () {
+                    controller.selectInbox();
+                    controller.search('');
+                  },
+                ),
+                const Divider(height: 1, color: Colors.white24),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 6, 8, 4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text('笔记本',
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelLarge
+                                ?.copyWith(color: _sidebarFgDim)),
+                      ),
+                      // BUG7：新建笔记本入口移到「笔记本」栏行尾的「+」图标。
+                      IconButton(
+                        tooltip: '新建笔记本',
+                        visualDensity: VisualDensity.compact,
+                        color: _sidebarFgDim,
+                        icon: const Icon(Icons.add, size: 18),
+                        onPressed: () =>
+                            showCreateNotebookDialog(context, controller),
+                      ),
+                    ],
+                  ),
+                ),
+                _searchField(),
+                _Tree(
+                  controller: controller,
+                  roots: roots,
+                  query: _query,
+                ),
+                // 标签筛选区：随树滚动（底部三个入口保持固定）。
+                if (controller.hasTagFilter)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    child: Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: [
+                        for (final name in controller.selectedTagNames)
+                          InputChip(
+                            label: Text('#$name'),
+                            labelStyle: const TextStyle(
+                                color: _sidebarFg, fontSize: 12),
+                            backgroundColor: Colors.white10,
+                            side: const BorderSide(color: Colors.white24),
+                            onDeleted: () => controller.toggleTag(name),
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        TextButton(
+                          style: TextButton.styleFrom(
+                              foregroundColor: _sidebarFgDim),
+                          onPressed: controller.clearTags,
+                          child: const Text('清空'),
+                        ),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
-          _searchField(),
-          _Tree(
-            controller: controller,
-            roots: roots,
-            query: _query,
-          ),
           const Divider(height: 1, color: Colors.white24),
-          // 标签入口区：「全部标签」打开总览（FR-22），下方汇总已选筛选标签。
-          if (controller.hasTagFilter)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-              child: Wrap(
-                spacing: 4,
-                runSpacing: 4,
-                children: [
-                  for (final name in controller.selectedTagNames)
-                    InputChip(
-                      label: Text('#$name'),
-                      labelStyle:
-                          const TextStyle(color: _sidebarFg, fontSize: 12),
-                      backgroundColor: Colors.white10,
-                      side: const BorderSide(color: Colors.white24),
-                      onDeleted: () => controller.toggleTag(name),
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                  TextButton(
-                    style: TextButton.styleFrom(foregroundColor: _sidebarFgDim),
-                    onPressed: controller.clearTags,
-                    child: const Text('清空'),
-                  ),
-                ],
-              ),
-            ),
+          // FR-101：底部固定区——全部标签 → 归档 → 回收站，不在滚动容器内。
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
             child: TextButton.icon(
@@ -329,62 +343,88 @@ class _NotebookNode extends StatelessWidget {
     final hasChildren = allChildren.isNotEmpty;
     final expanded =
         forceExpanded || !controller.isNotebookCollapsed(nb.id);
-    final noteCount = controller.notes
-        .where((n) => n.note.notebookId == nb.id)
-        .length;
+    // v0.17.2（FR-102 / BR-102.1）：数量走全库聚合，**不再**用当前中栏列表计数——
+    // 否则切换笔记本后其它节点数量会跳成 0，行高也随之变化。
+    final noteCount = controller.notebookNoteCount(nb.id);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ListTile(
-          dense: true,
-          // M10-T29（FR-51）：加密笔记本用锁图标区分（未解锁时上锁，已解锁时开锁）。
-          // M16 / FR-85：有子节点时在图标左侧加 chevron，点击只切换折叠、不选中。
-          leading: SizedBox(
-            width: hasChildren ? 56 : 40,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
+        // v0.17.2（FR-103）：整行可右键；菜单与尾部「⋯」同源，右键本身不改选中 / 折叠。
+        GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onSecondaryTapDown: (details) => unawaited(
+            _showContextMenu(context, details.globalPosition),
+          ),
+          child: ListTile(
+            dense: true,
+            // M10-T29（FR-51）：加密笔记本用锁图标区分（未解锁时上锁，已解锁时开锁）。
+            // M16 / FR-85：有子节点时在图标左侧加 chevron，点击只切换折叠、不选中。
+            leading: SizedBox(
+              width: hasChildren ? 56 : 40,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (hasChildren)
+                    InkResponse(
+                      onTap: () => controller.toggleNotebookCollapsed(nb.id),
+                      radius: 14,
+                      child: Icon(
+                        expanded ? Icons.expand_more : Icons.chevron_right,
+                        size: 18,
+                        color: _sidebarFgDim,
+                      ),
+                    )
+                  else
+                    const SizedBox(width: 18),
+                  Icon(
+                    nb.encrypted
+                        ? (controller.isNotebookUnlocked(nb.id)
+                            ? Icons.lock_open_outlined
+                            : Icons.lock_outline)
+                        : Icons.folder_outlined,
+                    size: 20,
+                  ),
+                ],
+              ),
+            ),
+            // FR-102：名称与数量**同一行**；名称超长省略，数量始终可见（BR-102.3）。
+            // 不再使用 subtitle，保证 0 篇 / N 篇行高一致（BR-102.2）。
+            title: Row(
               children: [
-                if (hasChildren)
-                  InkResponse(
-                    onTap: () => controller.toggleNotebookCollapsed(nb.id),
-                    radius: 14,
-                    child: Icon(
-                      expanded ? Icons.expand_more : Icons.chevron_right,
-                      size: 18,
-                      color: _sidebarFgDim,
-                    ),
-                  )
-                else
-                  const SizedBox(width: 18),
-                Icon(
-                  nb.encrypted
-                      ? (controller.isNotebookUnlocked(nb.id)
-                          ? Icons.lock_open_outlined
-                          : Icons.lock_outline)
-                      : Icons.folder_outlined,
-                  size: 20,
+                Expanded(
+                  child: Text(
+                    nb.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
+                if (noteCount > 0) ...[
+                  const SizedBox(width: 6),
+                  Text(
+                    '$noteCount',
+                    maxLines: 1,
+                    style: const TextStyle(fontSize: 11, color: _sidebarFgDim),
+                  ),
+                ],
               ],
             ),
+            selected: controller.selectedNotebookId == nb.id,
+            textColor: _sidebarFg,
+            iconColor: _sidebarFgDim,
+            selectedColor: Colors.white,
+            selectedTileColor: Colors.white12,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // M12（FR-53 / ui-spec §20.2）：状态图标在**节点右侧**，折叠态也显示；
+                // 与 §19.1 的锁形图标并存（锁在 leading、状态在 trailing，互不替代）。
+                _syncStatusIcon(context),
+                _nodeMenu(context),
+              ],
+            ),
+            onTap: () => controller.selectNotebook(nb.id),
           ),
-          title: Text(nb.name),
-          subtitle: noteCount > 0 ? Text('$noteCount篇') : null,
-          selected: controller.selectedNotebookId == nb.id,
-          textColor: _sidebarFg,
-          iconColor: _sidebarFgDim,
-          selectedColor: Colors.white,
-          selectedTileColor: Colors.white12,
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // M12（FR-53 / ui-spec §20.2）：状态图标在**节点右侧**，折叠态也显示；
-              // 与 §19.1 的锁形图标并存（锁在 leading、状态在 trailing，互不替代）。
-              _syncStatusIcon(context),
-              _nodeMenu(context),
-            ],
-          ),
-          onTap: () => controller.selectNotebook(nb.id),
         ),
         if (children.isNotEmpty && expanded)
           Padding(
@@ -428,40 +468,11 @@ class _NotebookNode extends StatelessWidget {
     );
   }
 
-  /// 节点菜单：既有整理 / 加密 / 删除项 + M12 单项「立即上传 / 重试」
-  /// （可用性由 [syncMenuItem] 按 `offersManualUpload` 统一裁决，ui-spec §20.4）。
-  Widget _nodeMenu(BuildContext context) {
-    return PopupMenuButton<String>(
-      iconColor: _sidebarFgDim,
-      onSelected: (v) async {
-        switch (v) {
-          case 'rename':
-            await _rename(context);
-            break;
-          case 'newchild':
-            await _addChild(context);
-            break;
-          case 'up':
-            await controller.moveNotebookUp(nb.id);
-            break;
-          case 'down':
-            await controller.moveNotebookDown(nb.id);
-            break;
-          case 'font':
-            await _pickNotebookFont(context);
-            break;
-          case 'encrypt':
-            await _setEncrypted(context);
-            break;
-          case 'delete':
-            await _confirmDelete(context);
-            break;
-          case 'sync':
-            await _retrySync(context);
-            break;
-        }
-      },
-      itemBuilder: (_) => [
+  /// 节点菜单项（**单一来源**，FR-103 / BR-103.1）：尾部「⋯」与鼠标右键共用。
+  ///
+  /// 既有整理 / 加密 / 删除项 + M12 单项「立即上传 / 重试」（可用性由 [syncMenuItem]
+  /// 按 `offersManualUpload` 统一裁决，ui-spec §20.4）。
+  List<PopupMenuEntry<String>> _menuItems() => [
         const PopupMenuItem(value: 'rename', child: Text('重命名')),
         const PopupMenuItem(value: 'newchild', child: Text('新建子笔记本')),
         const PopupMenuItem(value: 'up', child: Text('上移')),
@@ -476,8 +487,65 @@ class _NotebookNode extends StatelessWidget {
         const PopupMenuDivider(),
         // M12（FR-54 / ui-spec §20.4）：与笔记行尾菜单**同一项、同一命令**。
         syncMenuItem(nb.syncState),
-      ],
+      ];
+
+  Future<void> _onMenuSelected(BuildContext context, String v) async {
+    switch (v) {
+      case 'rename':
+        await _rename(context);
+        break;
+      case 'newchild':
+        await _addChild(context);
+        break;
+      case 'up':
+        await controller.moveNotebookUp(nb.id);
+        break;
+      case 'down':
+        await controller.moveNotebookDown(nb.id);
+        break;
+      case 'font':
+        await _pickNotebookFont(context);
+        break;
+      case 'encrypt':
+        await _setEncrypted(context);
+        break;
+      case 'delete':
+        await _confirmDelete(context);
+        break;
+      case 'sync':
+        await _retrySync(context);
+        break;
+    }
+  }
+
+  /// 行尾「⋯」按钮（左键入口）。
+  Widget _nodeMenu(BuildContext context) {
+    return PopupMenuButton<String>(
+      iconColor: _sidebarFgDim,
+      onSelected: (v) => unawaited(_onMenuSelected(context, v)),
+      itemBuilder: (_) => _menuItems(),
     );
+  }
+
+  /// 行内**鼠标右键**菜单（FR-103）：在指针处弹出与「⋯」完全相同的菜单项。
+  ///
+  /// 只打开菜单，不改当前选中笔记本、不切换笔记、不展开 / 折叠（BR-103.2）。
+  Future<void> _showContextMenu(
+    BuildContext context,
+    Offset globalPosition,
+  ) async {
+    final overlay = Overlay.of(context).context.findRenderObject();
+    if (overlay is! RenderBox) return;
+    final value = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: _menuItems(),
+    );
+    if (value == null || !context.mounted) return;
+    await _onMenuSelected(context, value);
   }
 
   /// 笔记本「默认字体…」（M14 / FR-66）：覆盖该笔记本内笔记的**笔记正文字体**。
@@ -518,9 +586,7 @@ class _NotebookNode extends StatelessWidget {
 
   /// 删除笔记本：二次确认，非空时按 BR-20.4 文案说明笔记移出而非删除。
   Future<void> _confirmDelete(BuildContext context) async {
-    final noteCount = controller.notes
-        .where((n) => n.note.notebookId == nb.id)
-        .length;
+    final noteCount = controller.notebookNoteCount(nb.id);
     final message = noteCount > 0
         ? '笔记本「${nb.name}」下有 $noteCount 篇笔记，'
             '删除后其中笔记将进入「回收站」，可在回收站中还原，不会一并删除。'

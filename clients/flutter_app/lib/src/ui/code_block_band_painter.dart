@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:note_core/note_core.dart';
 
+import 'markdown_editing_controller.dart';
+
 /// 围栏代码块底色带的上下内边距（px，FR-81a / FR-93）。
 ///
 /// 末围栏行的光标矩形底比行盒底部**高出约 1px**（M15 探针实测 0.67px），
@@ -90,7 +92,11 @@ class CodeBlockBandPainter extends CustomPainter {
     if (fieldBox is! RenderBox || editable == null) return;
     if (!fieldBox.hasSize || !editable.hasSize) return;
 
-    final blocks = EditorFormat.fenceBlocks(controller.text);
+    // v0.17.2（FR-99）：复用正文控制器按文本缓存的围栏扫描，不再每次重绘都全扫。
+    final c = controller;
+    final blocks = c is MarkdownEditingController
+        ? c.fencesFor(c.text)
+        : EditorFormat.fenceBlocks(c.text);
     if (blocks.isEmpty) return;
 
     // 正文起点相对绘制器原点的位移：编辑区内边距 + `TextField` 自身的内部留白。

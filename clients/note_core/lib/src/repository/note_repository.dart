@@ -806,6 +806,23 @@ class NoteRepository {
     return summaries;
   }
 
+  /// 各笔记本下的**真实笔记篇数**（`v0.17.2` / FR-102）。
+  ///
+  /// 口径：排除墓碑（`is_deleted = 1`）与归档（`archived = 1`），未归入任何笔记本的笔记
+  /// 不计入（收件箱 / 未分组不在笔记本树节点上显示数量）。一次 `GROUP BY` 聚合，
+  /// 不逐篇查询；结果供左栏「名称尾部数量」使用，**与当前筛选无关**。
+  Future<Map<String, int>> noteCountsByNotebook() async {
+    final rows = await db.customSelect(
+      'SELECT notebook_id, COUNT(*) AS c FROM notes '
+      'WHERE is_deleted = 0 AND archived = 0 AND notebook_id IS NOT NULL '
+      'GROUP BY notebook_id',
+      readsFrom: {db.notes},
+    ).get();
+    return {
+      for (final r in rows) r.read<String>('notebook_id'): r.read<int>('c'),
+    };
+  }
+
   /// 按多个标签筛选笔记（BR-22.2：多标签取**交集**）。
   ///
   /// 与 [listNotes] 共用过滤条件（笔记本 / 搜索 / 归档），额外要求每条笔记

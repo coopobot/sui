@@ -354,6 +354,16 @@ class AppController extends ChangeNotifier {
 
   List<Notebook> _notebooks = [];
   List<NoteSummary> _notes = [];
+
+  /// 各笔记本下的真实篇数（FR-102，`v0.17.2`）。
+  ///
+  /// 由 [refreshNotes] 用一次 `GROUP BY` 聚合刷新；**与当前中栏筛选无关**，
+  /// 左栏节点直接读取，避免「切换笔记本后其它节点数量全变 0」。
+  Map<String, int> _notebookNoteCounts = const <String, int>{};
+
+  /// 列表刷新代次（FR-104 / AC-597）：只有**最后一次** `refreshNotes` 能写回列表与选中，
+  /// 避免快速切换笔记本时旧查询晚到、把选中回退到旧目标。
+  int _notesRefreshToken = 0;
   List<Tag> _tags = [];
 
   /// 当前排序方式。默认更新时间倒序（置顶优先）。
@@ -370,6 +380,10 @@ class AppController extends ChangeNotifier {
 
   List<Notebook> get notebooks => _notebooks;
   List<NoteSummary> get notes => _notes;
+
+  /// 某笔记本下的真实篇数（FR-102；0 表示无笔记 / 未知笔记本）。
+  int notebookNoteCount(String notebookId) =>
+      _notebookNoteCounts[notebookId] ?? 0;
   List<Tag> get tags => _tags;
   NoteSortMode get sortMode => _sortMode;
   List<TagSummary> get tagSummaries => _tagSummaries;
@@ -642,20 +656,31 @@ class AppController extends ChangeNotifier {
     return summaries.where((s) => !s.note.locked).toList();
   }
 
-  Future<void> refreshNotes() async {
+  Future<void> refreshNotes({bool selectFirstNote = false}) async {
+    // v0.17.2（FR-104 / AC-597）：只有最后一次刷新能写回列表与选中。
+    final token = ++_notesRefreshToken;
+    // v0.17.2（FR-102）：笔记本篇数走一次全库聚合，与当前筛选无关。
+    final counts = await _repository.noteCountsByNotebook();
+    if (token != _notesRefreshToken) return;
     // 归档视图 / 回收站：独立数据源，不参与笔记本 / 标签筛选（FR-25 / FR-26）。
     switch (_viewMode) {
       case NoteViewMode.archived:
-        _notes = await _repository.listArchivedNotes(
+        final archived = await _repository.listArchivedNotes(
           search: _query.isEmpty ? null : _query,
         );
+        if (token != _notesRefreshToken) return;
+        _notes = archived;
+        _notebookNoteCounts = counts;
         await _refreshUnsyncedCount();
         notifyListeners();
         return;
       case NoteViewMode.trash:
-        _notes = await _repository.listDeletedNotes(
+        final trash = await _repository.listDeletedNotes(
           search: _query.isEmpty ? null : _query,
         );
+        if (token != _notesRefreshToken) return;
+        _notes = trash;
+        _notebookNoteCounts = counts;
         await _refreshUnsyncedCount();
         notifyListeners();
         return;
@@ -664,20 +689,18 @@ class AppController extends ChangeNotifier {
     }
     // 收件箱模式下不应用标签筛选（收件箱只看剪藏，标签筛选与之冲突）。
     final useTagFilter = !_inboxMode && _selectedTagNames.isNotEmpty;
-    if (useTagFilter) {
-      _notes = await _repository.listNotesByTags(
-        _selectedTagNames,
-        notebookId: _selectedNotebookId,
-        search: _query.isEmpty ? null : _query,
-        includeArchived: false,
-      );
-    } else {
-      _notes = await _repository.listNotes(
-        notebookId: _inboxMode ? null : _selectedNotebookId,
-        search: _query.isEmpty ? null : _query,
-        includeArchived: false,
-      );
-    }
+    var next = useTagFilter
+        ? await _repository.listNotesByTags(
+            _selectedTagNames,
+            notebookId: _selectedNotebookId,
+            search: _query.isEmpty ? null : _query,
+            includeArchived: false,
+          )
+        : await _repository.listNotes(
+            notebookId: _inboxMode ? null : _selectedNotebookId,
+            search: _query.isEmpty ? null : _query,
+            includeArchived: false,
+          );
     // 收件箱模式：只显示来自剪藏的笔记。
     // v0.13.2（BR-05.1 / BR-05.4）：判据以**不可变的剪藏来源标记**为主——
     // source_device 会被本机 push（编辑 / 单项重试 /「全部重新同步」核对补齐）改写为
@@ -685,13 +708,21 @@ class AppController extends ChangeNotifier {
     if (_inboxMode) {
       // M16 / FR-86 / BR-86.2：标签是 `sourceUrl` / `clip:` 之外的兜底判据；
       // 即使来源标记在历史编辑中被改写，带「网页剪藏」标签的笔记仍留在收件箱。
-      _notes = _notes
-          .where((n) =>
-              n.note.isClip || n.tags.contains(kWebClipTagName))
+      next = next
+          .where((n) => n.note.isClip || n.tags.contains(kWebClipTagName))
           .toList();
     }
+    if (token != _notesRefreshToken) return;
+    _notes = next;
+    _notebookNoteCounts = counts;
     _applySort();
     await _refreshUnsyncedCount();
+    if (token != _notesRefreshToken) return;
+    // v0.17.2（FR-104）：点击笔记本后默认打开排序后的第一篇——在**同一次刷新**内选中，
+    // 避免先渲染空编辑区再跳转。
+    if (selectFirstNote && _selectedNoteId == null) {
+      _selectedNoteId = _notes.isEmpty ? null : _notes.first.note.id;
+    }
     notifyListeners();
   }
 
@@ -727,12 +758,24 @@ class AppController extends ChangeNotifier {
     await _persistPref(_kNoteSortMode, mode.persistentName);
   }
 
-  void selectNotebook(String? id) {
+  /// 选中笔记本（`v0.17.2` / FR-104）：默认打开该笔记本列表第一篇。
+  Future<void> selectNotebook(String? id) async {
     _selectedNotebookId = id;
     _inboxMode = false;
     _viewMode = NoteViewMode.all;
     _selectedNoteId = null;
-    refreshNotes();
+    // 列表刷新 + 排序完成后再取第一篇（BR-104.1），空本保持空态（BR-104.3）。
+    await refreshNotes(selectFirstNote: true);
+    // 刷新期间若被别的刷新代次抢走（如保存触发的全量刷新），在此补齐选中，
+    // 仍以**当前**目标笔记本为准，不回退到旧目标（AC-597）。
+    if (_selectedNotebookId == id &&
+        !_inboxMode &&
+        _viewMode == NoteViewMode.all &&
+        _selectedNoteId == null &&
+        _notes.isNotEmpty) {
+      _selectedNoteId = _notes.first.note.id;
+      notifyListeners();
+    }
   }
 
   void selectInbox() {
@@ -876,6 +919,8 @@ class AppController extends ChangeNotifier {
       return;
     }
 
+    final before =
+        _notes.where((s) => s.note.id == id).firstOrNull;
     final note = await _repository.updateNoteContent(
       id,
       title: title,
@@ -887,8 +932,27 @@ class AppController extends ChangeNotifier {
       final summary = await _repository.getNoteSummary(id);
       if (summary != null) _windowNoteSummaries[id] = summary;
     }
-    await refreshNotes();
-    await refreshTagSummaries();
+    // v0.17.2（FR-99 / BR-99.4）：正文 / 标题编辑只替换内存中该篇摘要并重排，
+    // 不再每次都全量重查列表（N+1 标签查询是打字停顿卡顿的主因）。
+    // 搜索 / 标签筛选生效、或该篇当前不在列表时，仍走全量刷新以保持筛选正确。
+    final index = _notes.indexWhere((s) => s.note.id == id);
+    final tagsChanged = tags != null &&
+        before != null &&
+        !setEquals(tags.toSet(), before.tags.toSet());
+    if (index >= 0 && _query.isEmpty && _selectedTagNames.isEmpty) {
+      _notes = <NoteSummary>[
+        for (var i = 0; i < _notes.length; i++)
+          if (i == index)
+            NoteSummary(note: note, tags: tags ?? _notes[i].tags)
+          else
+            _notes[i],
+      ];
+      _applySort();
+      notifyListeners();
+    } else {
+      await refreshNotes();
+    }
+    if (tagsChanged) await refreshTagSummaries();
     await _enqueueAndSchedule(note);
   }
 

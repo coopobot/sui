@@ -175,6 +175,27 @@ void main() {
     });
   });
 
+  group('笔记本篇数聚合（v0.17.2 / FR-102）', () {
+    test('按笔记本计数，排除归档 / 墓碑 / 未归类', () async {
+      final a = await repo.createNotebook(name: 'A');
+      final b = await repo.createNotebook(name: 'B');
+      await repo.createNote(notebookId: a.id, title: 'a1');
+      await repo.createNote(notebookId: a.id, title: 'a2');
+      await repo.createNote(notebookId: b.id, title: 'b1');
+      await repo.createNote(notebookId: a.id, title: '已归档', archived: true);
+      final deleted =
+          await repo.createNote(notebookId: a.id, title: '已删除');
+      await repo.markNoteDeleted(deleted.id);
+      // 未归类（收件箱）不在任何笔记本节点上显示数量。
+      await repo.createNote(title: '收件箱');
+
+      final counts = await repo.noteCountsByNotebook();
+      expect(counts[a.id], 2);
+      expect(counts[b.id], 1);
+      expect(counts.containsKey(a.id), isTrue);
+    });
+  });
+
   group('搜索', () {
     test('关键字命中标题与正文', () async {
       await repo.createNote(title: '登山计划', contentMarkdown: '记得带水');

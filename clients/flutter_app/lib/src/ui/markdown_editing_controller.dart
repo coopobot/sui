@@ -100,6 +100,11 @@ class MarkdownEditingController extends TextEditingController {
   /// （左 / 上 → 跳到表格前，右 / 下 → 跳到表格后）。
   int? _lastCollapsedOffset;
 
+  /// 全文扫描缓存（FR-99 / BR-99.3）：键 = **当前正本字符串**。
+  ///
+  /// 文本一变即整体失效；懒加载，未用到的扫描器不付成本。
+  _DocScan? _scan;
+
   /// 是否以富样式呈现（true=格式模式，false=源码模式）。
   ///
   /// 刻意做成**普通字段而非通知型状态**：该值由 [MarkdownEditor] 在每次构建时
@@ -222,7 +227,7 @@ class MarkdownEditingController extends TextEditingController {
   /// 即表格块区间外的那个行尾换行**之后**），而**不是**表格末行末尾（`table.end`）——后者光标
   /// 会滞留在表格最后一行，无法在表格下方正常落点、输入或回车换行。表格位于文末且其后无
   /// 换行（`table.end == text.length`）时无行可退，保持 `table.end`。
-  static int _snapOffsetAroundTables(String text, int offset, int? prev) {
+  int _snapOffsetAroundTables(String text, int offset, int? prev) {
     // 跨行**原子块**：表格 + 快照 HTML 块（FR-69 / §16.3 同口径——光标不得停在块内部，
     // 否则方向键会「看不见地」移动、删除键会逐字符咬坏块结构）。
     final tables = <_SpanRegion>[
@@ -257,7 +262,7 @@ class MarkdownEditingController extends TextEditingController {
   /// 记号在格式模式下**不可见**（零宽透明），故光标不得停在记号内部——否则方向键会「看不见地」
   /// 移动、删除键会逐字符破坏记号（BR-23.8①）。方向口径同表格吸附：右 / 下移 → 记号的**末尾**
   /// （落到内容侧）、左 / 上移 → 记号的**起点**；无方向信息时就近吸附。
-  static int _snapOffsetOutOfMarkers(String text, int offset, int? prev) {
+  int _snapOffsetOutOfMarkers(String text, int offset, int? prev) {
     for (final m in _markers(text)) {
       if (offset <= m.start || offset >= m.end) continue;
       if (prev != null) return offset >= prev ? m.end : m.start;
@@ -279,7 +284,7 @@ class MarkdownEditingController extends TextEditingController {
   ///   `b.closeLineStart == 0` 时保持原位。
   ///
   /// 只在 `set value` 的「折叠光标 + 格式模式 + 文本未变」守卫内调用，不影响输入 / 程序化写入。
-  static int _snapOffsetOutOfFences(String text, int offset, int? prev) {
+  int _snapOffsetOutOfFences(String text, int offset, int? prev) {
     for (final b in _fences(text)) {
       if (offset >= b.start && offset <= b.openLineEnd + 1) {
         if (prev != null && offset >= prev) return b.contentStart;
@@ -300,8 +305,8 @@ class MarkdownEditingController extends TextEditingController {
   /// 链接单元是**原子呈现单元**（FR-76 / BR-76.1）：整段 `[文字](网址)` 由 widget 承载，
   /// 光标落在其内部「看不见」（标签文字由 widget 绘制，而非文本模型），故一律吸附到区间边界。
   /// 方向口径同记号吸附：右 / 下移 → 区间**末尾**；左 / 上移 → 区间**起点**；无方向时就近吸附。
-  static int _snapOffsetOutOfLinks(String text, int offset, int? prev) {
-    for (final l in EditorFormat.links(text)) {
+  int _snapOffsetOutOfLinks(String text, int offset, int? prev) {
+    for (final l in _doc(text).links) {
       if (offset <= l.start || offset >= l.end) continue;
       if (prev != null) return offset >= prev ? l.end : l.start;
       return (offset - l.start) <= (l.end - offset) ? l.start : l.end;
@@ -309,41 +314,42 @@ class MarkdownEditingController extends TextEditingController {
     return offset;
   }
 
-  /// 记号扫描的**单条缓存**（`text` → markers）。
+  /// 取（或建立）当前文本的全文扫描缓存。
   ///
-  /// [EditorFormat.syntaxMarkers] 较重（逐行扫描 + 行内递归），而一次 build 里样式层 / 记号区间 /
-  /// 光标吸附会反复取用**同一份**结果；按文本做一条缓存即可（文本一变小缓存自然失效）。
-  static String? _markerCacheText;
-  static List<SyntaxMarker>? _markerCacheMarkers;
-
-  static List<SyntaxMarker> _markers(String text) {
-    if (_markerCacheText == text && _markerCacheMarkers != null) {
-      return _markerCacheMarkers!;
-    }
-    final markers = EditorFormat.syntaxMarkers(text);
-    _markerCacheText = text;
-    _markerCacheMarkers = markers;
-    return markers;
+  /// [EditorFormat.syntaxMarkers] 较重（逐行扫描 + 行内递归），而一次 build 里样式层 /
+  /// 记号区间 / 光标吸附 / 底色带会反复取用**同一份**结果；按正本字符串做一条缓存即可
+  /// （文本一变小缓存自然失效，绝不把旧偏移用于新文本，BR-99.3 / BR-27.1）。
+  _DocScan _doc(String text) {
+    final cached = _scan;
+    if (cached != null && cached.text == text) return cached;
+    final next = _DocScan(text);
+    _scan = next;
+    return next;
   }
 
-  /// 围栏块扫描的**单条缓存**（`text` → blocks），同 [_markers]。
-  static String? _fenceCacheText;
-  static List<FenceBlock>? _fenceCacheBlocks;
+  List<SyntaxMarker> _markers(String text) => _doc(text).markers;
 
-  static List<FenceBlock> _fences(String text) {
-    if (_fenceCacheText == text && _fenceCacheBlocks != null) {
-      return _fenceCacheBlocks!;
-    }
-    final blocks = EditorFormat.fenceBlocks(text);
-    _fenceCacheText = text;
-    _fenceCacheBlocks = blocks;
-    return blocks;
-  }
+  List<FenceBlock> _fences(String text) => _doc(text).fences;
+
+  /// 正文中全部图片引用（FR-27 / FR-99）——供光标处的图片尺寸条复用，避免二次全扫。
+  List<ParsedImage> imagesFor(String text) => _doc(text).images;
+
+  /// 正文中全部 Markdown 链接（FR-76 / FR-99）——供光标处链接条复用。
+  List<MarkdownLink> linksFor(String text) => _doc(text).links;
+
+  /// 正文中全部围栏代码块（FR-81a / FR-99）——供 `CodeBlockBandPainter` 复用。
+  List<FenceBlock> fencesFor(String text) => _doc(text).fences;
+
+  /// **测试接缝**（AC-577）：各扫描器「真正执行」的次数快照（跳过 / 缓存命中不计）。
+  static Map<String, int> get debugScanStats => _DocScan.debugScanStats;
+
+  /// **测试接缝**：复位扫描计数。
+  static void debugResetScanCounters() => _DocScan.debugResetScanCounters();
 
   /// 底色带生效时，围栏块**内容行**的行首集合（供样式层改用无 `backgroundColor` 的 `codeNoBg`）。
   ///
   /// 区间取 `[contentStart, contentEnd)`：**开 / 闭围栏行不在内**（它们整行不可见，由记号区间承担）。
-  static Set<int> _bandedCodeLineStarts(String text) {
+  Set<int> _bandedCodeLineStarts(String text) {
     final out = <int>{};
     for (final b in _fences(text)) {
       var ls = b.contentStart;
@@ -463,6 +469,8 @@ class MarkdownEditingController extends TextEditingController {
       value.selection,
       markers: _markers(text),
       codeBandActive: paragraphWidth > 0,
+      bandedCodeLineStarts:
+          paragraphWidth > 0 ? _bandedCodeLineStarts(text) : const <int>{},
       findMatches: findMatches,
       activeFindIndex: activeFindIndex,
     );
@@ -476,10 +484,7 @@ class MarkdownEditingController extends TextEditingController {
     // 编号），按起点排序后逐段替换。
     final regions = <_SpanRegion>[];
     if (imageBuilder != null) {
-      var from = 0;
-      while (true) {
-        final image = EditorFormat.findImage(text, from);
-        if (image == null) break;
+      for (final image in _doc(text).images) {
         final spanEnd = image.attributeEnd > 0 ? image.attributeEnd : image.end;
         regions.add(
           _SpanRegion(
@@ -490,7 +495,6 @@ class MarkdownEditingController extends TextEditingController {
             block: _isStandaloneBlock(text, image.start, spanEnd),
           ),
         );
-        from = spanEnd;
       }
     }
     // 记号呈现（§13.2 / BR-23.7）：行级前缀（标题 / 无序 / 有序 / 任务 / 引用 / 围栏 / 分割线）
@@ -761,7 +765,7 @@ class MarkdownEditingController extends TextEditingController {
   /// 记号 = 被 Markdown 解析为**语法**的字符；扫描由 [EditorFormat.syntaxMarkers] 统一承担
   /// （与预览同源判定：围栏内部 / 良构表格内部不扫描，缩进越界的行不建立行级前缀记号）。
   /// 结果走单条缓存（见 [_markers]），避免一次 build 里重复扫描。
-  static List<_SpanRegion> _markerRegions(String text) => _markers(text)
+  List<_SpanRegion> _markerRegions(String text) => _markers(text)
       .map((m) => _SpanRegion(m.start, m.end, _RegionKind.marker, marker: m))
       .toList();
 
@@ -770,7 +774,7 @@ class MarkdownEditingController extends TextEditingController {
   /// 与附件链接（`sui://<sha256>`）同构：链接单元是**原子呈现单元**（FR-76 / BR-76.1），
   /// 故区间覆盖「`[` + 文字 + `](` + 网址 + `)`」全部字符。`sui://<sha256>` 附件引用由
   /// [EditorFormat.links] 自身排除（它另有附件单元）。仅在注入了 [formatLinkBuilder] 时建立区间。
-  static List<_SpanRegion> _linkRegions(String text) => EditorFormat.links(text)
+  List<_SpanRegion> _linkRegions(String text) => _doc(text).links
       .map((l) => _SpanRegion(l.start, l.end, _RegionKind.link, markdownLink: l))
       .toList();
 
@@ -781,7 +785,7 @@ class MarkdownEditingController extends TextEditingController {
   /// 字符必须改用零宽替身补回（否则偏移契约破坏，BR-27.1）；而内容行的行首是**可见代码字符**，
   /// 一旦被占位就只能零宽呈现 → **代码字符消失**。故垫底 widget **只能锚在本来就不显示的字符上**：
   /// 开围栏行的首个 `` ` ``。宽度未知（[paragraphWidth] == 0）时**不建立**该区间。
-  static List<_SpanRegion> _codeBlockBandRegions(String text) => _fences(text)
+  List<_SpanRegion> _codeBlockBandRegions(String text) => _fences(text)
       .map((b) => _SpanRegion(b.start, b.openLineEnd, _RegionKind.codeBlockBand,
           fence: b))
       .toList();
@@ -791,9 +795,9 @@ class MarkdownEditingController extends TextEditingController {
   /// 图片引用 `![alt](sui://<sha256>)` 由 [formatImageBuilder] 另行呈现，此处仅取
   /// 链接型（`isImage == false`）。残缺引用（缺 `)`）同样按整块识别，交由 UI 层
   /// 自愈（FR-46 / §12.4）。
-  static List<_SpanRegion> _attachmentLinkRegions(String text) {
+  List<_SpanRegion> _attachmentLinkRegions(String text) {
     final regions = <_SpanRegion>[];
-    for (final ref in EditorFormat.attachmentRefs(text)) {
+    for (final ref in _doc(text).attachments) {
       if (ref.isImage) continue;
       regions.add(_SpanRegion(
         ref.start,
@@ -809,8 +813,8 @@ class MarkdownEditingController extends TextEditingController {
   ///
   /// 与表格同为**跨行原子单元**：整块折叠为一个 widget，「其余码元以零宽文本补齐」
   /// 的偏移契约由 [_regionSpans] 统一维护（BR-27.1 / BR-69.3）。
-  static List<_SpanRegion> _htmlBlockRegions(String text) {
-    return htmlBlocks(text)
+  List<_SpanRegion> _htmlBlockRegions(String text) {
+    return _doc(text).htmlBlocksList
         .where((b) => !b.isEmpty)
         .map((b) => _SpanRegion(
               b.start,
@@ -822,8 +826,8 @@ class MarkdownEditingController extends TextEditingController {
   }
 
   /// 扫描全部**网页原件**引用（M16 / FR-83），整行作为一个原子区间。
-  static List<_SpanRegion> _webClipRegions(String text) {
-    return EditorFormat.webClipRefs(text)
+  List<_SpanRegion> _webClipRegions(String text) {
+    return _doc(text).webClips
         .map((r) => _SpanRegion(
               r.start,
               r.end,
@@ -838,35 +842,159 @@ class MarkdownEditingController extends TextEditingController {
   /// 仅当 [EditorFormat.parseTable] 解析成功且 `wellFormed == true` 时建立区间；
   /// 残缺 / 非法表（列数不齐、缺分隔行等）**不建区间**，按普通块级文本原样透传
   /// （BR-44.5）。表格为独占块，区间覆盖「表头行 + 分隔行 + 数据行」全部字符。
-  static List<_SpanRegion> _tableRegions(String text) {
-    final regions = <_SpanRegion>[];
+  List<_SpanRegion> _tableRegions(String text) => _doc(text).tables
+      .map((t) => _SpanRegion(t.start, t.end, _RegionKind.table, table: t))
+      .toList();
+
+}
+
+/// 一篇正本的**全文扫描缓存**（FR-99 / BR-99.3）。
+///
+/// 键 = [text]；懒加载，文本一变由控制器换成新实例。扫描器仍全部委托 [EditorFormat]，
+/// 本类只负责「同一文本只算一次」与「无触发字符直接跳过」；不改变任何判定语义。
+class _DocScan {
+  _DocScan(this.text);
+
+  // ---- 测试接缝（FR-99 / AC-577）：记录「真正执行扫描」的次数，跳过不算 ----
+  static int debugMarkerScans = 0;
+  static int debugFenceScans = 0;
+  static int debugImageScans = 0;
+  static int debugLinkScans = 0;
+  static int debugAttachmentScans = 0;
+  static int debugHtmlScans = 0;
+  static int debugWebClipScans = 0;
+  static int debugTableScans = 0;
+
+  /// 复位扫描计数（仅测试使用）。
+  static void debugResetScanCounters() {
+    debugMarkerScans = 0;
+    debugFenceScans = 0;
+    debugImageScans = 0;
+    debugLinkScans = 0;
+    debugAttachmentScans = 0;
+    debugHtmlScans = 0;
+    debugWebClipScans = 0;
+    debugTableScans = 0;
+  }
+
+  /// 各扫描器当前计数（读取字段，供测试断言）。
+  static Map<String, int> get debugScanStats => <String, int>{
+        'markers': debugMarkerScans,
+        'fences': debugFenceScans,
+        'images': debugImageScans,
+        'links': debugLinkScans,
+        'attachments': debugAttachmentScans,
+        'html': debugHtmlScans,
+        'webClips': debugWebClipScans,
+        'tables': debugTableScans,
+      };
+
+  final String text;
+
+  List<SyntaxMarker>? _markers;
+  List<FenceBlock>? _fences;
+  List<ParsedImage>? _images;
+  List<MarkdownLink>? _links;
+  List<AttachmentRef>? _attachments;
+  List<HtmlBlock>? _htmlBlockList;
+  List<WebClipRef>? _webClips;
+  List<ParsedTable>? _tables;
+
+  List<SyntaxMarker> get markers {
+    final cached = _markers;
+    if (cached != null) return cached;
+    debugMarkerScans++;
+    return _markers = EditorFormat.syntaxMarkers(text);
+  }
+
+  List<FenceBlock> get fences {
+    final cached = _fences;
+    if (cached != null) return cached;
+    if (!text.contains('```') && !text.contains('~~~')) {
+      return _fences = const <FenceBlock>[];
+    }
+    debugFenceScans++;
+    return _fences = EditorFormat.fenceBlocks(text);
+  }
+
+  List<ParsedImage> get images {
+    final cached = _images;
+    if (cached != null) return cached;
+    if (!text.contains('![')) return _images = const <ParsedImage>[];
+    debugImageScans++;
+    final out = <ParsedImage>[];
+    var from = 0;
+    while (from < text.length) {
+      final image = EditorFormat.findImage(text, from);
+      if (image == null) break;
+      out.add(image);
+      final spanEnd = image.attributeEnd > 0 ? image.attributeEnd : image.end;
+      final next = spanEnd > from ? spanEnd : image.end;
+      if (next <= image.start) break; // 防御：解析未推进时不空转。
+      from = next;
+    }
+    return _images = out;
+  }
+
+  List<MarkdownLink> get links {
+    final cached = _links;
+    if (cached != null) return cached;
+    if (!text.contains('](')) return _links = const <MarkdownLink>[];
+    debugLinkScans++;
+    return _links = EditorFormat.links(text);
+  }
+
+  List<AttachmentRef> get attachments {
+    final cached = _attachments;
+    if (cached != null) return cached;
+    if (!text.contains('sui://')) {
+      return _attachments = const <AttachmentRef>[];
+    }
+    debugAttachmentScans++;
+    return _attachments = EditorFormat.attachmentRefs(text);
+  }
+
+  /// HTML 块（FR-69）：类内不能与顶层 `htmlBlocks(text)` 同名，故用 `_htmlBlockList`。
+  List<HtmlBlock> get htmlBlocksList {
+    final cached = _htmlBlockList;
+    if (cached != null) return cached;
+    if (!text.contains('<')) return _htmlBlockList = const <HtmlBlock>[];
+    debugHtmlScans++;
+    return _htmlBlockList = htmlBlocks(text);
+  }
+
+  List<WebClipRef> get webClips {
+    final cached = _webClips;
+    if (cached != null) return cached;
+    if (!text.contains(EditorFormat.kWebClipPrefix)) {
+      return _webClips = const <WebClipRef>[];
+    }
+    debugWebClipScans++;
+    return _webClips = EditorFormat.webClipRefs(text);
+  }
+
+  /// 良构 GFM 管道表（FR-44）：无 `|` 时直接空表，避免逐行 `parseTable`。
+  List<ParsedTable> get tables {
+    final cached = _tables;
+    if (cached != null) return cached;
+    if (!text.contains('|')) return _tables = const <ParsedTable>[];
+    debugTableScans++;
+    final out = <ParsedTable>[];
     var from = 0;
     while (from < text.length) {
       final table = EditorFormat.parseTable(text, from);
       if (table == null) {
-        // 当前位置不是表格，跳到下一行继续找（而不是直接 break），
-        // 否则表格前面有文字时整段扫描都会提前终止。
         final nl = text.indexOf('\n', from);
         if (nl == -1) break;
         from = nl + 1;
         continue;
       }
-      if (table.wellFormed) {
-        regions.add(_SpanRegion(
-          table.start,
-          table.end,
-          _RegionKind.table,
-          table: table,
-        ));
-      }
-      // table.end 恒为「末行行尾换行符」下标或文本末尾：跳到下一行继续扫描，
-      // 避免在同一表格块上重复命中（防御：解析未推进时直接结束）。
+      if (table.wellFormed) out.add(table);
       if (table.end >= text.length) break;
       from = table.end + 1;
     }
-    return regions;
+    return _tables = out;
   }
-
 }
 
 /// 呈现单元类型。
@@ -968,6 +1096,7 @@ class _MarkdownStyler {
     TextSelection selection, {
     List<SyntaxMarker> markers = const <SyntaxMarker>[],
     bool codeBandActive = false,
+    Set<int> bandedCodeLineStarts = const <int>{},
     List<FindMatch> findMatches = const <FindMatch>[],
     int activeFindIndex = -1,
   }) {
@@ -996,9 +1125,7 @@ class _MarkdownStyler {
       color: scheme.onSurfaceVariant,
       fontStyle: FontStyle.italic,
     );
-    final faint = base.copyWith(
-      color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
-    );
+
     // 高亮：等价 `<mark>`（§10.2），与删除线 `~~` 是不同字符，互不混淆。
     // M14（FR-68 / AC-307）：底色改**黄色系**（亮 #FFF3A3 / 暗 #4E4400），与预览态同源；
     // 文字仍取正文前景色（不再是 `onTertiaryContainer` 的深青）。
@@ -1015,9 +1142,7 @@ class _MarkdownStyler {
     final setextHeadings = _setextHeadingLines(text);
 
     // 底色带生效时，围栏块**内容行**的行首集合（这些行不再逐字形染色）。
-    final bandedCodeLines = codeBandActive
-        ? MarkdownEditingController._bandedCodeLineStarts(text)
-        : const <int>{};
+    final bandedCodeLines = bandedCodeLineStarts;
 
     // 逐行扫描；围栏代码块内不做块级 / 行内解析。
     // 行尾 `\r`（CRLF 正本）在**匹配前**剥除（FR-77 / BR-77.2）：`\r` 是行尾最后一个码元，
@@ -1053,7 +1178,6 @@ class _MarkdownStyler {
           lineMarker,
           accent,
           quote,
-          faint,
           setext: setextHeadings.contains(lineStart),
           listOk: EditorFormat.isListLineAt(text, lineStart),
         );
@@ -1151,8 +1275,7 @@ class _MarkdownStyler {
     TextStyle base,
     TextStyle marker,
     TextStyle accent,
-    TextStyle quote,
-    TextStyle faint, {
+    TextStyle quote, {
     bool setext = false,
     bool listOk = true,
   }) {
@@ -1193,17 +1316,9 @@ class _MarkdownStyler {
     if (!listOk) return;
 
     // 任务项需先于普通列表判定（`- [ ]` 也符合无序列表前缀）。
-    final t = _taskLinePattern.firstMatch(line);
-    if (t != null) {
-      final prefixLen = t.group(1)!.length;
-      final checked = t.group(2)!.toLowerCase() == 'x';
-      final boxEnd = (start + prefixLen + 3).clamp(0, end);
-      if (checked) {
-        // 勾选态：任务文本**仅视觉淡化 / 加灰**，不加删除线（BR-31.6）。
-        _fill(styles, boxEnd, end, faint);
-      }
-      return;
-    }
+    // v0.17.2（FR-100 / BR-100.1）：勾选**不染文字**——完成态只由复选框表达，
+    // 任务文本沿用正文基础样式（不淡化 / 不加灰 / 不加删除线）。
+    if (_taskLinePattern.hasMatch(line)) return;
 
     final b = _bulletLine.firstMatch(line);
     if (b != null) {

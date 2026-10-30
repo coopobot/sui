@@ -213,5 +213,11 @@ ThemeData buildSuiTheme({
       selectedColor: scheme.primary,
     ),
     dividerTheme: theme.dividerTheme.copyWith(color: palette.divider),
+    // v0.17.2（FR-105 / BR-105.1）：滚动内容经过顶栏时，Material 3 会把 `surfaceTintColor`
+    // （主色，浅绿）叠到 AppBar 上。取消滚动抬升 + 透明 tint → 顶栏底色恒为 palette.surface。
+    appBarTheme: theme.appBarTheme.copyWith(
+      scrolledUnderElevation: 0,
+      surfaceTintColor: Colors.transparent,
+    ),
   );
 }

@@ -36,6 +36,15 @@ class ImeCaretAnchor {
 
   static bool _started = false;
 
+  /// 上一次回填的输入框身份 / 值 / 矩形（FR-99 / BR-99.5）：全部相同则跳过通道调用。
+  ///
+  /// 只节流**重复**消息，不改变 ADR-035 的「晚于框架、贴光标」时序与字段。
+  static EditableTextState? _lastEditable;
+  static TextSelection? _lastSelection;
+  static TextRange? _lastComposing;
+  static int? _lastTextLength;
+  static Rect? _lastRect;
+
   /// 本平台是否需要该补丁（仅 Windows 桌面）。
   static bool get supported =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
@@ -51,6 +60,11 @@ class ImeCaretAnchor {
   @visibleForTesting
   static void debugReset() {
     _started = false;
+    _lastEditable = null;
+    _lastSelection = null;
+    _lastComposing = null;
+    _lastTextLength = null;
+    _lastRect = null;
   }
 
   /// 仅供测试：立刻回填一次（不依赖帧与定时器）。
@@ -80,6 +94,21 @@ class ImeCaretAnchor {
     final Rect rect = renderEditable.getLocalRectForCaret(
       TextPosition(offset: selection.extentOffset),
     );
+    // v0.17.2（FR-99 / BR-99.5）：输入框 / 选区 / 组合区 / 文本长度 / 矩形都没变时
+    // 不再每帧发通道消息（空闲 60 次/秒的调用是长会话卡顿的来源之一）。
+    final value = editable.textEditingValue;
+    if (identical(_lastEditable, editable) &&
+        _lastSelection == selection &&
+        _lastComposing == value.composing &&
+        _lastTextLength == value.text.length &&
+        _lastRect == rect) {
+      return false;
+    }
+    _lastEditable = editable;
+    _lastSelection = selection;
+    _lastComposing = value.composing;
+    _lastTextLength = value.text.length;
+    _lastRect = rect;
     // 与框架 `TextInputConnection.setComposingRect` **完全相同的通道、方法与字段**
     // （本地坐标；引擎用 `setEditableSizeAndTransform` 自行换算到视图坐标），
     // 因此不需要任何平台侧代码，也不会与引擎的坐标系产生分歧。

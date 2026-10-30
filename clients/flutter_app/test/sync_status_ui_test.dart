@@ -234,7 +234,7 @@ void main() {
       controller,
       () => Column(
         children: [
-          SizedBox(height: 400, child: NotebookTree(controller: controller)),
+          SizedBox(height: 560, child: NotebookTree(controller: controller)),
           Expanded(child: NoteList(controller: controller)),
         ],
       ),
