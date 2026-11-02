@@ -7,6 +7,22 @@
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-11-02
+
+### 修复
+
+- **格式模式按勾选框快捷键后光标消失、打不进字**：正文变化触发语义树重建时，Windows 平台会派发
+  `didLoseAccessibilityFocus`，而 Flutter 桌面端的 `TextField` 把该事件接到 `focusNode.unfocus()`，
+  误摘了正文的键盘焦点（Windows 上 UIA 辅助功能焦点与键盘焦点彼此独立）。现在正文改用专用焦点节点
+  `EditorFocusNode`，仅在桌面端「辅助功能焦点丢失」派发期间**否决**这次取消聚焦；其余取消聚焦
+  （点空白、切换控件、打开弹框、窗口失活）行为不变。否决方案不产生焦点真空、不重连输入连接、
+  不清空输入法组合态。零服务端改动、零协议字段、零 drift 迁移、零新增依赖。
+
+### 测试
+
+- `flutter_app` 新增 `editor_a11y_focus_test.dart`：经 `PlatformDispatcher.onSemanticsActionEvent`
+  派发 `didLoseAccessibilityFocus`，断言焦点未失且可连续键入、普通取消聚焦不受影响；改动前必红。
+
 ## [0.17.2] - 2026-10-30
 
 ### 修复

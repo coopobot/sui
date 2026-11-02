@@ -16,6 +16,7 @@ import 'web_clip_view.dart';
 import 'app_controller.dart';
 import 'appearance/app_palette.dart';
 import 'desktop_commands.dart';
+import 'editor_focus_node.dart';
 import 'format_table.dart';
 import 'markdown_editing_controller.dart';
 import 'markdown_editor.dart';
@@ -88,7 +89,7 @@ class _NoteEditorState extends State<NoteEditor>
   final UndoHistoryController _undoHistory = UndoHistoryController();
 
   /// 正文焦点节点：工具栏执行指令后据此把焦点交还正文，便于连贯排版。
-  final FocusNode _contentFocus = FocusNode();
+  final EditorFocusNode _contentFocus = EditorFocusNode();
 
   /// 当前**活动单元格**（由 [FormatTableView.onActiveCellChanged] 回传）：正文工具栏的
   /// 「链接」（含 `Ctrl+K`）在单元格获焦时据此写入**该单元格**（§14.1 / BR-44.12）。
@@ -201,6 +202,8 @@ class _NoteEditorState extends State<NoteEditor>
     // 格式模式：把任务项 `- [ ]` / `- [x]` 的勾选框渲染为可点选复选框（§10.1）。
     _content.formatTaskCheckboxBuilder = _buildTaskCheckbox;
     _content.onToggleTask = _toggleTask;
+    // 桌面端：正文被「辅助功能焦点丢失」误摘键盘焦点时，由该节点否决掉这次 unfocus。
+    A11yFocusGate.install();
     // 格式模式：把附件链接引用 `[name](sui://<sha256>)` 渲染为原子呈现单元（FR-46）。
     _content.formatAttachmentLinkBuilder = _buildAttachmentLink;
     _content.formatHtmlBlockBuilder = _buildHtmlBlock;
