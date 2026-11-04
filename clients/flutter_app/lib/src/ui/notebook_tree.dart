@@ -332,6 +332,12 @@ class _NotebookNode extends StatelessWidget {
   final Set<String>? visibleIds;
   final bool forceExpanded;
 
+  /// 节点前置区（箭头 / 等宽占位 + 图标）的**恒定**宽度（M18 / FR-109 / BR-109.1）。
+  ///
+  /// 有子节点时放折叠箭头、无子节点时放等宽 `SizedBox` 占位；宽度**不随有无子节点变化**。
+  /// 旧实现按 `hasChildren ? 56 : 40` 取宽，导致父节点名称比叶节点右移 16px、同级不对齐。
+  static const double leadingWidth = 56;
+
   @override
   Widget build(BuildContext context) {
     final allChildren = controller.notebooks
@@ -360,8 +366,9 @@ class _NotebookNode extends StatelessWidget {
             dense: true,
             // M10-T29（FR-51）：加密笔记本用锁图标区分（未解锁时上锁，已解锁时开锁）。
             // M16 / FR-85：有子节点时在图标左侧加 chevron，点击只切换折叠、不选中。
+            // M18 / FR-109：前置区定宽——有 / 无子节点的名称左边界必须一致。
             leading: SizedBox(
-              width: hasChildren ? 56 : 40,
+              width: leadingWidth,
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [

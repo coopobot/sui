@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -9,6 +10,7 @@ import 'package:provider/provider.dart';
 
 import '../platform/attachment_picker.dart';
 import '../platform/clipboard_html.dart';
+import '../platform/desktop_platform.dart';
 import '../platform/url_opener.dart';
 import 'snapshot_html_view.dart';
 import 'web_clip_unit.dart';
@@ -16,6 +18,7 @@ import 'web_clip_view.dart';
 import 'app_controller.dart';
 import 'appearance/app_palette.dart';
 import 'desktop_commands.dart';
+import 'editor_context_menu.dart';
 import 'editor_focus_node.dart';
 import 'format_table.dart';
 import 'markdown_editing_controller.dart';
@@ -122,6 +125,22 @@ class _NoteEditorState extends State<NoteEditor>
   /// 与 [_attaching] 同生共死；面板是独立路由，靠 [_notifyAttaching] 的 `onChanged`
   /// 回调把变化推给 `setDialogState`。
   final List<String> _attachPending = <String>[];
+
+  // ---------------------------------------------------------------------------
+  // 正文右键菜单与列表 Tab 缩进（M18 / FR-107 / FR-108）
+  // ---------------------------------------------------------------------------
+
+  /// 正文右键菜单是否已打开。
+  ///
+  /// `contextMenuBuilder` 在工具栏重建（选区 / 剪贴板状态变化）时会被重复调用，
+  /// 不加互斥就会在同一时刻叠出多张菜单（ADR-038 决策 1）。
+  bool _contextMenuOpen = false;
+
+  /// 最近一次鼠标右键按下的**全局**坐标（[Listener] 记录）。
+  ///
+  /// 右键菜单在指针处弹出（BR-107.3）；未记录到（触屏长按 / 程序化 `showToolbar`）时
+  /// 回退到 `EditableTextState.contextMenuAnchors.primaryAnchor`。
+  Offset? _secondaryTapPosition;
 
   // ---------------------------------------------------------------------------
   // 笔记内查找与替换（M15 / FR-73 / BR-73.1\~73.4）
@@ -1344,6 +1363,10 @@ class _NoteEditorState extends State<NoteEditor>
 
   /// 把编辑区包进 [Shortcuts] / [Actions]：**格式层只挂格式模式，查找层两态都挂**
   /// （M15 / FR-73 / BR-30.5）。预览模式不套（只读渲染，没有可编辑正文）。
+  ///
+  /// M18（FR-107）：外层再套 [Listener] 记录鼠标右键的指针坐标，供正文右键菜单在
+  /// **指针处**弹出（BR-107.3）。用 [Listener] 而非 `GestureDetector`：后者与
+  /// `EditableText` 的选择手势同处竞技场，可能拿不到事件（ADR-038 决策 1）。
   Widget _wrapShortcuts(Widget child) {
     if (_mode == EditorMode.preview) return child;
     final formatted = _mode == EditorMode.formatted;
@@ -1355,10 +1378,115 @@ class _NoteEditorState extends State<NoteEditor>
       if (formatted) ..._formatActions() else ..._sourceActions(),
       ..._findActions(),
     };
-    return Shortcuts(
-      shortcuts: shortcuts,
-      child: Actions(actions: actions, child: child),
+    return Listener(
+      onPointerDown: _recordSecondaryTapDown,
+      child: Shortcuts(
+        shortcuts: shortcuts,
+        child: Actions(actions: actions, child: child),
+      ),
     );
+  }
+
+  /// 记录鼠标右键按下的全局坐标（M18 / FR-107 / BR-107.3）。
+  void _recordSecondaryTapDown(PointerDownEvent event) {
+    if (event.kind != PointerDeviceKind.mouse) return;
+    if (event.buttons & kSecondaryMouseButton == 0) return;
+    _secondaryTapPosition = event.position;
+  }
+
+  /// 列表行的 `Tab` / `Shift+Tab` 缩进（M18 / FR-108 / BR-108.1\~108.5）。
+  ///
+  /// 语义全在 [EditorFormat.tabListIndent]（与工具栏「缩进 / 反缩进」同一套合法层级
+  /// 判定）：返回 null = 不适用 → 本方法返回 false，按键继续冒泡到默认焦点移动；
+  /// 文本未变（已到上限 / 顶层反缩进）也返回 true：消费按键，避免焦点被 `Tab` 跳走。
+  bool _handleListTab({required bool outdent}) {
+    if (_mode != EditorMode.formatted) return false;
+    final value = _content.value;
+    final sel = value.selection;
+    if (!sel.isValid) return false;
+    final result = EditorFormat.tabListIndent(
+      value.text,
+      sel.start,
+      sel.end,
+      outdent: outdent,
+    );
+    if (result == null) return false;
+    if (result.text != value.text) _writeBack(result);
+    return true;
+  }
+
+  /// 正文右键菜单（M18 / FR-107 / BR-107.1\~107.4）：桌面接管 `contextMenuBuilder`。
+  ///
+  /// 框架默认实现（桌面 = 系统原生菜单）只有剪切 / 复制 / 粘贴 / 全选，无法承载
+  /// 「添加关联笔记 / 插入附件」等项，故桌面改为应用内菜单（ADR-038 决策 1）：
+  /// 先 `hideToolbar()` 丢掉框架菜单，再在**指针处**用 `showMenu` 弹出；
+  /// 移动端 / Web 原样返回框架默认工具栏（BR-107.4）。
+  Widget _buildEditorContextMenu(BuildContext context, EditableTextState state) {
+    if (!isDesktopPlatform) {
+      return AdaptiveTextSelectionToolbar.editableText(editableTextState: state);
+    }
+    if (_contextMenuOpen) return const SizedBox.shrink();
+    _contextMenuOpen = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        if (!mounted) return;
+        // 丢掉框架 / 系统原生菜单，只保留应用内菜单。
+        state.hideToolbar();
+        // 指针坐标取用后清空：下一次若不是鼠标右键（触屏长按 / 程序化 showToolbar），
+        // 回退到光标锚点，而不是复用上一次的旧坐标。
+        final anchor =
+            _secondaryTapPosition ?? state.contextMenuAnchors.primaryAnchor;
+        _secondaryTapPosition = null;
+        final action = await showEditorContextMenu(
+          context: context,
+          globalAnchor: anchor,
+          formatted: _mode == EditorMode.formatted,
+          canCut: state.cutEnabled,
+          canCopy: state.copyEnabled,
+          canPaste: state.pasteEnabled,
+          canSelectAll: state.selectAllEnabled,
+          attaching: _attaching,
+        );
+        if (action == null || !mounted) return;
+        await _onEditorContextAction(action);
+      } finally {
+        _contextMenuOpen = false;
+      }
+    });
+    return const SizedBox.shrink();
+  }
+
+  /// 右键菜单动作落地：**每一项都转调既有入口**（BR-107.2），不新增第二套实现。
+  Future<void> _onEditorContextAction(EditorContextAction action) async {
+    switch (action) {
+      case EditorContextAction.cut:
+        cut();
+        break;
+      case EditorContextAction.copy:
+        copy();
+        break;
+      case EditorContextAction.paste:
+        paste();
+        break;
+      case EditorContextAction.selectAll:
+        selectAll();
+        break;
+      case EditorContextAction.insertNoteRef:
+        insertNoteRef();
+        break;
+      case EditorContextAction.insertAttachment:
+        await _pickAndAttach();
+        break;
+      case EditorContextAction.insertLink:
+        await _handleLinkCommand();
+        break;
+      case EditorContextAction.insertTable:
+        await _openTablePanel();
+        break;
+      case EditorContextAction.insertDivider:
+        _applyCommand(FormatCommand.divider);
+        break;
+    }
   }
 
   /// 把指令产物写回正文控制器并恢复选区，随后即时保存。
@@ -2124,6 +2252,10 @@ class _NoteEditorState extends State<NoteEditor>
                   onStructuralDelete: _mode == EditorMode.formatted
                       ? _handleStructuralDelete
                       : null,
+                  // M18（FR-107）：桌面由本编辑器接管正文右键菜单。
+                  contextMenuBuilder: _buildEditorContextMenu,
+                  // M18（FR-108）：仅格式模式拦 Tab；不适用时交还默认焦点移动。
+                  onListTab: _mode == EditorMode.formatted ? _handleListTab : null,
                 ),
               );
             },

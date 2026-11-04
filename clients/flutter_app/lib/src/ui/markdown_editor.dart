@@ -40,6 +40,8 @@ class MarkdownEditor extends StatelessWidget {
     this.noteRefOpener,
     this.htmlImageBuilder,
     this.webClipBuilder,
+    this.contextMenuBuilder,
+    this.onListTab,
   });
 
   /// 正文控制器；其 `text` 是唯一的 Markdown 正本。
@@ -93,6 +95,19 @@ class MarkdownEditor extends StatelessWidget {
   /// 预览态**网页原件**（M16 / FR-83）的构建器；未注入时引用按普通 Markdown 链接呈现。
   final FormatWebClipSpanBuilder? webClipBuilder;
 
+  /// 正文右键菜单的构建器（M18 / FR-107）：`null` 时沿用框架默认（桌面 = 系统原生菜单）。
+  ///
+  /// `NoteEditor` 在桌面平台注入应用内菜单（含「添加关联笔记 / 插入附件」等自定义项），
+  /// 移动端 / Web 由注入方自行回落到 `AdaptiveTextSelectionToolbar`（BR-107.4）。
+  final EditableTextContextMenuBuilder? contextMenuBuilder;
+
+  /// 格式模式 `Tab` / `Shift+Tab` 的拦截钩子（M18 / FR-108）。
+  ///
+  /// 返回 true 表示已就地处理（列表缩进 / 反缩进 / `-` + `Tab` 成列表）；
+  /// 返回 false 表示**不适用**，按键交还默认焦点移动（BR-108.5）；`null` 表示不拦截。
+  /// 只挂在格式模式（源码模式所见即正本，BR-108.4）。
+  final bool Function({required bool outdent})? onListTab;
+
   @override
   Widget build(BuildContext context) {
     if (mode == EditorMode.preview) {
@@ -124,6 +139,8 @@ class MarkdownEditor extends StatelessWidget {
       onSoftNewline: onSoftNewline,
       onStructuralDelete: onStructuralDelete,
       showCursor: showCursor,
+      contextMenuBuilder: contextMenuBuilder,
+      onListTab: onListTab,
     );
   }
 }
@@ -141,6 +158,8 @@ class _SourceEditor extends StatefulWidget {
     this.onSoftNewline,
     this.onStructuralDelete,
     this.showCursor = true,
+    this.contextMenuBuilder,
+    this.onListTab,
   });
 
   final MarkdownEditingController controller;
@@ -157,6 +176,8 @@ class _SourceEditor extends StatefulWidget {
   final bool Function()? onSoftNewline;
   final bool Function({required bool backspace})? onStructuralDelete;
   final bool showCursor;
+  final EditableTextContextMenuBuilder? contextMenuBuilder;
+  final bool Function({required bool outdent})? onListTab;
 
   @override
   State<_SourceEditor> createState() => _SourceEditorState();
@@ -285,6 +306,8 @@ class _SourceEditorState extends State<_SourceEditor> {
               : '开始书写，或用上方工具栏排版…',
           hintStyle: TextStyle(color: scheme.outline.withValues(alpha: 0.6)),
         ),
+        // M18（FR-107）：桌面由上层注入应用内右键菜单；null 时沿用框架默认。
+        contextMenuBuilder: widget.contextMenuBuilder,
         onChanged: (_) => _scheduleSave(),
         // 点击正文时强制把主焦点交还正文输入框，而不是停留在嵌套的表格单元格内：
         // 单元格是 _focus 的焦点子树，会让 EditableText 误以为「已聚焦」从而跳过
@@ -294,8 +317,9 @@ class _SourceEditorState extends State<_SourceEditor> {
     );
   }
 
-  /// 格式模式下拦截若干「结构键」：回车先经块级空块交互；退格 / 删除落在附件引用
-  /// 边界时整块删除或就地修复残缺引用（§11.2 / §12.4）。未处理则交默认文本编辑。
+  /// 格式模式下拦截若干「结构键」：回车先经块级空块交互；`Tab` / `Shift+Tab` 做列表
+  /// 缩进 / 反缩进（M18 / FR-108）；退格 / 删除落在附件引用边界时整块删除或就地修复
+  /// 残缺引用（§11.2 / §12.4）。未处理则交默认文本编辑（含默认焦点移动）。
   ///
   /// 用 [Focus]（而非 [KeyboardListener]）才能返回 [KeyEventResult.handled] 以
   /// 抑制默认行为；`canRequestFocus: false` 使其只作为键事件冒泡的中间节点，不
@@ -304,15 +328,28 @@ class _SourceEditorState extends State<_SourceEditor> {
     final newline = widget.onBlockNewline;
     final softNewline = widget.onSoftNewline;
     final del = widget.onStructuralDelete;
-    if (newline == null && softNewline == null && del == null) return child;
+    final listTab = widget.onListTab;
+    if (newline == null &&
+        softNewline == null &&
+        del == null &&
+        listTab == null) {
+      return child;
+    }
     return Focus(
       canRequestFocus: false,
       onKeyEvent: (node, event) {
         if (event is! KeyDownEvent) return KeyEventResult.ignored;
         final key = event.logicalKey;
+        final isShift = HardwareKeyboard.instance.isShiftPressed;
+        // M18（FR-108）：列表行 `Tab` 右缩进、`Shift+Tab` 左反缩进；不适用时
+        // 返回 ignored，让事件继续冒泡到框架默认的 NextFocusIntent。
+        if (listTab != null && key == LogicalKeyboardKey.tab) {
+          return listTab(outdent: isShift)
+              ? KeyEventResult.handled
+              : KeyEventResult.ignored;
+        }
         final isEnter = key == LogicalKeyboardKey.enter ||
             key == LogicalKeyboardKey.numpadEnter;
-        final isShift = HardwareKeyboard.instance.isShiftPressed;
         if (isEnter && isShift && softNewline != null) {
           return softNewline()
               ? KeyEventResult.handled

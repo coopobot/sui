@@ -1056,6 +1056,121 @@ abstract final class EditorFormat {
     });
   }
 
+  /// 列表行的 `Tab` 缩进 / `Shift+Tab` 反缩进，以及 `-` + `Tab` 自动成列表（M18 / FR-108）。
+  ///
+  /// 返回 `null` 表示**不适用**：当前行 / 选区不是列表项，调用方必须把按键交还默认行为
+  /// （`Tab` = 焦点移动，见 ADR-038）。返回 [FormatResult] 表示已处理——即便文本未变
+  /// （已到合法最深层级 / 顶层反缩进）也返回**非 null**，以便调用方消费该按键、不跳焦点。
+  ///
+  /// 口径（与工具栏 `indent` / `outdent` 同一套合法层级判定，BR-23.9 / BR-108.1）：
+  ///
+  /// - 缩进单位恒为 **2 个空格**；反缩进去 1 个行首 `Tab` 或最多 2 个行首空格；
+  /// - 多行选区要求**每个非空行**都是列表项，否则整体不处理（BR-108.5）；
+  /// - 光标 / 选区按「所在行的缩进增量」平移并钳制在该行范围内（BR-108.3）；
+  /// - 折叠光标所在行去掉行首空白后只有**一个裸标记**（`-` / `*` / `+`，或格式模式转义出的
+  ///   `\-` / `\*` / `\+`）且非反缩进时，就地改为「行首空白 + 标记 + 一个空格」，
+  ///   即「输入 `-` 后按 `Tab` 自动变成无序列表」（BR-108.4）。
+  static FormatResult? tabListIndent(
+    String text,
+    int start,
+    int end, {
+    required bool outdent,
+  }) {
+    final s = start.clamp(0, text.length);
+    final e = end.clamp(0, text.length);
+    final lo = s <= e ? s : e;
+    final hi = s <= e ? e : s;
+
+    // ① `-` + `Tab`：折叠光标所在行只有一个裸列表标记 → 就地成列表项。
+    if (!outdent && lo == hi) {
+      final (lineStart, lineEnd) = _blockRange(text, lo, lo);
+      final bare = _bareListMarker.firstMatch(text.substring(lineStart, lineEnd));
+      if (bare != null) {
+        final prefix = '${bare.group(1)!}${bare.group(3)!} ';
+        final newText = text.replaceRange(lineStart, lineEnd, prefix);
+        final caret = lineStart + prefix.length;
+        return FormatResult(newText, caret, caret);
+      }
+    }
+
+    // ② 选区覆盖的整行区间（折叠光标 = 光标所在行）。
+    final (blockStart, blockEnd) = _blockRange(text, lo, hi);
+    final lines = text.substring(blockStart, blockEnd).split('\n');
+
+    // ③ 适用判定：每个非空行都必须是列表项，且至少有一行是列表项；空行原样保留。
+    var lineStart = blockStart;
+    var listLines = 0;
+    for (final line in lines) {
+      if (line.trim().isNotEmpty) {
+        if (!isListLineAt(text, lineStart)) return null;
+        listLines++;
+      }
+      lineStart += line.length + 1;
+    }
+    if (listLines == 0) return null;
+
+    // ④ 逐行变换；记录每行的新旧长度，供光标 / 选区映射。
+    final out = <String>[];
+    final oldStarts = <int>[];
+    final oldLengths = <int>[];
+    lineStart = blockStart;
+    for (final line in lines) {
+      oldStarts.add(lineStart);
+      oldLengths.add(line.length);
+      if (line.trim().isEmpty) {
+        out.add(line);
+      } else if (outdent) {
+        out.add(_outdentLine(line));
+      } else {
+        out.add(_indentListLine(text, lineStart, line));
+      }
+      lineStart += line.length + 1;
+    }
+    final newLengths = <int>[for (final line in out) line.length];
+    final transformed = out.join('\n');
+    final newText =
+        text.substring(0, blockStart) + transformed + text.substring(blockEnd);
+
+    // ⑤ 光标映射：按所在行的缩进增量平移，钳制在该行新范围内。
+    int mapOffset(int offset) {
+      var index = lines.length - 1;
+      for (var i = 0; i < lines.length; i++) {
+        if (offset <= oldStarts[i] + oldLengths[i]) {
+          index = i;
+          break;
+        }
+      }
+      var newStart = blockStart + index;
+      for (var i = 0; i < index; i++) {
+        newStart += newLengths[i];
+      }
+      final delta = newLengths[index] - oldLengths[index];
+      final local =
+          (offset - oldStarts[index] + delta).clamp(0, newLengths[index]);
+      return newStart + local;
+    }
+
+    return FormatResult(newText, mapOffset(lo), mapOffset(hi));
+  }
+
+  /// 列表行加 2 空格缩进（受合法层级上限约束，BR-23.9 / BR-108.2）。
+  static String _indentListLine(String text, int lineStart, String line) {
+    final indent = _leadingWhitespace.firstMatch(line)!.group(0)!.length;
+    final limit = _listIndentLimit(text, lineStart, line);
+    final target = indent + 2;
+    return target <= limit ? '${' ' * target}${line.substring(indent)}' : line;
+  }
+
+  /// 列表行反缩进：去 1 个行首 `Tab` 或最多 2 个行首空格（与 [_outdent] 同口径）。
+  static String _outdentLine(String line) {
+    if (line.startsWith('\t')) return line.substring(1);
+    var n = 0;
+    while (n < 2 && n < line.length && line[n] == ' ') {
+      n++;
+    }
+    return line.substring(n);
+  }
+
   static FormatResult _clearFormat(String text, int start, int end) {
     final s = start.clamp(0, text.length);
     final e = end.clamp(0, text.length);
@@ -1086,6 +1201,11 @@ abstract final class EditorFormat {
 
   /// 行首空白（用于任务续行时保持缩进）。
   static final RegExp _leadingWhitespace = RegExp(r'^[ \t]*');
+
+  /// 只有裸列表标记的行（`-` / `*` / `+`；含格式模式转义后的 `\-` / `\*` / `\+`）。
+  ///
+  /// 第 1 组 = 行首空白、第 2 组 = 可选反斜杠、第 3 组 = 标记本身（M18 / FR-108）。
+  static final RegExp _bareListMarker = RegExp(r'^([ \t]*)(\\)?([-*+])$');
 
   /// `简化格式` 可移除的行内标记对（长标记先行，避免误伤内部单字符）。
   static final List<RegExp> _inlineRemovable = [
