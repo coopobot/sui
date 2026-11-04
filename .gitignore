@@ -43,3 +43,9 @@ site/
 # Chrome 剪藏扩展打包产物（scripts/package_extension.sh；见 ADR-025）
 # sui-clipper-<版本>.zip / .crx / update.xml / .sha256 / INSTALL.md 均不入库
 extension/dist/
+
+# 本地补丁副本（third_party/flutter_inappwebview_android，见 ADR-037）的生成物
+clients/flutter_app/third_party/**/.dart_tool/
+clients/flutter_app/third_party/**/pubspec.lock
+clients/flutter_app/third_party/**/local.properties
+clients/flutter_app/third_party/**/.flutter-plugins-dependencies

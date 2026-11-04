@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **Android APK 构建失败（AGP 9）**：`flutter_inappwebview_android 1.1.3` 仍在调用 AGP 9 已删除的
+  `getDefaultProguardFile('proguard-android.txt')`，构建在**配置阶段**直接失败。改用本地补丁副本
+  （`clients/flutter_app/third_party/`，仅 `android/build.gradle` 两行换成 `proguard-android-optimize.txt`），
+  `dependency_overrides` 指向该副本；上游稳定版修复后删除。零业务代码改动、零协议改动。
+
 ## [0.17.3] - 2026-11-02
 
 ### 修复

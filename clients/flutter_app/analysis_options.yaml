@@ -7,4 +7,6 @@ analyzer:
     - windows/**
     - macos/**
     - linux/**
+    # 本地补丁副本（ADR-037）：第三方代码沿用其上游 lint 口径，不参与本仓库门禁
+    - third_party/**
 include: package:flutter_lints/flutter.yaml
