@@ -315,11 +315,10 @@ String _escapeLinkTarget(String raw) => raw
     .replaceAll('<', '%3C')
     .replaceAll('>', '%3E');
 
-/// 行内**样式保留**（仅剪贴板片段，§17.3）：返回 null 表示「无可用样式」（走上层透明口径）。
-///
-/// 映射优先级：Markdown 有对应语法的先用语法（加粗 / 斜体 / 删除线），其余（颜色 / 背景 /
-/// 字号 / 下划线）落 `style` 白名单的 HTML `<span>` ——与网页快照同一套白名单与渲染口径
-/// （FR-69 / BR-69.2）。
+/// 样式映射（§17.8 / ADR-039）：**只有 Markdown 有语法的**强调类样式进产物
+/// （加粗 / 斜体 / 删除线）；`color` / `background-color` / `font-size` /
+/// `text-decoration:underline` 一律丢弃——格式模式无法内联呈现行内 `<span>`，
+/// 写了会露出字面标签（`snapshot_html.dart` 的 `kSnapshotBlockTags` 不含 `span`）。
 /// 用**字面片段标记**保护自产的强调记号（`**` / `*` / `~~`）。
 ///
 /// 动机：§6.11 的行内转义会把 `*` 转成 `\*`（批量导入的既有口径是「不臆造强调」，
@@ -335,9 +334,9 @@ String _wrapEmphasis(_Renderer r, String marker, String inner) {
   return r.inlineStyles ? _emphasis(marker, inner) : '$marker$inner$marker';
 }
 
-/// 块级容器自身的**行内样式**（仅剪贴板路径，§17.3）。
+/// 块级容器自身的**行内样式**（仅剪贴板路径，§17.3 / §17.8）。
 ///
-/// 剪贴板片段里很常见 `<div style="font-weight:700">粗</div>` / `<p style="color:#c00">红</p>`
+/// 剪贴板片段里很常见 `<div style="font-weight:700">粗</div>`
 /// ——样式挂在**块级**容器上，而 [_styledInline] 只覆盖行内元素，故这里补一层。
 /// 批量导入路径原样返回（不改变既有产物，BR-71.2）。
 String _styledBlockInline(_Renderer r, dom.Element node, String inner) {
@@ -346,21 +345,19 @@ String _styledBlockInline(_Renderer r, dom.Element node, String inner) {
   return _styledInline(node, normalized) ?? normalized;
 }
 
+/// 行内样式的**可保留子集**：只把强调类样式映射为 Markdown 记号（§17.8 / ADR-039）。
+///
+/// **不产出任何 `<span>`**：格式模式只把**行首 + 块级**受限 HTML 识别为 HTML 块
+/// （`snapshot_html.dart` 的 `kSnapshotBlockTags` 不含 `span`），行内 `<span>` 会作为
+/// 普通文字露出字面标签。故 `color` / `background-color` / `font-size` /
+/// `text-decoration:underline` 一律丢弃，`<u>` / `<mark>` / `<font color>` 退化为纯文本
+/// ——文本逐字保留（BR-71.3 不丢字）。
 String? _styledInline(dom.Element node, String inner) {
   if (inner.trim().isEmpty) return inner;
-  final tag = node.localName?.toLowerCase() ?? '';
   final styles = _parseInlineStyle(node.attributes['style']);
-  // 标签级默认样式（`<u>` / `<mark>` / `<font color=…>`）与内联 `style` 合并。
-  if (tag == 'u') styles.putIfAbsent('text-decoration', () => 'underline');
-  if (tag == 'mark') styles.putIfAbsent('background-color', () => '#ffff00');
-  if (tag == 'font') {
-    final color = _normalizeColor(node.attributes['color'] ?? '');
-    if (color != null) styles.putIfAbsent('color', () => color);
-  }
   if (styles.isEmpty) return null;
 
   var out = inner;
-  final html = <String>[];
   styles.forEach((key, value) {
     switch (key) {
       case 'font-weight':
@@ -371,21 +368,8 @@ String? _styledInline(dom.Element node, String inner) {
         }
       case 'text-decoration':
         if (value.contains('line-through')) out = _emphasis('~~', out);
-        if (value.contains('underline')) {
-          html.add('text-decoration:underline');
-        }
-      case 'color':
-        final c = _normalizeColor(value);
-        if (c != null) html.add('color:$c');
-      case 'background-color':
-        final c = _normalizeColor(value);
-        if (c != null) html.add('background-color:$c');
-      case 'font-size':
-        final s = _normalizeFontSize(value);
-        if (s != null) html.add('font-size:$s');
     }
   });
-  if (html.isNotEmpty) out = '<span style="${html.join(';')}">$out</span>';
   return out;
 }
 
@@ -408,29 +392,6 @@ bool _isBold(String value) {
   if (value == 'bold' || value == 'bolder') return true;
   final n = int.tryParse(value);
   return n != null && n >= 600;
-}
-
-/// 颜色归一化：只接受 `#rgb` / `#rrggbb` / 纯字母色名（**单 token、无空格**）。
-///
-/// `rgb(1,2,3)` / `var(--x)` / `inherit` 一类一律**丢弃**——白名单要的是「不破坏 Markdown
-/// 行内规整」的简单值（§17.3）。
-String? _normalizeColor(String raw) {
-  final v = raw.trim().toLowerCase();
-  if (RegExp(r'^#[0-9a-f]{3}$').hasMatch(v) ||
-      RegExp(r'^#[0-9a-f]{6}$').hasMatch(v)) {
-    return v;
-  }
-  if (RegExp(r'^[a-z]{3,20}$').hasMatch(v)) return v;
-  return null;
-}
-
-/// 字号归一化：只接受 `NNpx` / `NN%`（8..72）；其余丢弃。
-String? _normalizeFontSize(String raw) {
-  final m = RegExp(r'^(\d{1,3})(px|%)$').firstMatch(raw.trim());
-  if (m == null) return null;
-  final n = int.parse(m.group(1)!);
-  if (n < 8 || n > 72) return null;
-  return '$n${m.group(2)}';
 }
 
 // ---------------------------------------------------------------------------
@@ -534,7 +495,8 @@ class _Renderer {
   /// 文档级标题（多节模式下为**节**标题）：供 §6.10 标题去重使用。
   String documentTitle = '';
 
-  /// **剪贴板片段模式**（FR-71 / §17.3）：把 Markdown 无法表达的行内样式保留为受限 HTML span。
+  /// **剪贴板片段模式**（FR-71 / §17.3）：保留**强调类**样式并给自产记号加字面片段保护
+  /// （`v0.18.1` 起**不再**产出内联 `<span>`，见 §17.8 / ADR-039）。
   ///
   /// 只有**粘贴**链路打开它——批量导入保持既有口径（`u` / `font` / `color` 一类透明丢弃，
   /// 见 §6.4），以免改动 M13 的产物与门禁（BR-71.2「转换单一来源，口径不分裂」）。
@@ -1138,9 +1100,10 @@ String _renderInlineNode(dom.Node node, _Renderer r, _Ctx ctx) {
   // `u` / `sup` / `sub` / `font` / `mark` / `small` / 表单 / 自定义 / 未知标签：
   // **透明**（保留文本）——字体 / 颜色 / 高亮色 / 上下标无法映射，明确不做（§6.4）。
   //
-  // **剪贴板路径例外**（FR-71 / §17.3）：粘贴时「颜色 / 背景 / 字号 / 下划线」这类
-  // Markdown 没有对应语法的样式**保留为受限 HTML span**（与网页快照同一白名单），
-  // 否则从浏览器复制来的内容会掉色；批量导入路径保持原口径不变（BR-71.2）。
+  // **剪贴板路径例外**（FR-71 / §17.3）：粘贴时只多映射**强调类**样式
+  // （`font-weight` / `font-style` / `line-through` → Markdown 记号）；
+  // 「颜色 / 背景 / 字号 / 下划线」Markdown 无语法、格式模式也无法内联呈现，一律丢弃
+  // （`v0.18.1` / ADR-039）；批量导入路径保持原口径不变（BR-71.2）。
   // 子节点只渲染**一次**（nil 时直接复用），否则嵌套的图片会被登记两次。
   if (r.inlineStyles) {
     final inner = _renderInlineChildren(node, r, ctx);

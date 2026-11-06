@@ -961,7 +961,8 @@ Android 走**自研原生通道** `sui/platform.openUrl`（`ACTION_VIEW`）。
 按 `StartFragment` / `EndFragment` **字节偏移**切片）、Android 读 **`ClipData`** HTML 项；
 **原生侧只取字节、解析与转换全在 Dart 侧**；转换**收口到 M13 的 DOM 式转换器**
 （`convertClipboardHtml` / `inlineResourcePlaceholders`），正则版 `EditorFormat.htmlToMarkdown`
-**保留但冻结**；颜色 / 背景色 / 字号保留为**受限 `<span>`**（与 FR-69 同一白名单、两态同色）；
+**保留但冻结**；颜色 / 背景色 / 字号 / 下划线**一律丢弃**（`v0.18.1` / ADR-039：格式模式只渲染
+**行首块级**受限 HTML，行内 `<span>` 会作为普通文字露出字面标签）；
 `data:` 图片落附件、远端图片保留地址且**粘贴不出网**；任一环节失败**静默回落纯文本安全插入**，
 任何路径下都是**一次可撤销**编辑。
 

@@ -1,7 +1,8 @@
-/// 剪贴板片段 HTML→Markdown（FR-71 / editor-formatting.md §17.3 / ADR-028 决策 4）。
+/// 剪贴板片段 HTML→Markdown（FR-71 / editor-formatting.md §17.3 / ADR-028 决策 4 / ADR-039）。
 ///
-/// 覆盖：结构与行内样式映射（Markdown 语法优先、颜色/背景/字号落受限 HTML span）、
-/// 资源内联（远端图片 / `data:` 图片）、非法样式与注入内容一律丢弃、空输入回落。
+/// 覆盖：结构与行内样式映射（Markdown 语法优先；颜色 / 背景 / 字号 / 下划线**丢弃**，
+/// 产物不含内联 `<span>`）、资源内联（远端图片 / `data:` 图片）、非法样式与注入内容一律丢弃、
+/// 空输入回落。
 library;
 
 import 'package:note_core/note_core.dart';
@@ -50,26 +51,23 @@ void main() {
       expect(md, contains('| 1 | 2 |'));
     });
 
-    test('颜色 / 背景 / 字号保留为受限 HTML span（与网页快照同一白名单）', () {
+    test('颜色 / 背景 / 字号一律丢弃（格式模式无法内联呈现，ADR-039）', () {
       final md = convertClipboardHtml(
         '<p><span style="color:#c00;background-color: yellow;'
         'font-size:20px">红</span></p>',
       );
-      expect(
-        md,
-        contains(
-          '<span style="color:#c00;background-color:yellow;font-size:20px">红</span>',
-        ),
-      );
+      expect(md, '红');
+      expect(md.contains('<'), isFalse, reason: '不得产出任何 HTML 标签');
+      expect(md.contains('span'), isFalse);
     });
 
-    test('下划线用 span，加粗用语法（font-weight:700）', () {
+    test('下划线丢弃、加粗仍走语法（font-weight:700）', () {
       final md = convertClipboardHtml(
         '<p><span style="text-decoration:underline">下</span>'
         '<span style="font-weight:700">粗</span></p>',
       );
-      expect(md, contains('text-decoration:underline'));
-      expect(md, contains('**粗**'));
+      expect(md, '下**粗**');
+      expect(md.contains('text-decoration'), isFalse);
       expect(md.contains('**下**'), isFalse);
     });
 
@@ -118,6 +116,36 @@ void main() {
       for (final ch in ['a', 'b', 'c', 'd', 'e']) {
         expect(md, contains(ch));
       }
+    });
+
+    test('实测样例：块级默认字号 16px 不再包 span（ADR-039 / AC-631）', () {
+      final md = convertClipboardHtml(
+        '<blockquote style="font-size:16px;color:rgb(15,17,21)">'
+        '<p style="margin:0px">核心认知：<strong>没有协议覆盖全栈</strong>。</p>'
+        '</blockquote>'
+        '<p style="font-size:16px;color:rgb(15,17,21)">'
+        '把 Agent 系统的通信需求拆开。</p>',
+      );
+      expect(md.contains('<'), isFalse, reason: '不得产出任何 HTML 标签');
+      expect(md.contains('span'), isFalse);
+      expect(md, contains('核心认知：**没有协议覆盖全栈**。'));
+      expect(md, contains('把 Agent 系统的通信需求拆开。'));
+    });
+
+    test('产物中无 HTML 块（格式模式不会露出标签）', () {
+      final md = convertClipboardHtml(
+        '<div style="font-size:16px"><p>一</p><p>二</p></div>'
+        '<table><tr><th>H</th></tr><tr><td>1</td></tr></table>',
+      );
+      expect(htmlBlocks(md), isEmpty);
+      expect(md.contains('<'), isFalse);
+    });
+
+    test('u / mark / font 退化为纯文本，文本不丢', () {
+      final md = convertClipboardHtml(
+        '<p><u>下</u><mark>高亮</mark><font color="#c00">红</font></p>',
+      );
+      expect(md, '下高亮红');
     });
   });
 }
