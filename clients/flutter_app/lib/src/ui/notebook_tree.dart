@@ -336,7 +336,7 @@ class _NotebookNode extends StatelessWidget {
   ///
   /// 有子节点时放折叠箭头、无子节点时放等宽 `SizedBox` 占位；宽度**不随有无子节点变化**。
   /// 旧实现按 `hasChildren ? 56 : 40` 取宽，导致父节点名称比叶节点右移 16px、同级不对齐。
-  static const double leadingWidth = 30;
+  static const double leadingWidth = 38;
 
   @override
   Widget build(BuildContext context) {
