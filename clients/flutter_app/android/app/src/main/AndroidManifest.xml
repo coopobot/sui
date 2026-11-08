@@ -29,6 +29,19 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- 「用系统默认应用打开附件」（FR-110 / ADR-040）：把 cacheDir 下的临时文件
+             以 content:// **只读、一次性**授权给接收方应用（API 24+ 不允许直接传 file://）。
+             exported=false 表示不对外导出；grantUriPermissions=true 才允许按 Intent 的
+             FLAG_GRANT_READ_URI_PERMISSION 临时授权，因此**不需要**任何存储权限。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/sui_file_paths" />
+        </provider>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

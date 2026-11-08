@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 「用系统默认应用打开附件」的 FileProvider 授权范围（FR-110 / ADR-040）。
+
+     只授权本应用为「外部打开」而在 cacheDir 下建的临时目录（`sui_att_*`），
+     刻意不用 files-path / external-path / root-path：
+       - 不暴露应用私有数据目录里的其它路径（笔记库、blob 根都不在这里）；
+       - 不需要 WRITE/READ_EXTERNAL_STORAGE，分区存储口径不倒退（BR-110.2）。
+     Dart 侧的临时目录同样落在 cacheDir（path_provider 的 temporary 目录），与此处精确对齐。 -->
+<paths>
+    <cache-path name="sui_attachments" path="sui_att" />
+</paths>

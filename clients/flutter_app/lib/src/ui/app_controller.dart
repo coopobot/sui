@@ -2393,19 +2393,27 @@ class AppController extends ChangeNotifier {
   /// 外部编辑变更监视：附件 id → 定时器（每 2s 重读一次临时文件）。
   final Map<String, Timer> _externalWatchers = {};
 
-  /// 用系统默认应用打开附件（FR-47 / BR-47.2 / AC-149）。
+  /// 用系统默认应用打开附件（FR-47 / BR-47.2 / AC-149；Android 见 FR-110 / ADR-040）。
   ///
   /// 字节先经 [openAttachment] 就绪（本地命中或按需下载），再落系统临时文件交系统
-  /// 壳层打开；成功返回 true，当前平台不支持（Web / 移动端在零依赖下无法唤起系统
-  /// 应用）返回 false，由 UI 降级为内置预览。打开后启动**变更监视**，外部应用一
-  /// 保存即回写（AC-150）。
-  Future<bool> openAttachmentExternally(Attachment a) async {
+  /// 唤起：桌面三平台走系统壳层，**Android 走自研通道的 `ACTION_VIEW`**（ADR-040），
+  /// Web / iOS 返回「平台不支持」由 UI 降级为内置预览（BR-47.5）。
+  ///
+  /// 返回**四态结果**而不是布尔：UI 要据此区分「本机没有可打开它的应用」与
+  /// 「当前平台不支持」，两者的下一步动作不同（BR-110 / AC-637）。
+  /// 成功且平台可回写时启动**变更监视**，外部应用一保存即回写（AC-150）；
+  /// Android 是只读授权，不回写、也不空转监视（BR-110.6）。
+  Future<ExternalOpenResult> openAttachmentExternally(Attachment a) async {
     final bytes = await openAttachment(a);
-    if (bytes == null) return false;
-    final path = await openExternally(filename: a.filename, bytes: bytes);
-    if (path == null) return false;
-    _watchExternalEdit(a, path);
-    return true;
+    if (bytes == null) {
+      return const ExternalOpenResult(ExternalOpenOutcome.failed);
+    }
+    final result = await openExternally(filename: a.filename, bytes: bytes);
+    final path = result.path;
+    if (result.isOpened && result.watchForEdits && path != null) {
+      _watchExternalEdit(a, path);
+    }
+    return result;
   }
 
   /// 监视外部编辑（§12.3 步骤①「检测」）：每 2s 重读临时文件，连续两次读到

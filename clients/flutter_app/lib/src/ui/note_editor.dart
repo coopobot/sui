@@ -8,6 +8,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:note_core/note_core.dart';
 import 'package:provider/provider.dart';
 
+import '../platform/attachment_opener.dart';
 import '../platform/attachment_picker.dart';
 import '../platform/clipboard_html.dart';
 import '../platform/desktop_platform.dart';
@@ -4246,8 +4247,9 @@ String _formatBytes(int bytes) {
 /// * `text` —— 只读文本视图（UTF-8 容错解码，超长截断并提示）；
 /// * `image` —— 可缩放的图片视图（[InteractiveViewer]）；
 /// * `pdf` / 其它 —— 元信息卡（零新增依赖，PDF 不做内置渲染）。
-/// 三类都提供「用系统默认应用打开」入口（BR-47.2 / AC-149）；Web / 移动端该入口
-/// 不可用时提示降级（BR-47.5 / AC-151）。
+/// 三类都提供「用系统默认应用打开」入口（BR-47.2 / AC-149）；桌面三平台走系统壳层、
+/// Android 走系统 `ACTION_VIEW`（FR-110 / ADR-040），Web / iOS 该入口不可用时提示降级
+/// （BR-47.5 / AC-151）。
 class _AttachmentPreviewDialog extends StatelessWidget {
   const _AttachmentPreviewDialog({
     required this.attachment,
@@ -4257,7 +4259,7 @@ class _AttachmentPreviewDialog extends StatelessWidget {
 
   final Attachment attachment;
   final Uint8List bytes;
-  final Future<bool> Function() onOpenExternally;
+  final Future<ExternalOpenResult> Function() onOpenExternally;
 
   /// 文本预览字符上限：超过则截断，避免超长文件卡住渲染。
   static const int _maxTextChars = 20000;
@@ -4281,13 +4283,11 @@ class _AttachmentPreviewDialog extends StatelessWidget {
           icon: const Icon(Icons.open_in_new),
           label: const Text('用系统默认应用打开'),
           onPressed: () async {
-            final ok = await onOpenExternally();
+            final result = await onOpenExternally();
             if (!context.mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text(
-                  ok ? '已用系统默认应用打开；编辑保存后将自动回写' : '当前平台不支持调用系统应用，可先用内置预览查看',
-                ),
+                content: Text(_externalOpenMessage(result)),
                 duration: const Duration(seconds: 2),
               ),
             );
@@ -4299,6 +4299,26 @@ class _AttachmentPreviewDialog extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  /// 外部打开后的提示文案：按**用户下一步能做什么**分流（BR-110 / AC-637 / ADR-040）。
+  ///
+  /// 三种失败必须给出三种不同建议，否则「设备缺应用」会被读者当成「平台没实现」：
+  /// 缺应用 → 建议内置预览；平台不支持 → 只说明现状；出错 → 说明失败并可预览。
+  String _externalOpenMessage(ExternalOpenResult result) {
+    switch (result.outcome) {
+      case ExternalOpenOutcome.opened:
+        // 只有桌面端会做外部编辑回写；Android 是只读授权，不能作此承诺（BR-110.6）。
+        return isDesktopPlatform
+            ? '已用系统默认应用打开；编辑保存后将自动回写'
+            : '已用系统默认应用打开';
+      case ExternalOpenOutcome.noHandler:
+        return '没有可打开「${attachment.filename}」的应用，可先用内置预览查看';
+      case ExternalOpenOutcome.unsupported:
+        return '当前平台不支持调用系统应用，可先用内置预览查看';
+      case ExternalOpenOutcome.failed:
+        return '打开「${attachment.filename}」失败，可先用内置预览查看';
+    }
   }
 
   Widget _buildBody(BuildContext context, ThemeData theme) {
