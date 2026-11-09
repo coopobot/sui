@@ -40,7 +40,15 @@ class NoteEditor extends StatefulWidget {
     this.onToggleRevisions,
     this.showProperties = false,
     this.onToggleProperties,
+    this.compactDock = false,
   });
+
+  /// 窄屏底部工具坞（M19 / FR-116）。
+  ///
+  /// `true` 时编辑器不再在顶部渲染三态模式行与格式工具栏，改为在正文下方渲染
+  /// 48px 工具坞（`Aa` + 横向格式工具 + `⋯`）；桌面 / 平板宽屏保持默认 `false`，
+  /// 既有三行布局一行不改。
+  final bool compactDock;
 
   /// 本编辑器所属**视图**的键（M8 · 详细设计 §5.1）。
   ///
@@ -2105,7 +2113,7 @@ class _NoteEditorState extends State<NoteEditor>
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 8, 0),
+          padding: EdgeInsets.fromLTRB(16, widget.compactDock ? 8 : 16, 8, 0),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -2150,21 +2158,22 @@ class _NoteEditorState extends State<NoteEditor>
         //   宽屏——沿用原来的 Wrap 自适应（B14），三态保留文本标签，入口不缩水。
         // 判据是编辑区自身宽度，而非平台：桌面端把两栏折叠后编辑区可能很窄，
         // 而平板宽屏仍应有完整按钮。
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final compact = constraints.maxWidth < _compactWidth;
-            return Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: 8,
-                vertical: compact ? 2 : 8,
-              ),
-              child: compact ? _buildCompactModeBar() : _buildModeBar(),
-            );
-          },
-        ),
+        if (!widget.compactDock)
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < _compactWidth;
+              return Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: 8,
+                  vertical: compact ? 2 : 8,
+                ),
+                child: compact ? _buildCompactModeBar() : _buildModeBar(),
+              );
+            },
+          ),
         // 格式工具栏只在可编辑的两态（格式 / 源码）下出现；预览态是只读渲染，
         // 不给排版入口，避免「点了没反应」的困惑。
-        if (_mode != EditorMode.preview) ...[
+        if (!widget.compactDock && _mode != EditorMode.preview) ...[
           const Divider(height: 1),
           _buildFormatToolbar(),
           // 图片尺寸条：点选 / 光标落在图片引用内时出现。用 ListenableBuilder
@@ -2221,7 +2230,7 @@ class _NoteEditorState extends State<NoteEditor>
           const Divider(height: 1),
           _buildFindBar(),
         ],
-        const Divider(height: 1),
+        if (!widget.compactDock) const Divider(height: 1),
         Expanded(
           // FR-81a / FR-93：把**正文列宽**写入控制器 `paragraphWidth`，供围栏代码块底色带定宽。
           // 正文 `TextField` 外侧有左右各 `kEditorBodyPadding` 的内边距（见 `markdown_editor.dart`
@@ -2262,8 +2271,251 @@ class _NoteEditorState extends State<NoteEditor>
             },
           ),
         ),
+        if (widget.compactDock) _buildMobileDock(),
       ],
     );
+  }
+
+  /// 移动端底部工具坞（M19 / FR-116）。
+  ///
+  /// 结构：`Aa`（三态选择）+ 横向滚动格式工具 + `⋯`（更多面板）。
+  /// 键盘弹出时由壳层 `Scaffold` 的 `resizeToAvoidBottomInset` 把整条工具坞顶到键盘上沿，
+  /// 这里不再叠加 `viewInsets` 偏移（避免双重扣减）。
+  Widget _buildMobileDock() {
+    final palette = SuiAppearance.of(context).palette;
+    return Material(
+      color: palette.containerLow,
+      child: SafeArea(
+        top: false,
+        child: Container(
+          key: const ValueKey('mobile-dock'),
+          height: 48,
+          decoration: BoxDecoration(
+            border: Border(top: BorderSide(color: palette.divider)),
+          ),
+          child: Row(
+            children: [
+              IconButton(
+                key: const ValueKey('mobile-dock-mode'),
+                tooltip: '编辑模式',
+                icon: const Icon(Icons.text_fields),
+                onPressed: _showModeSheet,
+              ),
+              Expanded(
+                child: _mode == EditorMode.preview
+                    ? const Center(
+                        child: Text('预览模式', style: TextStyle(fontSize: 12)),
+                      )
+                    : _buildFormatToolbar(),
+              ),
+              IconButton(
+                key: const ValueKey('mobile-more'),
+                tooltip: '更多',
+                icon: const Icon(Icons.more_horiz),
+                onPressed: _showMoreSheet,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// `Aa`：三态选择（格式 / 源码 / 预览）。
+  Future<void> _showModeSheet() async {
+    final selected = await showModalBottomSheet<EditorMode>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final mode in EditorMode.values)
+              ListTile(
+                leading: Icon(switch (mode) {
+                  EditorMode.formatted => Icons.text_fields,
+                  EditorMode.source => Icons.code,
+                  EditorMode.preview => Icons.visibility_outlined,
+                }),
+                title: Text(switch (mode) {
+                  EditorMode.formatted => '格式模式',
+                  EditorMode.source => '源码模式',
+                  EditorMode.preview => '预览模式',
+                }),
+                trailing: _mode == mode ? const Icon(Icons.check) : null,
+                onTap: () => Navigator.of(sheetContext).pop(mode),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null) _setMode(selected);
+  }
+
+  /// `⋯`：更多面板（三态分段 + 属性 / 历史 / 查找 / 标签 / 导出 / 删除）。
+  Future<void> _showMoreSheet() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+        return SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('编辑模式', style: theme.textTheme.labelMedium),
+                const SizedBox(height: 8),
+                SegmentedButton<EditorMode>(
+                  segments: const [
+                    ButtonSegment(
+                      value: EditorMode.formatted,
+                      label: Text('格式'),
+                      icon: Icon(Icons.text_fields),
+                    ),
+                    ButtonSegment(
+                      value: EditorMode.source,
+                      label: Text('源码'),
+                      icon: Icon(Icons.code),
+                    ),
+                    ButtonSegment(
+                      value: EditorMode.preview,
+                      label: Text('预览'),
+                      icon: Icon(Icons.visibility_outlined),
+                    ),
+                  ],
+                  selected: {_mode},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (sel) {
+                    _setMode(sel.first);
+                    Navigator.of(sheetContext).pop();
+                  },
+                ),
+                const SizedBox(height: 16),
+                Text('笔记操作', style: theme.textTheme.labelMedium),
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 4,
+                  runSpacing: 4,
+                  children: [
+                    _moreAction('properties', Icons.info_outline, '属性信息'),
+                    _moreAction('history', Icons.history, '版本历史'),
+                    _moreAction('find', Icons.search, '笔记内查找'),
+                    _moreAction('tags', Icons.label_outline, '标签'),
+                    _moreAction('export', Icons.file_download_outlined, '导出 Markdown'),
+                    _moreAction('delete', Icons.delete_outline, '删除笔记',
+                        danger: true),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'properties':
+        (widget.onToggleProperties ?? _controller.togglePropertiesPanel)();
+        break;
+      case 'history':
+        (widget.onToggleRevisions ?? _controller.toggleRevisionPanel)();
+        break;
+      case 'find':
+        openFind();
+        break;
+      case 'tags':
+        await _showTagSheet();
+        break;
+      case 'export':
+        _showExportDialog();
+        break;
+      case 'delete':
+        await _deleteFromDock();
+        break;
+    }
+  }
+
+  Widget _moreAction(String value, IconData icon, String label,
+      {bool danger = false}) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = danger ? scheme.error : scheme.onSurface;
+    return SizedBox(
+      width: 104,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => Navigator.of(context).pop(value),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: color),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12, color: color),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 更多面板 → 标签：底部浮层就地增删标签（与标题行标签浮层共用 `_buildTagEditor`）。
+  Future<void> _showTagSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: _buildTagEditor(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 更多面板 → 删除笔记（二次确认；删除后回到列表）。
+  Future<void> _deleteFromDock() async {
+    final id = _noteId;
+    if (id == null) return;
+    final title = _title.text.trim();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('删除笔记'),
+        content: Text('「${title.isEmpty ? '无标题' : title}」'
+            '将被移到回收站，可在「回收站」中还原。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(dialogContext).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _controller.deleteNote(id);
+    _controller.selectNote(null);
   }
 
   /// 窄屏紧凑模式行：三态切换（图标态）+ 历史 / 导出，压成一行（ui-spec §4.1，B17）。

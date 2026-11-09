@@ -74,11 +74,18 @@ void main() {
     );
     await _settle(tester);
 
-    // 窄屏不渲染桌面应用菜单栏，但必须有可达的「更多」入口（ui-spec §21.1）。
+    // 窄屏不渲染桌面应用菜单栏；M19 起「关于」收口在底部「我的」页（ui-spec §31.4）。
     expect(find.byType(AppMenuBar), findsNothing);
-    await tester.tap(find.byTooltip('更多'));
+    await tester.tap(find.byKey(const ValueKey('mobile-tab-4')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
+    // 「关于」在「我的」页末尾，长屏也需滚动到可见（ListView 懒构建）。
+    await tester.scrollUntilVisible(
+      find.text('关于随手记 Sui'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.pump();
 
     expect(find.text('关于随手记 Sui'), findsOneWidget);
     await tester.tap(find.text('关于随手记 Sui'));
@@ -86,6 +93,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
 
     // 与桌面端同一份对话框、同一版本文案（BR-56.3）。
-    expect(find.text('版本 $kAppVersion'), findsOneWidget);
+    // 「我的」页行尾也显示版本，故为 findsWidgets（对话框内容仍是同一实现）。
+    expect(find.text('版本 $kAppVersion'), findsWidgets);
   });
 }

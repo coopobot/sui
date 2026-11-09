@@ -17,8 +17,27 @@ const Color _sidebarFgDim = Color(0xFF9A9AA2);
 
 /// 侧栏笔记本树（宽屏直接嵌入，窄屏经抽屉复用）。
 class NotebookTree extends StatefulWidget {
-  const NotebookTree({super.key, required this.controller});
+  const NotebookTree({
+    super.key,
+    required this.controller,
+    this.compact = false,
+    this.onOpenNotebook,
+    this.onOpenAllNotes,
+    this.onOpenInbox,
+  });
+
   final AppController controller;
+
+  /// 窄屏「笔记本」Tab 形态（M19 / FR-113）：浅色底、隐藏桌面专属入口
+  /// （新建笔记按钮 / 底部「全部标签 / 归档 / 回收站」固定区），节点菜单与桌面同源。
+  final bool compact;
+
+  /// 点笔记本的自定义去处（窄屏：只筛列表、切回笔记 Tab）；`null` = 桌面默认选中。
+  final ValueChanged<String>? onOpenNotebook;
+
+  /// 窄屏「全部笔记 / 收件箱」智能入口的自定义去处（切回笔记 Tab）。
+  final VoidCallback? onOpenAllNotes;
+  final VoidCallback? onOpenInbox;
 
   @override
   State<NotebookTree> createState() => _NotebookTreeState();
@@ -36,31 +55,34 @@ class _NotebookTreeState extends State<NotebookTree> {
 
   /// 笔记本名搜索框（M16 / FR-85）：放在树区域内部，不挤占外层固定高度。
   Widget _searchField() {
+    final compact = widget.compact;
+    final scheme = Theme.of(context).colorScheme;
+    final fg = compact ? scheme.onSurface : _sidebarFg;
+    final dim = compact ? scheme.outline : _sidebarFgDim;
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 4, 8, 6),
       child: TextField(
         key: const ValueKey('sui-notebook-search'),
         controller: _search,
         onChanged: (v) => setState(() => _query = v),
-        style: const TextStyle(color: _sidebarFg, fontSize: 13),
+        style: TextStyle(color: fg, fontSize: 13),
         decoration: InputDecoration(
           isDense: true,
           hintText: '搜索笔记本',
-          hintStyle: const TextStyle(color: _sidebarFgDim, fontSize: 12),
-          prefixIcon:
-              const Icon(Icons.search, size: 16, color: _sidebarFgDim),
+          hintStyle: TextStyle(color: dim, fontSize: 12),
+          prefixIcon: Icon(Icons.search, size: 16, color: dim),
           suffixIcon: _query.isEmpty
               ? null
               : IconButton(
                   tooltip: '清空',
-                  icon: const Icon(Icons.close, size: 14, color: _sidebarFgDim),
+                  icon: Icon(Icons.close, size: 14, color: dim),
                   onPressed: () {
                     _search.clear();
                     setState(() => _query = '');
                   },
                 ),
           filled: true,
-          fillColor: Colors.white10,
+          fillColor: compact ? scheme.surfaceContainerHigh : Colors.white10,
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(6),
             borderSide: BorderSide.none,
@@ -84,11 +106,15 @@ class _NotebookTreeState extends State<NotebookTree> {
 
   Widget _buildTree(BuildContext context) {
     final controller = widget.controller;
+    final compact = widget.compact;
+    final scheme = Theme.of(context).colorScheme;
+    final fgDim = compact ? scheme.outline : _sidebarFgDim;
+    final dividerColor = compact ? Theme.of(context).dividerColor : Colors.white24;
     // 顶层：全部笔记 + 笔记本分组（平铺，UI 按 parentId 递归展现）
     final roots = controller.notebooks.where((n) => n.parentId == null).toList();
 
     return Material(
-      color: _sidebarBg,
+      color: compact ? scheme.surface : _sidebarBg,
       // M16 / FR-85：树区域是滚动列表；v0.17.2（FR-101）把「全部标签 / 归档 / 回收站」
       // 移到 Column 的**固定底部区**，不随树滚动（BR-101.1）。
       child: Column(
@@ -97,24 +123,32 @@ class _NotebookTreeState extends State<NotebookTree> {
             child: ListView(
               children: [
                 // BUG6：左栏顶部提供「新建笔记」入口。
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton.icon(
-                      style: TextButton.styleFrom(foregroundColor: _sidebarFg),
-                      onPressed: () => controller.createNote(),
-                      icon: const Icon(Icons.note_add_outlined, size: 18),
-                      label: const Text('新建笔记'),
+                // M19：窄屏由 FAB 承担，不再重复此入口。
+                if (!compact)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        style:
+                            TextButton.styleFrom(foregroundColor: _sidebarFg),
+                        onPressed: () => controller.createNote(),
+                        icon: const Icon(Icons.note_add_outlined, size: 18),
+                        label: const Text('新建笔记'),
+                      ),
                     ),
                   ),
-                ),
-                const Divider(height: 1, color: Colors.white24),
+                Divider(height: 1, color: dividerColor),
                 _SidebarTile(
+                  compact: compact,
                   leading: const Icon(Icons.layers_outlined),
                   title: const Text('全部笔记'),
                   selected: controller.isAllNotesView,
                   onTap: () {
+                    if (compact && widget.onOpenAllNotes != null) {
+                      widget.onOpenAllNotes!();
+                      return;
+                    }
                     // 先清搜索再切视图：否则后一次 refreshNotes 会把「默认打开第一篇」
                     // 的 selectFirstNote 请求判为过期（FR-104 / BR-104.1）。
                     controller.search('');
@@ -122,18 +156,22 @@ class _NotebookTreeState extends State<NotebookTree> {
                   },
                 ),
                 _SidebarTile(
+                  compact: compact,
                   leading: const Icon(Icons.inbox_outlined),
                   title: const Text('收件箱'),
                   subtitle: Text('${_clipCount(controller)} 篇剪藏',
-                      style:
-                          const TextStyle(fontSize: 11, color: _sidebarFgDim)),
+                      style: TextStyle(fontSize: 11, color: fgDim)),
                   selected: controller.inboxMode,
                   onTap: () {
+                    if (compact && widget.onOpenInbox != null) {
+                      widget.onOpenInbox!();
+                      return;
+                    }
                     controller.selectInbox();
                     controller.search('');
                   },
                 ),
-                const Divider(height: 1, color: Colors.white24),
+                Divider(height: 1, color: dividerColor),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 6, 8, 4),
                   child: Row(
@@ -143,17 +181,19 @@ class _NotebookTreeState extends State<NotebookTree> {
                             style: Theme.of(context)
                                 .textTheme
                                 .labelLarge
-                                ?.copyWith(color: _sidebarFgDim)),
+                                ?.copyWith(color: fgDim)),
                       ),
                       // BUG7：新建笔记本入口移到「笔记本」栏行尾的「+」图标。
-                      IconButton(
-                        tooltip: '新建笔记本',
-                        visualDensity: VisualDensity.compact,
-                        color: _sidebarFgDim,
-                        icon: const Icon(Icons.add, size: 18),
-                        onPressed: () =>
-                            showCreateNotebookDialog(context, controller),
-                      ),
+                      // M19：窄屏由 FAB 承担，不再重复此入口。
+                      if (!compact)
+                        IconButton(
+                          tooltip: '新建笔记本',
+                          visualDensity: VisualDensity.compact,
+                          color: fgDim,
+                          icon: const Icon(Icons.add, size: 18),
+                          onPressed: () =>
+                              showCreateNotebookDialog(context, controller),
+                        ),
                     ],
                   ),
                 ),
@@ -162,6 +202,8 @@ class _NotebookTreeState extends State<NotebookTree> {
                   controller: controller,
                   roots: roots,
                   query: _query,
+                  compact: compact,
+                  onOpenNotebook: widget.onOpenNotebook,
                 ),
                 // 标签筛选区：随树滚动（底部三个入口保持固定）。
                 if (controller.hasTagFilter)
@@ -194,37 +236,40 @@ class _NotebookTreeState extends State<NotebookTree> {
               ],
             ),
           ),
-          const Divider(height: 1, color: Colors.white24),
           // FR-101：底部固定区——全部标签 → 归档 → 回收站，不在滚动容器内。
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: TextButton.icon(
-              style: TextButton.styleFrom(foregroundColor: _sidebarFg),
-              onPressed: () => openTagOverview(context, controller),
-              icon: const Icon(Icons.label_outline, size: 18),
-              label: const Text('全部标签'),
+          // M19：窄屏的标签 / 归档 / 回收站分别归「标签」Tab 与「我的」页，不重复。
+          if (!compact) ...[
+            Divider(height: 1, color: dividerColor),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: TextButton.icon(
+                style: TextButton.styleFrom(foregroundColor: _sidebarFg),
+                onPressed: () => openTagOverview(context, controller),
+                icon: const Icon(Icons.label_outline, size: 18),
+                label: const Text('全部标签'),
+              ),
             ),
-          ),
-          const Divider(height: 1, color: Colors.white24),
-          // FR-25 / FR-26：左栏底部固定「归档」「回收站」入口。
-          _SidebarTile(
-            leading: const Icon(Icons.archive_outlined),
-            title: const Text('归档'),
-            selected: controller.archivedView,
-            onTap: () {
-              controller.selectArchivedView();
-              controller.search('');
-            },
-          ),
-          _SidebarTile(
-            leading: const Icon(Icons.delete_outline),
-            title: const Text('回收站'),
-            selected: controller.trashView,
-            onTap: () {
-              controller.selectTrashView();
-              controller.search('');
-            },
-          ),
+            Divider(height: 1, color: dividerColor),
+            // FR-25 / FR-26：左栏底部固定「归档」「回收站」入口。
+            _SidebarTile(
+              leading: const Icon(Icons.archive_outlined),
+              title: const Text('归档'),
+              selected: controller.archivedView,
+              onTap: () {
+                controller.selectArchivedView();
+                controller.search('');
+              },
+            ),
+            _SidebarTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('回收站'),
+              selected: controller.trashView,
+              onTap: () {
+                controller.selectTrashView();
+                controller.search('');
+              },
+            ),
+          ],
         ],
       ),
     );
@@ -239,6 +284,7 @@ class _SidebarTile extends StatelessWidget {
     required this.selected,
     required this.onTap,
     this.subtitle,
+    this.compact = false,
   });
 
   final Widget leading;
@@ -246,19 +292,23 @@ class _SidebarTile extends StatelessWidget {
   final Widget? subtitle;
   final bool selected;
   final VoidCallback onTap;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return ListTile(
       dense: true,
       leading: leading,
       title: title,
       subtitle: subtitle,
       selected: selected,
-      textColor: _sidebarFg,
-      iconColor: _sidebarFgDim,
-      selectedColor: Colors.white,
-      selectedTileColor: Colors.white12,
+      textColor: compact ? scheme.onSurface : _sidebarFg,
+      iconColor: compact ? scheme.outline : _sidebarFgDim,
+      selectedColor: compact ? scheme.primary : Colors.white,
+      selectedTileColor: compact
+          ? Theme.of(context).listTileTheme.selectedTileColor
+          : Colors.white12,
       onTap: onTap,
     );
   }
@@ -269,10 +319,14 @@ class _Tree extends StatelessWidget {
     required this.controller,
     required this.roots,
     required this.query,
+    this.compact = false,
+    this.onOpenNotebook,
   });
   final AppController controller;
   final List<Notebook> roots;
   final String query;
+  final bool compact;
+  final ValueChanged<String>? onOpenNotebook;
 
   @override
   Widget build(BuildContext context) {
@@ -314,6 +368,8 @@ class _Tree extends StatelessWidget {
             nb: nb,
             visibleIds: visible,
             forceExpanded: q.isNotEmpty,
+            compact: compact,
+            onOpenNotebook: onOpenNotebook,
           ),
       ],
     );
@@ -326,11 +382,15 @@ class _NotebookNode extends StatelessWidget {
     required this.nb,
     this.visibleIds,
     this.forceExpanded = false,
+    this.compact = false,
+    this.onOpenNotebook,
   });
   final AppController controller;
   final Notebook nb;
   final Set<String>? visibleIds;
   final bool forceExpanded;
+  final bool compact;
+  final ValueChanged<String>? onOpenNotebook;
 
   /// 节点前置区（箭头 / 等宽占位 + 图标）的**恒定**宽度（M18 / FR-109 / BR-109.1）。
   ///
@@ -352,6 +412,9 @@ class _NotebookNode extends StatelessWidget {
     // v0.17.2（FR-102 / BR-102.1）：数量走全库聚合，**不再**用当前中栏列表计数——
     // 否则切换笔记本后其它节点数量会跳成 0，行高也随之变化。
     final noteCount = controller.notebookNoteCount(nb.id);
+    final scheme = Theme.of(context).colorScheme;
+    final fg = compact ? scheme.onSurface : _sidebarFg;
+    final fgDim = compact ? scheme.outline : _sidebarFgDim;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -379,7 +442,7 @@ class _NotebookNode extends StatelessWidget {
                       child: Icon(
                         expanded ? Icons.expand_more : Icons.chevron_right,
                         size: 18,
-                        color: _sidebarFgDim,
+                        color: fgDim,
                       ),
                     )
                   else
@@ -411,16 +474,18 @@ class _NotebookNode extends StatelessWidget {
                   Text(
                     '$noteCount',
                     maxLines: 1,
-                    style: const TextStyle(fontSize: 11, color: _sidebarFgDim),
+                    style: TextStyle(fontSize: 11, color: fgDim),
                   ),
                 ],
               ],
             ),
             selected: controller.selectedNotebookId == nb.id,
-            textColor: _sidebarFg,
-            iconColor: _sidebarFgDim,
-            selectedColor: Colors.white,
-            selectedTileColor: Colors.white12,
+            textColor: fg,
+            iconColor: fgDim,
+            selectedColor: compact ? scheme.primary : Colors.white,
+            selectedTileColor: compact
+                ? Theme.of(context).listTileTheme.selectedTileColor
+                : Colors.white12,
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -430,7 +495,15 @@ class _NotebookNode extends StatelessWidget {
                 _nodeMenu(context),
               ],
             ),
-            onTap: () => controller.selectNotebook(nb.id),
+            onTap: () {
+              final open = onOpenNotebook;
+              if (open != null) {
+                open(nb.id);
+              } else {
+                controller.selectNotebook(nb.id);
+              }
+            },
+            onLongPress: compact ? () => _showMobileActions(context) : null,
           ),
         ),
         if (children.isNotEmpty && expanded)
@@ -444,6 +517,8 @@ class _NotebookNode extends StatelessWidget {
                     nb: c,
                     visibleIds: visibleIds,
                     forceExpanded: forceExpanded,
+                    compact: compact,
+                    onOpenNotebook: onOpenNotebook,
                   ),
               ],
             ),
@@ -471,8 +546,59 @@ class _NotebookNode extends StatelessWidget {
       encryptedLocked: nb.encrypted && !controller.isNotebookUnlocked(nb.id),
       size: narrow ? 12 : 16,
       dotOnly: narrow,
-      onDark: true,
+      onDark: !compact,
     );
+  }
+
+  /// 窄屏长按：底部操作面板（M19 / FR-113 / BR-113.1）。
+  ///
+  /// 项与桌面「⋯」菜单**同源**（同一 `_onMenuSelected` 分发），只换呈现形态。
+  Future<void> _showMobileActions(BuildContext context) async {
+    final value = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final scheme = Theme.of(sheetContext).colorScheme;
+        return SafeArea(
+          // 8 项 + 表头可能高于默认半屏高度：用可滚动容器避免溢出。
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+              ListTile(
+                leading: Icon(
+                  nb.encrypted ? Icons.lock_outline : Icons.folder_outlined,
+                  color: scheme.primary,
+                ),
+                title: Text(nb.name),
+                subtitle: Text('${controller.notebookNoteCount(nb.id)} 篇'),
+              ),
+              const Divider(height: 1),
+              for (final item in <(String, String, IconData)>[
+                ('rename', '重命名', Icons.drive_file_rename_outline),
+                ('newchild', '新建子笔记本', Icons.create_new_folder_outlined),
+                ('up', '上移', Icons.arrow_upward),
+                ('down', '下移', Icons.arrow_downward),
+                ('font', '默认字体…', Icons.font_download_outlined),
+                if (!nb.encrypted)
+                  ('encrypt', '设为加密笔记本', Icons.lock_outline),
+                ('delete', '删除', Icons.delete_outline),
+                ('sync', '立即上传 / 重试', Icons.sync),
+              ])
+                ListTile(
+                  leading: Icon(item.$3),
+                  title: Text(item.$2),
+                  enabled: item.$1 != 'sync' || nb.syncState.offersManualUpload,
+                  onTap: () => Navigator.of(sheetContext).pop(item.$1),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (value == null || !context.mounted) return;
+    await _onMenuSelected(context, value);
   }
 
   /// 节点菜单项（**单一来源**，FR-103 / BR-103.1）：尾部「⋯」与鼠标右键共用。
@@ -528,7 +654,8 @@ class _NotebookNode extends StatelessWidget {
   /// 行尾「⋯」按钮（左键入口）。
   Widget _nodeMenu(BuildContext context) {
     return PopupMenuButton<String>(
-      iconColor: _sidebarFgDim,
+      iconColor:
+          compact ? Theme.of(context).colorScheme.outline : _sidebarFgDim,
       onSelected: (v) => unawaited(_onMenuSelected(context, v)),
       itemBuilder: (_) => _menuItems(),
     );

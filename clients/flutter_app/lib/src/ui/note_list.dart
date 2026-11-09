@@ -11,8 +11,23 @@ import 'time_format.dart';
 /// 列表头部提供排序切换（更新时间 / 创建时间 / 标题）；选择记忆为本机偏好，
 /// 由 [AppController.setSortMode] 落 SQLite，重启保留。
 class NoteList extends StatefulWidget {
-  const NoteList({super.key, required this.controller});
+  const NoteList({
+    super.key,
+    required this.controller,
+    this.showHeaderTitle = true,
+    this.filterBar,
+  });
+
   final AppController controller;
+
+  /// 是否渲染中栏自己的小标题行（M19 / FR-112）。
+  ///
+  /// 桌面中栏 `true`；移动端的大标题 / 副标题由 `MobilePageHeader` 提供，此处置 `false`，
+  /// 避免出现两套标题。隐藏标题行时排序入口由移动端筛选胶囊承载。
+  final bool showHeaderTitle;
+
+  /// 搜索框与列表之间的附加筛选条（M19 / FR-112）：范围胶囊、排序胶囊、标签 chips。
+  final Widget? filterBar;
 
   @override
   State<NoteList> createState() => _NoteListState();
@@ -68,20 +83,21 @@ class _NoteListState extends State<NoteList> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  _headerTitle(),
-                  style: Theme.of(context).textTheme.labelLarge,
+        if (widget.showHeaderTitle)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _headerTitle(),
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
                 ),
-              ),
-              _SortButton(controller: controller),
-            ],
+                NoteSortButton(controller: controller),
+              ],
+            ),
           ),
-        ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: TextField(
@@ -98,6 +114,11 @@ class _NoteListState extends State<NoteList> {
             ),
           ),
         ),
+        if (widget.filterBar != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: widget.filterBar,
+          ),
         const SizedBox(height: 8),
         Expanded(
           child: notes.isEmpty
@@ -144,12 +165,19 @@ extension _FirstOrNull<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }
 
+/// 排序模式的中文标签（桌面按钮与移动端筛选胶囊**同源**，M19 / FR-112）。
+String noteSortLabel(NoteSortMode mode) => switch (mode) {
+      NoteSortMode.updatedAt => '更新时间',
+      NoteSortMode.createdAt => '创建时间',
+      NoteSortMode.title => '标题',
+    };
+
 /// 排序切换菜单：当前模式以对勾标出，其余纯文本。
 ///
 /// 用 PopupMenu 而非 SegmentedButton：选项数固定为 3、占位小、不抢标题空间；
 /// 切换后立刻调用 [AppController.setSortMode]，UI 即时重排。
-class _SortButton extends StatelessWidget {
-  const _SortButton({required this.controller});
+class NoteSortButton extends StatelessWidget {
+  const NoteSortButton({super.key, required this.controller});
   final AppController controller;
 
   @override
@@ -170,7 +198,7 @@ class _SortButton extends StatelessWidget {
                       ? const Icon(Icons.check, size: 18)
                       : null,
                 ),
-                Text(_sortLabel(mode)),
+                Text(noteSortLabel(mode)),
               ],
             ),
           ),
@@ -178,11 +206,6 @@ class _SortButton extends StatelessWidget {
     );
   }
 
-  static String _sortLabel(NoteSortMode mode) => switch (mode) {
-        NoteSortMode.updatedAt => '更新时间',
-        NoteSortMode.createdAt => '创建时间',
-        NoteSortMode.title => '标题',
-      };
 }
 
 class _EmptyHint extends StatelessWidget {

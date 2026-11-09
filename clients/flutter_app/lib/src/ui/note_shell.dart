@@ -12,6 +12,7 @@ import 'app_menu_bar.dart';
 import 'desktop_commands.dart';
 import 'note_editor.dart';
 import 'note_list.dart';
+import 'mobile/mobile_shell.dart';
 import 'note_properties_panel.dart';
 import 'notebook_tree.dart';
 import 'revision_panel.dart';
@@ -59,7 +60,7 @@ class _NoteShellState extends State<NoteShell> {
               ? _ShellAccelerator(controller: controller, child: shell)
               : shell;
         }
-        return _NarrowLayout(controller: controller);
+        return MobileShell(controller: controller);
       },
     );
   }
@@ -337,97 +338,6 @@ class _NoteListResizeHandleState extends State<_NoteListResizeHandle> {
             color: active ? scheme.primary : scheme.outlineVariant,
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _NarrowLayout extends StatelessWidget {
-  const _NarrowLayout({required this.controller});
-  final AppController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    final editorOpen = controller.selectedNoteId != null;
-    // 窄屏修订历史：无右侧栏可切换，改为**整页推入**（BR-12.3 / AC-137 / ui-spec §4.1 / §6）。
-    // M15（FR-74 / ui-spec §26.2）：属性面板同口径整页推入，且与修订历史**互斥**
-    // （同一槽位二选一，BR-74.5；属性优先）。
-    final showProperties = editorOpen && controller.showPropertiesPanel;
-    final showRevisions =
-        editorOpen && !showProperties && controller.showRevisionPanel;
-    // 手机：选中笔记后进入全屏编辑页；平板中等宽度时可用双栏。
-    return PopScope(
-      // 系统返回键（Android）：优先关属性 / 修订整页面板回编辑页，其次退出编辑回列表。
-      // 三级都不可弹时才交还系统（否则「点了历史 → 按返回」会直接退出应用）。
-      canPop: !showProperties && !showRevisions && !editorOpen,
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        if (showProperties) {
-          controller.setPropertiesPanelVisible(false);
-        } else if (showRevisions) {
-          controller.setRevisionPanelVisible(false);
-        } else if (editorOpen) {
-          controller.selectNote(null);
-        }
-      },
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(
-            showProperties
-                ? '属性'
-                : (showRevisions ? '版本历史' : (editorOpen ? '笔记' : '随手记 Sui')),
-          ),
-          leading: showProperties
-              // 返回先关闭属性面板，回到编辑页（不是退回列表）。
-              ? BackButton(
-                  onPressed: () => controller.setPropertiesPanelVisible(false),
-                )
-              : showRevisions
-                  // 返回先关闭修订面板，回到编辑页（不是退回列表）。
-                  ? BackButton(
-                      onPressed: () => controller.setRevisionPanelVisible(false),
-                    )
-                  : editorOpen
-                      ? BackButton(
-                          onPressed: () {
-                            controller.setRevisionPanelVisible(false);
-                            controller.setPropertiesPanelVisible(false);
-                            controller.selectNote(null);
-                          },
-                        )
-                      : null,
-          actions: [
-            LockActions(controller: controller),
-            SyncActions(controller: controller),
-            // 编辑态不再提供「删除笔记」图标：它与同步/设置同处顶栏、极易误碰（B15）。
-            // 删除入口保留在笔记列表的行尾菜单里（需二次确认）。
-            if (!editorOpen)
-              IconButton(
-                tooltip: '新建笔记',
-                icon: const Icon(Icons.note_add_outlined),
-                onPressed: () => controller.createNote(),
-              ),
-            // 窄屏（移动端 / 桌面窗口收窄）没有菜单栏：帮助入口收在「更多」里（FR-56）。
-            HelpActions(controller: controller),
-          ],
-        ),
-        drawer: editorOpen ? null : NoteTreeDrawer(controller: controller),
-        // 修订 / 属性面板整页推入：复用宽屏右侧栏的**同一组件**，能力完全一致；返回后回到编辑页。
-        body: showProperties
-            ? NotePropertiesPanel(
-                key: ValueKey(controller.selectedNoteId),
-                noteId: controller.selectedNoteId!,
-              )
-            : showRevisions
-                ? RevisionPanel(
-                    key: ValueKey(controller.selectedNoteId),
-                    noteId: controller.selectedNoteId!,
-                  )
-                : editorOpen
-                    ? (controller.selectedNoteLocked
-                        ? LockedNotePane(controller: controller)
-                        : NoteEditor(key: ValueKey(controller.selectedNoteId)))
-                    : NoteList(controller: controller),
       ),
     );
   }

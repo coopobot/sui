@@ -656,6 +656,26 @@ class AppController extends ChangeNotifier {
     return summaries.where((s) => !s.note.locked).toList();
   }
 
+  /// 窄屏底部导航 / 「我的」页的聚合计数（M19 / FR-111 / FR-115）。
+  ///
+  /// 只在壳层初始化、切换 Tab、从编辑页返回时调用，**不进编辑输入路径**。
+  /// 收件箱口径与 [refreshNotes] 一致：`isClip` 或带「网页剪藏」标签。
+  Future<({int inbox, int archived, int trash, int total})>
+      loadViewCounts() async {
+    final all = await _repository.listNotes(includeArchived: false);
+    final archived = await _repository.listArchivedNotes();
+    final trash = await _repository.listDeletedNotes();
+    final inbox = all
+        .where((n) => n.note.isClip || n.tags.contains(kWebClipTagName))
+        .length;
+    return (
+      inbox: inbox,
+      archived: archived.length,
+      trash: trash.length,
+      total: all.length,
+    );
+  }
+
   Future<void> refreshNotes({bool selectFirstNote = false}) async {
     // v0.17.2（FR-104 / AC-597）：只有最后一次刷新能写回列表与选中。
     final token = ++_notesRefreshToken;
@@ -759,16 +779,20 @@ class AppController extends ChangeNotifier {
   }
 
   /// 选中笔记本（`v0.17.2` / FR-104）：默认打开该笔记本列表第一篇。
-  Future<void> selectNotebook(String? id) async {
+  ///
+  /// [selectFirstNote]（M19 / BR-113.2）：窄屏底部导航点笔记本时传 `false`——
+  /// 只筛列表、不自动进入编辑器；桌面保持默认 `true`。
+  Future<void> selectNotebook(String? id, {bool selectFirstNote = true}) async {
     _selectedNotebookId = id;
     _inboxMode = false;
     _viewMode = NoteViewMode.all;
     _selectedNoteId = null;
     // 列表刷新 + 排序完成后再取第一篇（BR-104.1），空本保持空态（BR-104.3）。
-    await refreshNotes(selectFirstNote: true);
+    await refreshNotes(selectFirstNote: selectFirstNote);
     // 刷新期间若被别的刷新代次抢走（如保存触发的全量刷新），在此补齐选中，
     // 仍以**当前**目标笔记本为准，不回退到旧目标（AC-597）。
-    if (_selectedNotebookId == id &&
+    if (selectFirstNote &&
+        _selectedNotebookId == id &&
         !_inboxMode &&
         _viewMode == NoteViewMode.all &&
         _selectedNoteId == null &&
@@ -859,10 +883,12 @@ class AppController extends ChangeNotifier {
     refreshNotes();
   }
 
-  Future<void> createNotebook(String name, {String? parentId}) async {
+  /// 新建笔记本（M19：返回实体，供全屏表单成功后回传 / 入树高亮）。
+  Future<Notebook> createNotebook(String name, {String? parentId}) async {
     final nb = await _repository.createNotebook(name: name, parentId: parentId);
     await refreshNotebooks();
     _enqueueNotebook(nb);
+    return nb;
   }
 
   /// 重命名笔记本并入同步队列（FR-29）。

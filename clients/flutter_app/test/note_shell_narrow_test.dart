@@ -73,7 +73,10 @@ void main() {
     expect(find.byType(RevisionPanel), findsNothing);
 
     // 点工具栏「版本历史」——这正是修复前「点了没反应」的入口。
-    await tester.tap(find.byTooltip('版本历史'));
+    // M19：窄屏的「版本历史」入口在编辑页底部工具坞的「更多」面板里。
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('版本历史'));
     await tester.pumpAndSettle();
 
     // 核心断言：修订面板可见（整页推入），状态同步为真。
@@ -88,7 +91,10 @@ void main() {
   testWidgets('窄屏：顶栏返回键先关面板回编辑页（不退回列表）', (tester) async {
     final controller = await _pumpShell(tester, const Size(400, 800));
 
-    await tester.tap(find.byTooltip('版本历史'));
+    // M19：窄屏的「版本历史」入口在编辑页底部工具坞的「更多」面板里。
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('版本历史'));
     await tester.pumpAndSettle();
     expect(find.byType(RevisionPanel), findsOneWidget);
 
@@ -109,7 +115,10 @@ void main() {
   testWidgets('窄屏：系统返回键先关面板回编辑页，再按才退出编辑回列表', (tester) async {
     final controller = await _pumpShell(tester, const Size(400, 800));
 
-    await tester.tap(find.byTooltip('版本历史'));
+    // M19：窄屏的「版本历史」入口在编辑页底部工具坞的「更多」面板里。
+    await tester.tap(find.byTooltip('更多'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('版本历史'));
     await tester.pumpAndSettle();
     expect(find.byType(RevisionPanel), findsOneWidget);
 

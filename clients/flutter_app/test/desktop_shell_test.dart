@@ -20,6 +20,7 @@ import 'package:sui_flutter_app/src/ui/app_menu_bar.dart';
 import 'package:sui_flutter_app/src/ui/markdown_editor.dart';
 import 'package:sui_flutter_app/src/ui/note_editor.dart';
 import 'package:sui_flutter_app/src/ui/note_list.dart';
+import 'package:sui_flutter_app/src/ui/mobile/mobile_shell.dart';
 import 'package:sui_flutter_app/src/ui/note_shell.dart';
 import 'package:sui_flutter_app/src/ui/notebook_tree.dart';
 
@@ -426,15 +427,18 @@ void main() {
       expect(find.byType(NotebookTree), findsOneWidget);
       expect(find.byType(NoteEditor), findsOneWidget);
 
-      // 窄屏：改走抽屉 + 堆栈，不出菜单栏与切换控件（BR-40.6 / BR-41.7）。
+      // 窄屏（M19 / ADR-041）：不出菜单栏与切换控件，改走**底部五标签**；
+      // 抽屉退场（BR-111.3 / BR-40.6 / BR-41.7）。
       await tester.binding.setSurfaceSize(const Size(800, 600));
       await _settle(tester);
       expect(find.byType(AppMenuBar), findsNothing);
       expect(find.byType(PanelToggles), findsNothing);
-      // 抽屉是窄屏的导航入口：关闭态不建子树，展开后笔记本树可达（AC-116）。
-      tester.state<ScaffoldState>(find.byType(Scaffold)).openDrawer();
-      await _settle(tester, frames: 40);
-      expect(find.byType(NoteTreeDrawer), findsOneWidget);
+      expect(find.byType(MobileNavBar), findsOneWidget);
+      expect(find.byType(NoteTreeDrawer), findsNothing);
+      expect(find.byType(Drawer), findsNothing);
+      // 笔记本 Tab 是窄屏的一级导航入口：切过去后笔记本树可达（AC-650）。
+      await tester.tap(find.byKey(const ValueKey('mobile-tab-2')));
+      await _settle(tester);
       expect(find.byType(NotebookTree), findsOneWidget);
     });
 
