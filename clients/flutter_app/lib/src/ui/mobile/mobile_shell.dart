@@ -1249,17 +1249,18 @@ class _MineSyncRow extends StatelessWidget {
 
   final AppController controller;
 
-  /// 已配置 → 立即同步；仅本地 → 打开「账号」面板连接服务端（M19 不再回退旧设置弹窗）。
+  /// 同步行 = 顶栏云按钮的同一口径：**就地同步**，不打开任何二级页面。
+  ///
+  /// 未连接时 `syncNow()` 会静默返回（没有 client），因此这里给一条提示，
+  /// 引导用户从上方账户卡进入「账号」；同步行本身不导航。
   void _handleSyncTap(BuildContext context) {
-    if (controller.syncConfigured) {
-      unawaited(controller.syncNow());
+    if (!controller.syncConfigured) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('未连接服务端，请先在「账号」中连接')),
+      );
       return;
     }
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => MineAccountPage(controller: controller),
-      ),
-    );
+    unawaited(controller.syncNow());
   }
 
   @override

@@ -234,7 +234,7 @@ void main() {
     expect(find.byKey(const ValueKey('mobile-tab-4')), findsOneWidget);
   });
 
-  testWidgets('同步「仅本地」：点立即同步进账号面板，不再弹旧同步设置', (tester) async {
+  testWidgets('同步「仅本地」：就地提示，不打开二级页面', (tester) async {
     await _pump(tester);
     await tester.tap(find.byKey(const ValueKey('mobile-tab-4')));
     await _settle(tester);
@@ -242,11 +242,10 @@ void main() {
     await tester.tap(find.text('立即同步'));
     await _settle(tester);
 
-    expect(find.text('账号'), findsWidgets);
-    expect(find.text('服务端地址'), findsOneWidget);
+    // 与顶栏云按钮同口径：同步行只做同步，不导航。
+    expect(find.text('未连接服务端，请先在「账号」中连接'), findsOneWidget);
+    expect(find.text('服务端地址'), findsNothing);
     expect(find.text('同步与账号'), findsNothing);
-    await tester.tap(find.byType(BackButton));
-    await _settle(tester);
   });
 
   testWidgets('我的二级页：账号 / 缓存 / 外观 / 关于均可打开', (tester) async {
