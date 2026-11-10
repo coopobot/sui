@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:note_core/note_core.dart';
 import 'package:provider/provider.dart';
@@ -57,9 +58,15 @@ class _SyncSettingsPanelState extends State<SyncSettingsPanel> {
 
   String _defaultBaseUrl() {
     final configured = _c.syncConfig.baseUrl;
+    if (configured.isNotEmpty) return configured;
+    // Android 模拟器内的 localhost 指向模拟器自身，宿主机固定别名是 10.0.2.2；
+    // 真机 / 桌面 / Web 的 localhost 口径不变。用户仍可改成局域网 IP。
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      return 'http://10.0.2.2:8080';
+    }
     // 默认走 localhost：WSL2 只把 localhost 转发到宿主 Windows，127.0.0.1
     // 会被浏览器直连到 Windows 自身，注册/连接会 ERR_CONNECTION_REFUSED。
-    return configured.isEmpty ? 'http://localhost:8080' : configured;
+    return 'http://localhost:8080';
   }
 
   @override
