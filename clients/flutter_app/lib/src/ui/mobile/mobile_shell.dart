@@ -1249,6 +1249,19 @@ class _MineSyncRow extends StatelessWidget {
 
   final AppController controller;
 
+  /// 已配置 → 立即同步；仅本地 → 打开「账号」面板连接服务端（M19 不再回退旧设置弹窗）。
+  void _handleSyncTap(BuildContext context) {
+    if (controller.syncConfigured) {
+      unawaited(controller.syncNow());
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => MineAccountPage(controller: controller),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = SuiAppearance.of(context).palette;
@@ -1257,7 +1270,6 @@ class _MineSyncRow extends StatelessWidget {
       listenable: controller,
       builder: (context, _) {
         final state = controller.syncState;
-        final configured = controller.syncConfigured;
         final isError = state == SyncState.error;
         final label = switch (state) {
           SyncState.unconfigured => '仅本地',
@@ -1277,10 +1289,7 @@ class _MineSyncRow extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             child: InkWell(
               borderRadius: BorderRadius.circular(12),
-              onTap: () => unawaited(configured
-                  ? controller.syncNow()
-                  : showSettingsDialog(context, controller,
-                      section: SettingsSection.sync)),
+              onTap: () => _handleSyncTap(context),
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
                 child: Row(
@@ -1317,10 +1326,7 @@ class _MineSyncRow extends StatelessWidget {
                     TextButton(
                       onPressed: state == SyncState.syncing
                           ? null
-                          : () => unawaited(configured
-                              ? controller.syncNow()
-                              : showSettingsDialog(context, controller,
-                                  section: SettingsSection.sync)),
+                          : () => _handleSyncTap(context),
                       child: Text(state == SyncState.syncing ? '同步中' : '立即同步'),
                     ),
                   ],

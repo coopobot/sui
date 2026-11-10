@@ -234,6 +234,21 @@ void main() {
     expect(find.byKey(const ValueKey('mobile-tab-4')), findsOneWidget);
   });
 
+  testWidgets('同步「仅本地」：点立即同步进账号面板，不再弹旧同步设置', (tester) async {
+    await _pump(tester);
+    await tester.tap(find.byKey(const ValueKey('mobile-tab-4')));
+    await _settle(tester);
+
+    await tester.tap(find.text('立即同步'));
+    await _settle(tester);
+
+    expect(find.text('账号'), findsWidgets);
+    expect(find.text('服务端地址'), findsOneWidget);
+    expect(find.text('同步与账号'), findsNothing);
+    await tester.tap(find.byType(BackButton));
+    await _settle(tester);
+  });
+
   testWidgets('我的二级页：账号 / 缓存 / 外观 / 关于均可打开', (tester) async {
     await _pump(tester);
     await tester.tap(find.byKey(const ValueKey('mobile-tab-4')));
