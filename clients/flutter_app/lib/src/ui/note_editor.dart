@@ -2266,6 +2266,8 @@ class _NoteEditorState extends State<NoteEditor>
                   contextMenuBuilder: _buildEditorContextMenu,
                   // M18（FR-108）：仅格式模式拦 Tab；不适用时交还默认焦点移动。
                   onListTab: _mode == EditorMode.formatted ? _handleListTab : null,
+                  // M19（FR-116）：移动端格式工具在底部工具坞，空正文提示同步改为「下方」。
+                  toolbarBelow: widget.compactDock,
                 ),
               );
             },

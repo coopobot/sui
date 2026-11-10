@@ -143,7 +143,9 @@ class _NotebookTreeState extends State<NotebookTree> {
                   compact: compact,
                   leading: const Icon(Icons.layers_outlined),
                   title: const Text('全部笔记'),
-                  selected: controller.isAllNotesView,
+                  // 窄屏「笔记本」Tab 不显示智能入口选中态（模拟器实测：
+                  // 灰底高亮会被误读为当前页选中）。
+                  selected: !compact && controller.isAllNotesView,
                   onTap: () {
                     if (compact && widget.onOpenAllNotes != null) {
                       widget.onOpenAllNotes!();
@@ -161,7 +163,7 @@ class _NotebookTreeState extends State<NotebookTree> {
                   title: const Text('收件箱'),
                   subtitle: Text('${_clipCount(controller)} 篇剪藏',
                       style: TextStyle(fontSize: 11, color: fgDim)),
-                  selected: controller.inboxMode,
+                  selected: !compact && controller.inboxMode,
                   onTap: () {
                     if (compact && widget.onOpenInbox != null) {
                       widget.onOpenInbox!();

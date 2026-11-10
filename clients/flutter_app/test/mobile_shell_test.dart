@@ -6,6 +6,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:note_core/note_core.dart';
 import 'package:provider/provider.dart';
@@ -293,6 +294,46 @@ void main() {
     final after = tester.getBottomLeft(dock).dy;
     expect(before - after, closeTo(300, 2),
         reason: '工具坞底边应贴键盘上沿（键盘高 300）');
+  });
+
+  testWidgets('Android 重复返回事件：编辑页 → 列表，不直接退出应用', (tester) async {
+    final controller = await _pump(tester, seed: (controller) async {
+      await _seedNotebookWithNotes(controller);
+    });
+    await tester.tap(
+        find.descendant(of: find.byType(NoteList), matching: find.text('产品设计')).first);
+    await _settle(tester);
+    expect(controller.selectedNoteId, isNotNull);
+
+    // 捕获 SystemNavigator.pop（真正退出应用的通道）。
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        calls.add(call);
+        return null;
+      },
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
+
+    final codec = const JSONMessageCodec();
+    Future<void> systemBack() => tester.binding.defaultBinaryMessenger
+        .handlePlatformMessage(
+      'flutter/navigation',
+      codec.encodeMessage(<String, dynamic>{'method': 'popRoute'}),
+      (_) {},
+    );
+
+    // Android 16 同一次手势可能派发两次 popRoute：第二次不得退出应用。
+    await systemBack();
+    await tester.pump(const Duration(milliseconds: 50));
+    await systemBack();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(controller.selectedNoteId, isNull);
+    expect(find.byType(NoteList), findsWidgets);
+    expect(calls.where((c) => c.method == 'SystemNavigator.pop'), isEmpty);
   });
 
   testWidgets('收件箱 Tab：只列剪藏笔记、带角标、切回笔记恢复全部',

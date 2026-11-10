@@ -42,7 +42,13 @@ class MarkdownEditor extends StatelessWidget {
     this.webClipBuilder,
     this.contextMenuBuilder,
     this.onListTab,
+    this.toolbarBelow = false,
   });
+
+  /// 格式工具栏是否位于正文**下方**（M19 / FR-116 移动端底部工具坞）。
+  ///
+  /// 只影响空正文的提示文案（「上方」/「下方工具栏」）；桌面保持默认 `false`。
+  final bool toolbarBelow;
 
   /// 正文控制器；其 `text` 是唯一的 Markdown 正本。
   final MarkdownEditingController controller;
@@ -141,6 +147,7 @@ class MarkdownEditor extends StatelessWidget {
       showCursor: showCursor,
       contextMenuBuilder: contextMenuBuilder,
       onListTab: onListTab,
+      toolbarBelow: toolbarBelow,
     );
   }
 }
@@ -160,11 +167,15 @@ class _SourceEditor extends StatefulWidget {
     this.showCursor = true,
     this.contextMenuBuilder,
     this.onListTab,
+    this.toolbarBelow = false,
   });
 
   final MarkdownEditingController controller;
   final bool monospace;
   final VoidCallback onChanged;
+
+  /// 工具栏在正文下方（移动端底部工具坞）：仅影响空正文提示文案。
+  final bool toolbarBelow;
 
   /// **写入接缝**上的输入格式化器（FR-78 / BR-78.1）：格式模式 = 语法字符自动转义
   /// （[MarkdownSyntaxEscapeFormatter]）；源码模式 = 空列表（所见即正本）。
@@ -303,7 +314,9 @@ class _SourceEditorState extends State<_SourceEditor> {
           border: InputBorder.none,
           hintText: widget.monospace
               ? '# 标题\n\n在这里用 Markdown 书写…\n- 列表项\n- 加粗 **重要**'
-              : '开始书写，或用上方工具栏排版…',
+              : (widget.toolbarBelow
+                  ? '开始书写，或用下方工具栏排版…'
+                  : '开始书写，或用上方工具栏排版…'),
           hintStyle: TextStyle(color: scheme.outline.withValues(alpha: 0.6)),
         ),
         // M18（FR-107）：桌面由上层注入应用内右键菜单；null 时沿用框架默认。

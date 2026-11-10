@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:note_core/note_core.dart';
 
 import '../../app_version.dart';
@@ -68,6 +69,11 @@ class _MobileShellState extends State<MobileShell> {
   _NotesFilter _savedFilter = const _NotesFilter();
   bool _hideFab = false;
   String? _lastSelectedNoteId;
+
+  /// 上一次已处理的系统返回时刻（M19 模拟器实测：Android 16 可能对同一次返回手势
+  /// 派发两次 `popRoute`，第一次关闭编辑页、第二次会把应用退出）。
+  /// 仅在「已无处可退」准备退出应用时用作去抖；编辑页 / 面板的逐级关闭不受影响。
+  DateTime? _lastBackHandledAt;
 
   AppController get controller => widget.controller;
 
@@ -249,16 +255,57 @@ class _MobileShellState extends State<MobileShell> {
     unawaited(_refreshCounts());
   }
 
+  /// 系统返回的统一处理（M19 / FR-116 / ADR-041）。
+  ///
+  /// 顺序：属性面板 → 版本历史 → 编辑页 → 非「笔记」Tab → 退出应用。
+  /// 编辑页与各面板不再是独立的 Navigator 路由（窄屏是同一路由内的条件渲染），
+  /// 因此由壳层统一接管，不依赖 `PopScope` 的路由出栈。
+  void _handleSystemBack() {
+    final now = DateTime.now();
+    final recent = _lastBackHandledAt != null &&
+        now.difference(_lastBackHandledAt!) < const Duration(milliseconds: 600);
+    _lastBackHandledAt = now;
+
+    if (controller.selectedNoteId != null) {
+      if (controller.showPropertiesPanel) {
+        controller.setPropertiesPanelVisible(false);
+        return;
+      }
+      if (controller.showRevisionPanel) {
+        controller.setRevisionPanelVisible(false);
+        return;
+      }
+      controller.selectNote(null);
+      return;
+    }
+    if (_tab != _tabNotes) {
+      unawaited(_selectTab(_tabNotes));
+      return;
+    }
+    // 已在「笔记」Tab 根层：同一次返回手势的重复事件不再退出应用。
+    if (recent) return;
+    SystemNavigator.pop();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: controller,
-      builder: (context, _) {
-        if (controller.selectedNoteId != null) {
-          return _MobileEditorPage(controller: controller);
-        }
-        return _buildTabs(context);
+    return PopScope(
+      // 始终由壳层接管：Android 16 上 if 条件渲染的「编辑页」没有独立路由，
+      // `canPop: true` 会把返回直接冒泡成退出应用（模拟器实测）。
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _handleSystemBack();
       },
+      child: ListenableBuilder(
+        listenable: controller,
+        builder: (context, _) {
+          if (controller.selectedNoteId != null) {
+            return _MobileEditorPage(controller: controller);
+          }
+          return _buildTabs(context);
+        },
+      ),
     );
   }
 
@@ -633,7 +680,8 @@ class _MobileNotesPage extends StatelessWidget {
     }
     if (controller.selectedNotebookId != null) {
       final path = notebookPathLabel(controller, controller.selectedNotebookId);
-      return '$path · $count 篇笔记';
+      // 顶层笔记本的路径就是名称本身：不再重复成「Cork · 1 篇笔记」。
+      return path == _notebookName ? '$count 篇笔记' : '$path · $count 篇笔记';
     }
     return '$count 篇笔记 · ${controller.notebooks.length} 个笔记本';
   }
@@ -684,6 +732,21 @@ class _MobileNotesPage extends StatelessWidget {
         onPressed: onOpenTags,
       ));
     }
+    final scheme = Theme.of(context).colorScheme;
+    // 显式给全 ChipTheme：只 copyWith(labelStyle) 会让标签文字丢失前景色
+    // （实机表现为浅底上的白字、几乎不可见，M19 模拟器实测）。
+    final chipTheme = ChipThemeData(
+      backgroundColor: palette.containerLow,
+      selectedColor: scheme.primary.withValues(alpha: 0.12),
+      disabledColor: palette.containerLow,
+      side: BorderSide(color: palette.divider),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      labelStyle: TextStyle(fontSize: 12, color: scheme.onSurface),
+      secondaryLabelStyle: TextStyle(fontSize: 12, color: scheme.onSurface),
+      iconTheme: IconThemeData(size: 16, color: palette.outline),
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+    );
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -693,13 +756,7 @@ class _MobileNotesPage extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: Theme(
-                data: Theme.of(context).copyWith(
-                  chipTheme: Theme.of(context).chipTheme.copyWith(
-                        backgroundColor: palette.containerLow,
-                        side: BorderSide(color: palette.divider),
-                        labelStyle: const TextStyle(fontSize: 12),
-                      ),
-                ),
+                data: Theme.of(context).copyWith(chipTheme: chipTheme),
                 child: chip,
               ),
             ),
@@ -1035,15 +1092,16 @@ class _MobileMinePage extends StatelessWidget {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(_syncLabel(controller),
-                                    style: const TextStyle(
+                                const Text('随手记 Sui',
+                                    style: TextStyle(
                                         fontSize: 15,
                                         fontWeight: FontWeight.w600)),
                                 const SizedBox(height: 2),
                                 Text(
                                   lastSynced == null
-                                      ? '尚未同步'
-                                      : '上次同步 ${formatRelativeTime(lastSynced)}',
+                                      ? '${_syncLabel(controller)} · 尚未同步'
+                                      : '${_syncLabel(controller)} · 上次同步 '
+                                          '${formatRelativeTime(lastSynced)}',
                                   style: TextStyle(
                                       fontSize: 11, color: palette.outline),
                                 ),
@@ -1235,19 +1293,8 @@ class _MobileEditorPage extends StatelessWidget {
     final showProperties = editorOpen && controller.showPropertiesPanel;
     final showRevisions =
         editorOpen && !showProperties && controller.showRevisionPanel;
-    return PopScope(
-      canPop: !showProperties && !showRevisions && !editorOpen,
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        if (showProperties) {
-          controller.setPropertiesPanelVisible(false);
-        } else if (showRevisions) {
-          controller.setRevisionPanelVisible(false);
-        } else if (editorOpen) {
-          controller.selectNote(null);
-        }
-      },
-      child: Scaffold(
+    // 系统返回由 `MobileShell._handleSystemBack` 统一接管（见其注释）。
+    return Scaffold(
         appBar: AppBar(
           title: Text(
             showProperties
@@ -1302,7 +1349,6 @@ class _MobileEditorPage extends StatelessWidget {
                             compactDock: true,
                           ))
                     : const SizedBox.shrink(),
-      ),
     );
   }
 }
