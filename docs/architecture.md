@@ -850,8 +850,9 @@ sui/
   每篇导入是**单一库事务**（笔记 + 首条修订 + 附件映射 + 引用计数 + 指纹），
   取消与异常不留「有修订 / 有附件却无正文」的中间态；进度按**文件**计、可取消且已导入的保留。
 - **入口与命令同源**：桌面「文件 → 导入文件…」（`Ctrl+Shift+I`，经 `MenuItemButton.shortcut`
-  注册到菜单栏）与窄屏 / Web 顶栏「更多 → 导入文件…」共用 `DesktopCommandId.importFiles`
-  与同一份对话框实现；导入**不改动**当前选中笔记与编辑器草稿。
+  注册到菜单栏）与 Web 宽屏顶栏「更多 → 导入文件…」共用 `DesktopCommandId.importFiles`
+  与同一份对话框实现；**移动端 / 窄屏 Web 自 v0.19.0 起不提供导入入口**；
+  导入**不改动**当前选中笔记与编辑器草稿。
 
 **测试现状（本版新增）**：`note_core` 新增 `import_source_test.dart` / `import_html_test.dart` /
 `import_service_test.dart` 三个文件覆盖编码四态与降级、`.md` 保真、`.txt` 规整、HTML 全规则与
