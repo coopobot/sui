@@ -1289,7 +1289,9 @@ class _MineSyncRow extends StatelessWidget {
                       width: 8,
                       height: 8,
                       decoration: BoxDecoration(
-                        color: isError ? scheme.error : scheme.primary,
+                        color: state == SyncState.unconfigured
+                            ? palette.outline
+                            : (isError ? scheme.error : scheme.primary),
                         shape: BoxShape.circle,
                       ),
                     ),
