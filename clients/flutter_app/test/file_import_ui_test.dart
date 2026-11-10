@@ -210,7 +210,6 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('mobile-tab-4')));
     await _settle(tester);
     expect(find.text('导入文件'), findsOneWidget);
-    expect(find.text('使用文档'), findsOneWidget);
 
     await tester.tap(find.text('导入文件'));
     await _settle(tester);

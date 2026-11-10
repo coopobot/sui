@@ -7,16 +7,18 @@ import 'package:note_core/note_core.dart';
 import '../../app_version.dart';
 import '../app_controller.dart';
 import '../appearance/app_palette.dart';
-import '../desktop_commands.dart';
 import '../import_dialog.dart';
+import '../markdown_editor.dart';
 import '../note_editor.dart';
 import '../note_list.dart';
 import '../notebook_tree.dart';
 import '../note_properties_panel.dart';
 import '../note_shell.dart';
+import '../../platform/url_opener.dart';
 import '../revision_panel.dart';
 import '../settings_dialog.dart';
 import '../time_format.dart';
+import 'mine_panels.dart';
 import 'new_notebook_page.dart';
 
 /// 窄屏（`maxWidth < 900`）根壳：底部五标签 + FAB + 编辑页（M19 / FR-111\~FR-116）。
@@ -1046,11 +1048,24 @@ class _MobileMinePage extends StatelessWidget {
   final Future<void> Function() onOpenArchive;
   final Future<void> Function() onOpenTrash;
 
+  void _push(BuildContext context, Widget page) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => page),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = SuiAppearance.of(context).palette;
     final theme = Theme.of(context);
     final lastSynced = controller.lastSyncedAt;
+    final notebookName = controller.selectedNotebookId == null
+        ? '当前笔记本'
+        : controller.notebooks
+                .where((n) => n.id == controller.selectedNotebookId)
+                .firstOrNull
+                ?.name ??
+            '当前笔记本';
     return SafeArea(
       bottom: false,
       child: Column(
@@ -1068,9 +1083,10 @@ class _MobileMinePage extends StatelessWidget {
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
                   child: InkWell(
                     borderRadius: BorderRadius.circular(16),
-                    onTap: () => unawaited(showSettingsDialog(
-                        context, controller,
-                        section: SettingsSection.sync)),
+                    onTap: () => _push(
+                      context,
+                      MineAccountPage(controller: controller),
+                    ),
                     child: Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
@@ -1099,7 +1115,7 @@ class _MobileMinePage extends StatelessWidget {
                                 const SizedBox(height: 2),
                                 Text(
                                   lastSynced == null
-                                      ? '${_syncLabel(controller)} · 尚未同步'
+                                      ? '${_syncLabel(controller)} · 上次同步 —'
                                       : '${_syncLabel(controller)} · 上次同步 '
                                           '${formatRelativeTime(lastSynced)}',
                                   style: TextStyle(
@@ -1114,21 +1130,8 @@ class _MobileMinePage extends StatelessWidget {
                     ),
                   ),
                 ),
-                const _GroupLabel('同步与安全'),
-                _MineRow(
-                  icon: Icons.cloud_outlined,
-                  title: '同步设置',
-                  value: controller.syncConfigured ? '已连接' : '未连接',
-                  onTap: () => unawaited(showSettingsDialog(
-                      context, controller,
-                      section: SettingsSection.sync)),
-                ),
-                _MineRow(
-                  icon: Icons.sync,
-                  title: '立即同步',
-                  value: _syncLabel(controller),
-                  onTap: () => unawaited(controller.syncNow()),
-                ),
+                const _GroupLabel('同步'),
+                _MineSyncRow(controller: controller),
                 const _GroupLabel('内容'),
                 _MineRow(
                   icon: Icons.archive_outlined,
@@ -1152,36 +1155,42 @@ class _MobileMinePage extends StatelessWidget {
                   icon: Icons.sd_storage_outlined,
                   title: '附件缓存',
                   value: '上限 ${_formatBytes(controller.cacheLimitBytes)}',
-                  onTap: () => unawaited(showSettingsDialog(
-                      context, controller,
-                      section: SettingsSection.cache)),
+                  onTap: () => _push(
+                    context,
+                    MineCachePage(controller: controller),
+                  ),
                 ),
+                const _GroupLabel('通用'),
+                const _MineSettingRow(label: '语言', value: '简体中文'),
+                const _MineSettingRow(label: '自动保存', value: '0.7 秒'),
+                _MineSettingRow(
+                  label: '默认编辑模式',
+                  value: _modeLabel(controller.editorMode),
+                  onTap: () => _pickEditorMode(context),
+                ),
+                const _MineSettingRow(label: '自动回锁（加密）', value: '15 分钟'),
+                _MineSettingRow(label: '新建笔记默认笔记本', value: notebookName),
                 const _GroupLabel('应用'),
                 _MineRow(
                   icon: Icons.palette_outlined,
                   title: '外观',
                   value: _themeLabel(controller.themeMode),
-                  onTap: () => unawaited(showSettingsDialog(
-                      context, controller,
-                      section: SettingsSection.appearance)),
-                ),
-                _MineRow(
-                  icon: Icons.settings_outlined,
-                  title: '设置',
-                  value: '',
-                  onTap: () => unawaited(showSettingsDialog(context, controller)),
+                  onTap: () => _push(
+                    context,
+                    MineAppearancePage(controller: controller),
+                  ),
                 ),
                 _MineRow(
                   icon: Icons.menu_book_outlined,
                   title: '使用文档',
-                  value: '',
-                  onTap: () => showDocsDialog(context),
+                  value: '在线文档 ↗',
+                  onTap: () => _openDocs(context),
                 ),
                 _MineRow(
                   icon: Icons.info_outline,
-                  title: '关于随手记 Sui',
+                  title: '关于',
                   value: '版本 $kAppVersion',
-                  onTap: () => showSuiAboutDialog(context),
+                  onTap: () => _push(context, const MineAboutPage()),
                 ),
               ],
             ),
@@ -1191,11 +1200,49 @@ class _MobileMinePage extends StatelessWidget {
     );
   }
 
+  Future<void> _pickEditorMode(BuildContext context) async {
+    final selected = await showModalBottomSheet<EditorMode>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final mode in EditorMode.values)
+              ListTile(
+                title: Text(_modeLabel(mode)),
+                trailing: controller.editorMode == mode
+                    ? const Icon(Icons.check)
+                    : null,
+                onTap: () => Navigator.of(sheetContext).pop(mode),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null) controller.setEditorMode(selected);
+  }
+
+  Future<void> _openDocs(BuildContext context) async {
+    final ok = await openExternalUrl('https://coopobot.github.io/sui/');
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法打开浏览器，请访问 https://coopobot.github.io/sui/')),
+      );
+    }
+  }
+
   static String _syncLabel(AppController controller) => switch (controller.syncState) {
         SyncState.unconfigured => '仅本地',
         SyncState.idle => '已同步',
-        SyncState.syncing => '同步中…',
+        SyncState.syncing => '正在同步…',
         SyncState.error => '同步失败',
+      };
+
+  static String _modeLabel(EditorMode mode) => switch (mode) {
+        EditorMode.formatted => '格式',
+        EditorMode.source => '源码',
+        EditorMode.preview => '预览',
       };
 
   static String _themeLabel(ThemeMode mode) => switch (mode) {
@@ -1212,6 +1259,132 @@ class _MobileMinePage extends StatelessWidget {
       return '${(bytes / (1024 * 1024)).round()} MB';
     }
     return '${(bytes / 1024).round()} KB';
+  }
+}
+
+/// 「我的」同步行：一行内显示状态 + 操作（MB-M00）。
+class _MineSyncRow extends StatelessWidget {
+  const _MineSyncRow({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = SuiAppearance.of(context).palette;
+    final scheme = Theme.of(context).colorScheme;
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        final state = controller.syncState;
+        final configured = controller.syncConfigured;
+        final isError = state == SyncState.error;
+        final label = switch (state) {
+          SyncState.unconfigured => '仅本地',
+          SyncState.idle => '已同步',
+          SyncState.syncing => '正在同步…',
+          SyncState.error => '同步失败',
+        };
+        final detail = isError
+            ? (controller.syncError ?? '无法连接服务端')
+            : (controller.lastSyncedAt == null
+                ? null
+                : '上次同步 ${formatRelativeTime(controller.lastSyncedAt!)}');
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Material(
+            color: palette.containerLow,
+            borderRadius: BorderRadius.circular(12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => unawaited(configured
+                  ? controller.syncNow()
+                  : showSettingsDialog(context, controller,
+                      section: SettingsSection.sync)),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: isError ? scheme.error : scheme.primary,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(label,
+                              style: const TextStyle(
+                                  fontSize: 14, fontWeight: FontWeight.w500)),
+                          if (detail != null)
+                            Text(
+                              detail,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 11, color: palette.outline),
+                            ),
+                        ],
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: state == SyncState.syncing
+                          ? null
+                          : () => unawaited(configured
+                              ? controller.syncNow()
+                              : showSettingsDialog(context, controller,
+                                  section: SettingsSection.sync)),
+                      child: Text(state == SyncState.syncing ? '同步中' : '立即同步'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 单列通用设置行（无图标；有 onTap 才显示 `›`）。
+class _MineSettingRow extends StatelessWidget {
+  const _MineSettingRow({
+    required this.label,
+    required this.value,
+    this.onTap,
+  });
+
+  final String label;
+  final String value;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = SuiAppearance.of(context).palette;
+    return SizedBox(
+      height: 52,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+        title: Text(label, style: const TextStyle(fontSize: 15)),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(value,
+                style: TextStyle(fontSize: 11, color: palette.outline)),
+            if (onTap != null) ...[
+              const SizedBox(width: 4),
+              Icon(Icons.chevron_right, size: 18, color: palette.outline),
+            ],
+          ],
+        ),
+        onTap: onTap,
+      ),
+    );
   }
 }
 

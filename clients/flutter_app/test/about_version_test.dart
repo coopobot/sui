@@ -81,19 +81,18 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
     // 「关于」在「我的」页末尾，长屏也需滚动到可见（ListView 懒构建）。
     await tester.scrollUntilVisible(
-      find.text('关于随手记 Sui'),
+      find.text('关于'),
       200,
       scrollable: find.byType(Scrollable).last,
     );
     await tester.pump();
 
-    expect(find.text('关于随手记 Sui'), findsOneWidget);
-    await tester.tap(find.text('关于随手记 Sui'));
+    expect(find.text('关于'), findsOneWidget);
+    await tester.tap(find.text('关于'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
 
-    // 与桌面端同一份对话框、同一版本文案（BR-56.3）。
-    // 「我的」页行尾也显示版本，故为 findsWidgets（对话框内容仍是同一实现）。
+    // M19：关于改为独立全屏面板，版本文案仍与桌面同一来源（BR-56.3）。
     expect(find.text('版本 $kAppVersion'), findsWidgets);
   });
 }

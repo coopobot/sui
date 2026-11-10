@@ -212,15 +212,18 @@ void main() {
     await _settle(tester);
 
     for (final label in const [
-      '同步设置',
+      '同步',
       '立即同步',
       '归档',
       '回收站',
       '导入文件',
-      '外观',
-      '设置',
-      '使用文档',
-      '关于随手记 Sui',
+      '附件缓存',
+      '通用',
+      '语言',
+      '自动保存',
+      '默认编辑模式',
+      '自动回锁（加密）',
+      '新建笔记默认笔记本',
     ]) {
       expect(find.text(label), findsOneWidget, reason: '我的页应有「$label」');
     }
@@ -231,6 +234,55 @@ void main() {
     final nav = tester.widget<NavigationBar>(find.byType(NavigationBar));
     expect(nav.selectedIndex, 0);
     expect(find.byKey(const ValueKey('mobile-clear-filter')), findsOneWidget);
+  });
+
+  testWidgets('我的二级页：账号 / 缓存 / 外观 / 关于均可打开', (tester) async {
+    await _pump(tester);
+    await tester.tap(find.byKey(const ValueKey('mobile-tab-4')));
+    await _settle(tester);
+
+    // 账号：只保留服务器 / 账号 / 设备，不出现同步工具。
+    await tester.tap(find.text('随手记 Sui'));
+    await _settle(tester);
+    expect(find.text('账号'), findsWidgets);
+    expect(find.text('服务端地址'), findsOneWidget);
+    expect(find.text('本机设备 ID'), findsOneWidget);
+    expect(find.text('全部重新同步'), findsNothing);
+    await tester.tap(find.byType(BackButton));
+    await _settle(tester);
+
+    // 附件缓存
+    await tester.tap(find.text('附件缓存'));
+    await _settle(tester);
+    expect(find.text('上限 (MB)'), findsOneWidget);
+    await tester.tap(find.byType(BackButton));
+    await _settle(tester);
+
+    // 外观（在下方，先滚动到可见）
+    await tester.scrollUntilVisible(
+      find.text('外观'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.tap(find.text('外观'));
+    await _settle(tester);
+    expect(find.text('主题'), findsOneWidget);
+    await tester.tap(find.byType(BackButton));
+    await _settle(tester);
+
+    // 关于：检查更新置灰。
+    await tester.scrollUntilVisible(
+      find.text('关于'),
+      200,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.tap(find.text('关于'));
+    await _settle(tester);
+    expect(find.text('检查更新'), findsOneWidget);
+    expect(find.text('暂不可用'), findsOneWidget);
+    await tester.tap(find.byType(BackButton));
+    await _settle(tester);
+    expect(find.byKey(const ValueKey('mobile-tab-4')), findsOneWidget);
   });
 
   testWidgets('编辑器：一行顶栏 + 底部工具坞 + 更多面板', (tester) async {
@@ -317,7 +369,7 @@ void main() {
     addTearDown(() => tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, null));
 
-    final codec = const JSONMessageCodec();
+    const codec = JSONMessageCodec();
     Future<void> systemBack() => tester.binding.defaultBinaryMessenger
         .handlePlatformMessage(
       'flutter/navigation',

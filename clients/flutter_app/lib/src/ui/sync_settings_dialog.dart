@@ -25,7 +25,17 @@ Future<void> showSyncSettingsDialog(
 /// 只承载**同步 / 账号 / 设备**内容；「本地存储」（FR-58）与「附件缓存」（FR-15）
 /// 已各自独立成区（见 `settings_dialog.dart` / ui-spec §24.1）。
 class SyncSettingsPanel extends StatefulWidget {
-  const SyncSettingsPanel({super.key});
+  const SyncSettingsPanel({
+    super.key,
+    this.showSyncTools = true,
+    this.disconnectLabel = '断开连接',
+  });
+
+  /// 是否显示「全部重新同步」等同步工具（M19：账号页只保留服务器 / 账号 / 设备）。
+  final bool showSyncTools;
+
+  /// 断开按钮文案（账号页显示「退出登录」）。
+  final String disconnectLabel;
 
   @override
   State<SyncSettingsPanel> createState() => _SyncSettingsPanelState();
@@ -138,8 +148,12 @@ class _SyncSettingsPanelState extends State<SyncSettingsPanel> {
               const SizedBox(height: 12),
               // M12（FR-54 / ui-spec §20.5 入口一）：与桌面菜单栏「全部重新同步」
               // **同一实现**（进度 / 逐项结果 / 取消 / 重试口径一致）。
-              SyncReconcilePanel(controller: _c),
-              const Divider(height: 28),
+              // M19：账号页不承载同步工具（同步操作在「我的」行内）。
+              if (widget.showSyncTools) ...[
+                SyncReconcilePanel(controller: _c),
+                const Divider(height: 28),
+              ] else
+                const SizedBox(height: 4),
               TextField(
                 controller: _baseUrl,
                 decoration: const InputDecoration(
@@ -214,7 +228,7 @@ class _SyncSettingsPanelState extends State<SyncSettingsPanel> {
                                 await _c.disconnect();
                                 return null;
                               }, '已断开连接'),
-                      child: const Text('断开连接'),
+                      child: Text(widget.disconnectLabel),
                     ),
                 ],
               ),
