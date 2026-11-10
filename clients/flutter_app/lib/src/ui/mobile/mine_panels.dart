@@ -1,10 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:note_core/note_core.dart';
 
 import '../../app_version.dart';
 import '../app_controller.dart';
 import '../settings_dialog.dart';
 import '../sync_settings_dialog.dart';
+import '../time_format.dart';
 
 /// 全屏二级面板的统一外壳（M19 / MB-M00 二级页）。
 ///
@@ -216,6 +220,222 @@ class MineAboutPage extends StatelessWidget {
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 11, color: palette.outline),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+
+/// MB-M03「归档」。
+class MineArchivePage extends StatelessWidget {
+  const MineArchivePage({
+    super.key,
+    required this.controller,
+    this.onOpenNote,
+  });
+
+  final AppController controller;
+  final Future<void> Function(String id)? onOpenNote;
+
+  @override
+  Widget build(BuildContext context) => _MineNotesPage(
+        controller: controller,
+        archived: true,
+        onOpenNote: onOpenNote,
+      );
+}
+
+/// MB-M04「回收站」：逐条还原；「清空回收站」本期置灰。
+class MineTrashPage extends StatelessWidget {
+  const MineTrashPage({super.key, required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) =>
+      _MineNotesPage(controller: controller, archived: false);
+}
+
+class _MineNotesPage extends StatefulWidget {
+  const _MineNotesPage({
+    required this.controller,
+    required this.archived,
+    this.onOpenNote,
+  });
+
+  final AppController controller;
+  final bool archived;
+  final Future<void> Function(String id)? onOpenNote;
+
+  @override
+  State<_MineNotesPage> createState() => _MineNotesPageState();
+}
+
+class _MineNotesPageState extends State<_MineNotesPage> {
+  final TextEditingController _search = TextEditingController();
+  List<NoteSummary>? _items;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final list = widget.archived
+        ? await widget.controller.repository
+            .listArchivedNotes(search: _search.text.trim())
+        : await widget.controller.repository
+            .listDeletedNotes(search: _search.text.trim());
+    if (!mounted) return;
+    setState(() => _items = list);
+  }
+
+  String _notebookName(String? id) {
+    if (id == null) return '未分类';
+    for (final n in widget.controller.notebooks) {
+      if (n.id == id) return n.name;
+    }
+    return '未分类';
+  }
+
+  Future<void> _open(NoteSummary summary) async {
+    Navigator.of(context).pop();
+    final open = widget.onOpenNote;
+    if (open != null) {
+      await open(summary.note.id);
+    } else {
+      widget.controller.selectNote(summary.note.id);
+    }
+  }
+
+  Future<void> _unarchive(NoteSummary summary) async {
+    await widget.controller.repository.archiveNote(summary.note.id, false);
+    await widget.controller.refreshNotes();
+    if (mounted) await _load();
+  }
+
+  Future<void> _restore(NoteSummary summary) async {
+    await widget.controller.restoreNote(summary.note.id);
+    if (mounted) await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final items = _items;
+    return MinePanelScaffold(
+      title: widget.archived ? '归档' : '回收站',
+      actions: [
+        Padding(
+          padding: const EdgeInsets.only(right: 16),
+          child: Center(
+            child: Text(
+              items == null ? '' : '${items.length} 篇',
+              style: TextStyle(
+                fontSize: 12,
+                color: theme.colorScheme.outline,
+              ),
+            ),
+          ),
+        ),
+      ],
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: TextField(
+              controller: _search,
+              onChanged: (_) => unawaited(_load()),
+              decoration: InputDecoration(
+                hintText: widget.archived ? '搜索归档笔记…' : '搜索回收站…',
+                prefixIcon: const Icon(Icons.search, size: 20),
+                isDense: true,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ),
+          if (!widget.archived)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '删除的笔记会保留，直到手动清空。',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: theme.colorScheme.outline,
+                  ),
+                ),
+              ),
+            ),
+          Expanded(
+            child: items == null
+                ? const Center(child: CircularProgressIndicator())
+                : items.isEmpty
+                    ? Center(
+                        child: Text(
+                          widget.archived ? '暂无归档笔记' : '回收站为空',
+                          style: TextStyle(color: theme.colorScheme.outline),
+                        ),
+                      )
+                    : ListView.separated(
+                        itemCount: items.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final summary = items[index];
+                          final note = summary.note;
+                          return ListTile(
+                            contentPadding:
+                                const EdgeInsets.symmetric(horizontal: 16),
+                            title: Text(
+                              note.title.isEmpty ? '无标题' : note.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontSize: 15, fontWeight: FontWeight.w600),
+                            ),
+                            subtitle: Text(
+                              '${formatRelativeTime(note.updatedAt)} · '
+                              '${_notebookName(note.notebookId)}',
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  color: theme.colorScheme.outline),
+                            ),
+                            onTap: widget.archived
+                                ? () => unawaited(_open(summary))
+                                : null,
+                            trailing: TextButton(
+                              onPressed: () => unawaited(widget.archived
+                                  ? _unarchive(summary)
+                                  : _restore(summary)),
+                              child: Text(widget.archived ? '取消归档' : '还原'),
+                            ),
+                          );
+                        },
+                      ),
+          ),
+          if (!widget.archived)
+            const SafeArea(
+              top: false,
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: null,
+                    child: Text('清空回收站'),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );

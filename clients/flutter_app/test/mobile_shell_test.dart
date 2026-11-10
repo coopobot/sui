@@ -205,7 +205,7 @@ void main() {
     expect(nav.selectedIndex, 0);
   });
 
-  testWidgets('我的：入口收口可达；归档切到笔记 Tab 的归档视图', (tester) async {
+  testWidgets('我的：入口收口可达；归档打开独立面板', (tester) async {
     final controller = await _pump(tester);
 
     await tester.tap(find.byKey(const ValueKey('mobile-tab-4')));
@@ -227,10 +227,11 @@ void main() {
 
     await tester.tap(find.text('归档'));
     await _settle(tester);
-    expect(controller.archivedView, isTrue);
-    final nav = tester.widget<NavigationBar>(find.byType(NavigationBar));
-    expect(nav.selectedIndex, 0);
-    expect(find.byKey(const ValueKey('mobile-clear-filter')), findsOneWidget);
+    expect(controller.archivedView, isFalse);
+    expect(find.text('搜索归档笔记…'), findsOneWidget);
+    await tester.tap(find.byType(BackButton));
+    await _settle(tester);
+    expect(find.byKey(const ValueKey('mobile-tab-4')), findsOneWidget);
   });
 
   testWidgets('我的二级页：账号 / 缓存 / 外观 / 关于均可打开', (tester) async {
@@ -245,6 +246,16 @@ void main() {
     expect(find.text('服务端地址'), findsOneWidget);
     expect(find.text('本机设备 ID'), findsOneWidget);
     expect(find.text('全部重新同步'), findsNothing);
+    await tester.tap(find.byType(BackButton));
+    await _settle(tester);
+
+    // 回收站：清空按钮置灰。
+    await tester.tap(find.text('回收站'));
+    await _settle(tester);
+    final clear = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, '清空回收站'),
+    );
+    expect(clear.onPressed, isNull);
     await tester.tap(find.byType(BackButton));
     await _settle(tester);
 

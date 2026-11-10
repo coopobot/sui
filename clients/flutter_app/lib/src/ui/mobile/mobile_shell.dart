@@ -204,16 +204,9 @@ class _MobileShellState extends State<MobileShell> {
     setState(() => _tab = _tabNotes);
   }
 
-  Future<void> _openArchived() async {
-    _savedFilter = _currentFilter();
-    controller.selectArchivedView();
-    if (!mounted) return;
-    setState(() => _tab = _tabNotes);
-  }
-
-  Future<void> _openTrash() async {
-    _savedFilter = _currentFilter();
-    controller.selectTrashView();
+  /// 归档面板点开一条笔记：切回「笔记」Tab 并选中。
+  Future<void> _openNoteFromPanel(String id) async {
+    controller.selectNote(id);
     if (!mounted) return;
     setState(() => _tab = _tabNotes);
   }
@@ -343,8 +336,7 @@ class _MobileShellState extends State<MobileShell> {
           _MobileMinePage(
             controller: controller,
             counts: _counts,
-            onOpenArchive: _openArchived,
-            onOpenTrash: _openTrash,
+            onOpenNote: _openNoteFromPanel,
           ),
         ],
       ),
@@ -1038,14 +1030,12 @@ class _MobileMinePage extends StatelessWidget {
   const _MobileMinePage({
     required this.controller,
     required this.counts,
-    required this.onOpenArchive,
-    required this.onOpenTrash,
+    required this.onOpenNote,
   });
 
   final AppController controller;
   final MobileViewCounts counts;
-  final Future<void> Function() onOpenArchive;
-  final Future<void> Function() onOpenTrash;
+  final Future<void> Function(String id) onOpenNote;
 
   void _push(BuildContext context, Widget page) {
     Navigator.of(context).push(
@@ -1129,13 +1119,22 @@ class _MobileMinePage extends StatelessWidget {
                   icon: Icons.archive_outlined,
                   title: '归档',
                   value: '${counts.archived}',
-                  onTap: () => unawaited(onOpenArchive()),
+                  onTap: () => _push(
+                    context,
+                    MineArchivePage(
+                      controller: controller,
+                      onOpenNote: onOpenNote,
+                    ),
+                  ),
                 ),
                 _MineRow(
                   icon: Icons.delete_outline,
                   title: '回收站',
                   value: '${counts.trash}',
-                  onTap: () => unawaited(onOpenTrash()),
+                  onTap: () => _push(
+                    context,
+                    MineTrashPage(controller: controller),
+                  ),
                 ),
                 _MineRow(
                   icon: Icons.sd_storage_outlined,
