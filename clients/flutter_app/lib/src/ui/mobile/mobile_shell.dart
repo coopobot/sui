@@ -7,7 +7,6 @@ import 'package:note_core/note_core.dart';
 import '../../app_version.dart';
 import '../app_controller.dart';
 import '../appearance/app_palette.dart';
-import '../import_dialog.dart';
 import '../markdown_editor.dart';
 import '../note_editor.dart';
 import '../note_list.dart';
@@ -1059,13 +1058,6 @@ class _MobileMinePage extends StatelessWidget {
     final palette = SuiAppearance.of(context).palette;
     final theme = Theme.of(context);
     final lastSynced = controller.lastSyncedAt;
-    final notebookName = controller.selectedNotebookId == null
-        ? '当前笔记本'
-        : controller.notebooks
-                .where((n) => n.id == controller.selectedNotebookId)
-                .firstOrNull
-                ?.name ??
-            '当前笔记本';
     return SafeArea(
       bottom: false,
       child: Column(
@@ -1146,12 +1138,6 @@ class _MobileMinePage extends StatelessWidget {
                   onTap: () => unawaited(onOpenTrash()),
                 ),
                 _MineRow(
-                  icon: Icons.file_upload_outlined,
-                  title: '导入文件',
-                  value: '',
-                  onTap: () => unawaited(showImportDialog(context, controller)),
-                ),
-                _MineRow(
                   icon: Icons.sd_storage_outlined,
                   title: '附件缓存',
                   value: '上限 ${_formatBytes(controller.cacheLimitBytes)}',
@@ -1161,15 +1147,11 @@ class _MobileMinePage extends StatelessWidget {
                   ),
                 ),
                 const _GroupLabel('通用'),
-                const _MineSettingRow(label: '语言', value: '简体中文'),
-                const _MineSettingRow(label: '自动保存', value: '0.7 秒'),
                 _MineSettingRow(
                   label: '默认编辑模式',
                   value: _modeLabel(controller.editorMode),
                   onTap: () => _pickEditorMode(context),
                 ),
-                const _MineSettingRow(label: '自动回锁（加密）', value: '15 分钟'),
-                _MineSettingRow(label: '新建笔记默认笔记本', value: notebookName),
                 const _GroupLabel('应用'),
                 _MineRow(
                   icon: Icons.palette_outlined,

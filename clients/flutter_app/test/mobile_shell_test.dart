@@ -216,17 +216,14 @@ void main() {
       '立即同步',
       '归档',
       '回收站',
-      '导入文件',
       '附件缓存',
       '通用',
-      '语言',
-      '自动保存',
       '默认编辑模式',
-      '自动回锁（加密）',
-      '新建笔记默认笔记本',
     ]) {
       expect(find.text(label), findsOneWidget, reason: '我的页应有「$label」');
     }
+    // M19：移动端不提供导入入口（桌面端保留）。
+    expect(find.text('导入文件'), findsNothing);
 
     await tester.tap(find.text('归档'));
     await _settle(tester);

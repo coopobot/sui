@@ -202,18 +202,14 @@ void main() {
     });
   });
 
-  testWidgets('AC-233 窄屏 / 移动端：「我的 → 导入文件」可达', (tester) async {
+  testWidgets('AC-233 窄屏 / 移动端：不提供导入入口', (tester) async {
     await _pumpShell(tester, const Size(400, 800));
     expect(find.byType(AppMenuBar), findsNothing);
 
-    // M19：窄屏的导入入口从顶栏「更多」收口到「我的 → 内容」（ui-spec §31.4）。
+    // M19：移动端去掉导入功能（桌面端入口保留，见上一条用例）。
     await tester.tap(find.byKey(const ValueKey('mobile-tab-4')));
     await _settle(tester);
-    expect(find.text('导入文件'), findsOneWidget);
-
-    await tester.tap(find.text('导入文件'));
-    await _settle(tester);
-    expect(find.text('选择文件…'), findsOneWidget);
+    expect(find.text('导入文件'), findsNothing);
   });
 
   testWidgets('AC-240 加密且未解锁的目标笔记本：拒绝并提示，不打开对话框', (tester) async {
