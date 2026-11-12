@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 
 import '../platform/attachment_opener.dart';
 import '../platform/attachment_picker.dart';
+import '../platform/attachment_saver.dart';
 import '../platform/clipboard_html.dart';
 import '../platform/desktop_platform.dart';
 import '../platform/url_opener.dart';
@@ -3060,6 +3061,17 @@ class _NoteEditorState extends State<NoteEditor>
     _toast('已移除「${a.filename}」');
   }
 
+  /// 从附件面板保存副本（FR-117 / AC-670）：不打开预览也能保存。
+  ///
+  /// 未缓存字节时由 `saveAttachmentCopy` 先按需下载（卡片自动显示「下载中…」）；
+  /// 结果按六态分流，取消不提示（BR-117.6 / BR-117.7）。
+  Future<void> _saveAttachment(Attachment a) async {
+    final result = await _controller.saveAttachmentCopy(a);
+    if (!mounted) return;
+    final message = _attachmentSaveMessage(result, a.filename);
+    if (message != null) _toast(message);
+  }
+
   void _toast(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -3145,6 +3157,7 @@ class _NoteEditorState extends State<NoteEditor>
                               key: ValueKey(a.id),
                               attachment: a,
                               onOpen: () => _openAttachment(a),
+                              onSave: () => _saveAttachment(a),
                               onDelete: () async {
                                 await _removeAttachment(a);
                                 refreshPanel();
@@ -3274,6 +3287,7 @@ class _NoteEditorState extends State<NoteEditor>
         attachment: a,
         bytes: data,
         onOpenExternally: () => _controller.openAttachmentExternally(a),
+        onSave: () => _controller.saveAttachmentCopy(a, bytes: data),
       ),
     );
   }
@@ -4575,11 +4589,13 @@ class _AttachmentCard extends StatefulWidget {
     super.key,
     required this.attachment,
     required this.onOpen,
+    required this.onSave,
     required this.onDelete,
   });
 
   final Attachment attachment;
   final VoidCallback onOpen;
+  final VoidCallback onSave;
   final VoidCallback onDelete;
 
   @override
@@ -4671,6 +4687,12 @@ class _AttachmentCardState extends State<_AttachmentCard> {
               else
                 Icon(_statusIcon(availability), size: 16),
               IconButton(
+                tooltip: '保存到本地',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.download_outlined, size: 16),
+                onPressed: busy ? null : widget.onSave,
+              ),
+              IconButton(
                 tooltip: '移除附件',
                 visualDensity: VisualDensity.compact,
                 icon: const Icon(Icons.close, size: 16),
@@ -4752,11 +4774,13 @@ class _AttachmentPreviewDialog extends StatelessWidget {
     required this.attachment,
     required this.bytes,
     required this.onOpenExternally,
+    required this.onSave,
   });
 
   final Attachment attachment;
   final Uint8List bytes;
   final Future<ExternalOpenResult> Function() onOpenExternally;
+  final Future<AttachmentSaveResult> Function() onSave;
 
   /// 文本预览字符上限：超过则截断，避免超长文件卡住渲染。
   static const int _maxTextChars = 20000;
@@ -4776,6 +4800,10 @@ class _AttachmentPreviewDialog extends StatelessWidget {
       ),
       content: SizedBox(width: 560, child: _buildBody(context, theme)),
       actions: [
+        _AttachmentSaveButton(
+          filename: attachment.filename,
+          onSave: onSave,
+        ),
         TextButton.icon(
           icon: const Icon(Icons.open_in_new),
           label: const Text('用系统默认应用打开'),
@@ -4939,6 +4967,82 @@ class _AttachmentPreviewDialog extends StatelessWidget {
       default:
         return '文件';
     }
+  }
+}
+
+/// 预览弹窗里的「保存到本地」按钮（FR-117 / AC-667 / AC-670）。
+///
+/// 用独立 StatefulWidget 而不是把整个预览弹窗改成 StatefulWidget：保存的
+/// `_saving` 只管这一个按钮，预览内容与外部打开逻辑保持无状态（改动面最小）。
+/// 保存中按钮置灰并显示「保存中…」，连点不会弹出第二个系统对话框（BR-117.8）。
+class _AttachmentSaveButton extends StatefulWidget {
+  const _AttachmentSaveButton({
+    required this.filename,
+    required this.onSave,
+  });
+
+  final String filename;
+  final Future<AttachmentSaveResult> Function() onSave;
+
+  @override
+  State<_AttachmentSaveButton> createState() => _AttachmentSaveButtonState();
+}
+
+class _AttachmentSaveButtonState extends State<_AttachmentSaveButton> {
+  bool _saving = false;
+
+  Future<void> _save() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    AttachmentSaveResult result;
+    try {
+      result = await widget.onSave();
+    } catch (_) {
+      result = const AttachmentSaveResult(AttachmentSaveOutcome.failed);
+    }
+    if (!mounted) return;
+    setState(() => _saving = false);
+    final message = _attachmentSaveMessage(result, widget.filename);
+    if (message == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton.icon(
+      icon: _saving
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.download_outlined),
+      label: Text(_saving ? '保存中…' : '保存到本地'),
+      onPressed: _saving ? null : _save,
+    );
+  }
+}
+
+/// 保存结果的提示文案（六态分流，BR-117.6 / BR-117.7）。
+///
+/// `null` = **不提示**（用户主动取消，不该被当成错误）；其余各态给下一步动作。
+String? _attachmentSaveMessage(AttachmentSaveResult result, String filename) {
+  switch (result.outcome) {
+    case AttachmentSaveOutcome.saved:
+      final location = result.location;
+      return location == null ? '已保存到所选位置' : '已保存到 $location';
+    case AttachmentSaveOutcome.startedDownload:
+      return '已开始下载「$filename」';
+    case AttachmentSaveOutcome.cancelled:
+      return null;
+    case AttachmentSaveOutcome.unsupported:
+      return '当前平台不支持保存到本地';
+    case AttachmentSaveOutcome.noData:
+      return '附件「$filename」本机没有字节，且当前未连接服务端';
+    case AttachmentSaveOutcome.failed:
+      return '保存「$filename」失败，请重试';
   }
 }
 

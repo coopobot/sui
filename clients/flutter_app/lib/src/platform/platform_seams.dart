@@ -8,6 +8,10 @@
 /// `debugDefaultTargetPlatformOverride` 同一范式）。
 library;
 
+import 'dart:typed_data';
+
+import 'attachment_save.dart';
+
 /// 覆盖「打开外部网址」的实现；非 null 时 `openExternalUrl` 直接委托给它
 /// （协议白名单仍先行判定，故 `javascript:` 一类**不会**进到这里）。
 Future<bool> Function(String url)? debugUrlOpenerOverride;
@@ -37,3 +41,18 @@ Future<String?> Function({
 /// 测试用：Android 分支取 `cacheDir` 要经 path_provider 插件，宿主机单测里没有
 /// 插件实现，注入一个真实临时目录即可把「落盘 → 发意图」整条链路跑通。
 String? debugOpenTempBasePathOverride;
+
+/// 覆盖「保存附件到本机」的**整个平台实现**（FR-117 / AC-667\~AC-673）。
+///
+/// 非 null 时 `saveAttachmentToDevice` 直接委托给它，用于 widget 测试断言：
+/// 文件名是否已规整、字节是否与附件一致、UI 是否按六态结果给提示。
+Future<AttachmentSaveResult> Function({
+  required String filename,
+  required Uint8List bytes,
+})? debugAttachmentSaveOverride;
+
+/// 覆盖桌面「另存为」返回的路径（**仅桌面分支**）。
+///
+/// 非 null 时不弹系统对话框：返回路径 → 走真实写盘（可断言文件内容）；
+/// 返回 null → 模拟用户取消。宿主机单测据此覆盖「写盘 / 取消 / 失败」三条路径。
+Future<String?> Function({required String filename})? debugSavePathOverride;

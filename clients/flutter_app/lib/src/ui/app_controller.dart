@@ -8,6 +8,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../platform/app_lifecycle.dart';
 import '../platform/attachment_opener.dart';
+import '../platform/attachment_saver.dart';
 import '../platform/storage_location.dart';
 import 'appearance/font_catalog.dart';
 import 'desktop_commands.dart';
@@ -2448,6 +2449,28 @@ class AppController extends ChangeNotifier {
       _watchExternalEdit(a, path);
     }
     return result;
+  }
+
+  // ---- 保存副本到本地（FR-117 / ADR-042 / 详细设计 §16） ----
+
+  /// 把附件保存一份副本到用户本机（FR-117 / BR-117.1\~117.8）。
+  ///
+  /// [bytes] 非 null 时直接用（预览弹窗已经把字节读进内存）；否则先经
+  /// [openAttachment] 就绪——本地命中直接返回，未命中按需下载，期间
+  /// `_downloading` 驱动卡片显示「下载中…」。
+  ///
+  /// 返回六态结果：UI 据此区分「已保存 / 已开始下载 / 取消 / 平台不支持 /
+  /// 本机无字节 / 失败」，**不抛异常**（BR-117.6 / BR-117.7）。
+  /// 保存**不写库**：正文、映射、修订、同步队列与缓存占用均不变（BR-117.1）。
+  Future<AttachmentSaveResult> saveAttachmentCopy(
+    Attachment a, {
+    Uint8List? bytes,
+  }) async {
+    final data = bytes ?? await openAttachment(a);
+    if (data == null) {
+      return const AttachmentSaveResult(AttachmentSaveOutcome.noData);
+    }
+    return saveAttachmentToDevice(filename: a.filename, bytes: data);
   }
 
   /// 监视外部编辑（§12.3 步骤①「检测」）：每 2s 重读临时文件，连续两次读到
