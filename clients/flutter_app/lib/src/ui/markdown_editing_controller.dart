@@ -543,23 +543,43 @@ class MarkdownEditingController extends TextEditingController {
       return b.end.compareTo(a.end);
     });
 
-    final spans = <InlineSpan>[];
+    final spans = _SpanBuilder();
     var cursor = 0;
     for (final region in regions) {
       if (region.start < cursor) continue; // 与上一区域重叠，跳过
       if (region.start > cursor) {
-        spans.addAll(
+        _appendSpans(
+          spans,
           _MarkdownStyler.coalesce(text, styles, cursor, region.start),
         );
       }
-      spans.addAll(_regionSpans(context, text, base, styles, region));
+      _appendSpans(spans, _regionSpans(context, text, base, styles, region));
       cursor = region.end;
     }
     if (cursor < text.length) {
-      spans.addAll(_MarkdownStyler.coalesce(text, styles, cursor, text.length));
+      _appendSpans(
+        spans,
+        _MarkdownStyler.coalesce(text, styles, cursor, text.length),
+      );
     }
-    return spans;
+    return spans.finish();
   }
+
+  /// 追加 span，并**合并相邻的同样式纯文本 span**（FR-99 / 超大笔记性能）。
+  ///
+  /// 为什么必须合并：转义序列 `\x` 会被拆成「零宽记号 + 可见字符」两段，一条 24 万字、
+  /// 3 万处转义的笔记因此产生 **7.5 万个 span**；而 `RenderEditable` 的整篇排版按
+  /// **run 数**计价（实测 debug VM 下单次排版从 74 ms 涨到 9 s）。把零宽记号直接并入
+  /// 相邻同一样式的文本 run，span 数即可回到「文本段数」量级。
+  ///
+  /// 只合并满足以下条件的相邻项：都是**无子节点、无 recognizer** 的纯文本 span，
+  /// 且 `TextStyle ==`（逐字段相等）。语义与偏移完全不变。
+  static void _appendSpans(_SpanBuilder out, Iterable<InlineSpan> add) {
+    out.addAll(add);
+  }
+
+  // 说明：行内记号**不能**改用相邻文本样式来合并 span——记号字符是字面量
+  // （`**` / `==`），一旦换成可见样式就会真的显示出来（AC-172 要求零宽透明）。
 
   /// 跨行区间（表格）补齐文本所用的**零宽、禁断行**填充字符（`U+2060` WORD JOINER）。
   ///
@@ -597,14 +617,11 @@ class MarkdownEditingController extends TextEditingController {
       final escaped = text.substring(region.start + 1, region.end);
       final escapedStyle =
           region.start + 1 < styles.length ? styles[region.start + 1] : base;
+      // FR-99：反斜杠以 **U+2060**（零宽、禁断行）等码元顶替，与可见字符放在**同一个
+      // span** 里——这样它能被 [_appendSpans] 并入相邻文本 run。旧实现是「透明 0 号字记号
+      // + 可见字符」两段，一篇 3 万处转义的笔记因此多出 6 万个 span。
       return <InlineSpan>[
-        TextSpan(
-          text: MarkdownEditingController.hiddenFill(
-            text.substring(region.start, region.start + 1),
-          ),
-          style: base.copyWith(color: Colors.transparent, fontSize: 0),
-        ),
-        TextSpan(text: escaped, style: escapedStyle),
+        TextSpan(text: '$_noBreakFill$escaped', style: escapedStyle),
       ];
     }
     final out = <InlineSpan>[];
@@ -699,7 +716,7 @@ class MarkdownEditingController extends TextEditingController {
         case SyntaxMarkerKind.link:
         case SyntaxMarkerKind.escape:
           // 纯记号：**不可见**（零宽 + 透明），整段一并用零宽文本顶替，不产生 widget。
-          // `escape` 不会走到这里（上方已有显式分支：反斜杠透明 + 被转义字符按普通文本呈现）。
+          // `escape` 不会走到这里（方法开头已有显式分支）。
           return <InlineSpan>[
             TextSpan(
               text: MarkdownEditingController.hiddenFill(
@@ -1064,8 +1081,64 @@ class _SpanRegion {
 /// 契约：产出的样式必须**逐字符覆盖** `0..text.length`，不允许出现空洞——
 /// 否则 TextField 的光标定位与命中测试会错位。实现上先为每个字符算出最终样式，
 /// 再把样式相同的相邻字符合并成一个 span。
+class _SpanBuilder {
+  final List<InlineSpan> _spans = <InlineSpan>[];
+  final StringBuffer _pending = StringBuffer();
+  TextStyle? _pendingStyle;
+  bool _hasPending = false;
+
+  /// 追加若干 span；相邻的**同样式纯文本**先累积到同一个 buffer、最后一次性产出，
+  /// 避免逐字符拼接字符串（那会在长文本上退化成 O(n²)，FR-99）。
+  void addAll(Iterable<InlineSpan> add) {
+    for (final span in add) {
+      if (span is TextSpan &&
+          span.text != null &&
+          (span.children == null || span.children!.isEmpty) &&
+          span.recognizer == null) {
+        if (_hasPending && _pendingStyle == span.style) {
+          _pending.write(span.text);
+          continue;
+        }
+        _flush();
+        _pendingStyle = span.style;
+        _hasPending = true;
+        _pending.write(span.text);
+        continue;
+      }
+      _flush();
+      _spans.add(span);
+    }
+  }
+
+  void _flush() {
+    if (!_hasPending) return;
+    _spans.add(TextSpan(text: _pending.toString(), style: _pendingStyle));
+    _pending.clear();
+    _hasPending = false;
+    _pendingStyle = null;
+  }
+
+  List<InlineSpan> finish() {
+    _flush();
+    return _spans;
+  }
+}
+
 class _MarkdownStyler {
   _MarkdownStyler._();
+
+  /// 行首是否是**块级前缀**的起始字符（`#` `>` `-` `*` `+` `_` `=`）。
+  static bool isBlockPrefixStart(int c) =>
+      c == 0x23 || // #
+      c == 0x3E || // >
+      c == 0x2D || // -
+      c == 0x2A || // *
+      c == 0x2B || // +
+      c == 0x5F || // _
+      c == 0x3D; // =
+
+  /// ASCII 数字。
+  static bool isAsciiDigit(int c) => c >= 0x30 && c <= 0x39;
 
   static final RegExp _fenceLine = RegExp(r'^[ \t]*(```|~~~)');
 
@@ -1137,10 +1210,8 @@ class _MarkdownStyler {
     final n = text.length;
     final styles = List<TextStyle>.filled(n, base);
 
-    // setext 标题（`标题` + 下一行 `===` / `---`）行集合：该行按 h2 呈现，下划线行由记号隐藏
-    // （与预览一致，§13.2 / BR-23.7）。
-    final setextHeadings = _setextHeadingLines(text);
-
+    // setext 标题（`标题` + 下一行 `===` / `---`）改为行循环内**回溯着色**（FR-99），
+    // 不再做一次全文预扫（旧实现每行 1 条正则 + 一个 HashSet）。
     // 底色带生效时，围栏块**内容行**的行首集合（这些行不再逐字形染色）。
     final bandedCodeLines = bandedCodeLineStarts;
 
@@ -1150,15 +1221,27 @@ class _MarkdownStyler {
     // 故样式仍逐字符覆盖 `0..text.length`（偏移契约，BR-27.1）。
     var lineStart = 0;
     var inFence = false;
+    // 列表缩进上下文（FR-99）：把上一版每行 `isListLineAt` 的向上回溯换成缩进栈，均摊 O(1)。
+    final listTracker = ListIndentTracker();
+    // setext 标题回溯着色所需的「上一行」信息（旧实现是一次全文预扫建 HashSet）。
+    var prevLineStart = -1;
+    var prevLineEnd = -1;
+    var prevInFence = false;
     while (lineStart <= n) {
       var lineEnd = text.indexOf('\n', lineStart);
       if (lineEnd == -1) lineEnd = n;
       final line = _stripCr(text.substring(lineStart, lineEnd));
+      final indent = ListIndentTracker.indentOf(line);
       // 光标落在本行内 → 标记完整展开；否则高度淡化（§11.1）。
       final lineMarker =
           _lineFocused(selection, lineStart, lineEnd) ? markerActive : marker;
+      // FR-99 性能：围栏行首个非空白字符必然是 `` ` `` 或 `~`，否则不必跑正则。
+      final isFenceLine = indent < line.length &&
+          (line.codeUnitAt(indent) == 0x60 ||
+              line.codeUnitAt(indent) == 0x7E) &&
+          _fenceLine.hasMatch(line);
 
-      if (_fenceLine.hasMatch(line)) {
+      if (isFenceLine) {
         _fill(styles, lineStart, lineEnd, lineMarker);
         inFence = !inFence;
       } else if (inFence) {
@@ -1169,20 +1252,49 @@ class _MarkdownStyler {
           bandedCodeLines.contains(lineStart) ? codeNoBg : code,
         );
       } else {
-        _block(
-          styles,
-          lineStart,
-          lineEnd,
-          line,
-          base,
-          lineMarker,
-          accent,
-          quote,
-          setext: setextHeadings.contains(lineStart),
-          listOk: EditorFormat.isListLineAt(text, lineStart),
-        );
+        // setext 标题（`标题` + 下一行 `===` / `---`）：本行是下划线时**回溯着色上一行**
+        // （旧实现先做一次全文预扫，每行 1 条正则；这里只在候选行付一次判定）。
+        if (prevLineStart >= 0 &&
+            !prevInFence &&
+            indent < line.length &&
+            (line.codeUnitAt(indent) == 0x3D ||
+                line.codeUnitAt(indent) == 0x2D) &&
+            EditorFormat.isSetextUnderlineAt(text, lineStart)) {
+          _fill(
+            styles,
+            prevLineStart,
+            prevLineEnd,
+            base.copyWith(
+              fontSize: (base.fontSize ?? 15) * _headingScale[1],
+              fontWeight: FontWeight.w700,
+              height: 1.3,
+            ),
+          );
+        }
+        // FR-99 性能：行首不是任何块级前缀的起始字符、也不是数字时，本行不可能有
+        // 标题 / 列表 / 任务 / 引用 / 分割线，直接跳过 6 条行级正则（普通正文行命中）。
+        final first = indent < line.length ? line.codeUnitAt(indent) : -1;
+        if (first != -1 &&
+            (_MarkdownStyler.isBlockPrefixStart(first) ||
+                _MarkdownStyler.isAsciiDigit(first))) {
+          _block(
+            styles,
+            lineStart,
+            lineEnd,
+            line,
+            base,
+            lineMarker,
+            accent,
+            quote,
+            listOk: listTracker.allows(indent),
+          );
+        }
       }
 
+      listTracker.observe(line, indent);
+      prevLineStart = lineStart;
+      prevLineEnd = lineEnd;
+      prevInFence = inFence;
       if (lineEnd >= n) break;
       lineStart = lineEnd + 1;
     }
@@ -1243,30 +1355,11 @@ class _MarkdownStyler {
   // 块级
   // ---------------------------------------------------------------------------
 
-  /// 收集 **setext 标题行**（其后一行是 `===` / `---` 下划线）的行首偏移集合。
-  static Set<int> _setextHeadingLines(String text) {
-    final out = <int>{};
-    final n = text.length;
-    var lineStart = 0;
-    while (lineStart <= n) {
-      final nl = text.indexOf('\n', lineStart);
-      final lineEnd = nl == -1 ? n : nl;
-      if (lineStart > 0 && EditorFormat.isSetextUnderlineAt(text, lineStart)) {
-        final prevNl =
-            lineStart >= 2 ? text.lastIndexOf('\n', lineStart - 2) : -1;
-        out.add(prevNl == -1 ? 0 : prevNl + 1);
-      }
-      if (lineEnd >= n) break;
-      lineStart = lineEnd + 1;
-    }
-    return out;
-  }
-
   /// 块级样式（内容样式，**记号本身不在此呈现**——记号由记号区间隐藏，§13.2 / BR-23.7）。
   ///
-  /// [setext] 为 true 表示本行是 setext 标题的**文本行**（按 h2 呈现）；
   /// [listOk] 为 false 表示本行缩进越界、GFM 不会解析为列表 / 任务项 → 不加列表样式，
-  /// 与「预览」的行级结构判定一致（BR-23.9②）。
+  /// 与「预览」的行级结构判定一致（BR-23.9②）。setext 标题的上色由调用方**回溯**处理
+  /// （见 `characterStyles` 的行循环）。
   static void _block(
     List<TextStyle> styles,
     int start,
@@ -1276,19 +1369,8 @@ class _MarkdownStyler {
     TextStyle marker,
     TextStyle accent,
     TextStyle quote, {
-    bool setext = false,
     bool listOk = true,
   }) {
-    if (setext) {
-      final style = base.copyWith(
-        fontSize: (base.fontSize ?? 15) * _headingScale[1],
-        fontWeight: FontWeight.w700,
-        height: 1.3,
-      );
-      _fill(styles, start, end, style);
-      return;
-    }
-
     final heading = _headingLine.firstMatch(line);
     if (heading != null) {
       final level = heading.group(2)!.length;

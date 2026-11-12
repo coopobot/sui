@@ -410,7 +410,7 @@ void main() {
     expect(calls.where((c) => c.method == 'SystemNavigator.pop'), isEmpty);
   });
 
-  testWidgets('收件箱 Tab：只列剪藏笔记、带角标、切回笔记恢复全部',
+  testWidgets('收件箱 Tab：只列剪藏笔记、底栏无角标、切回笔记恢复全部',
       (tester) async {
     final controller = await _pump(tester, seed: (controller) async {
       await controller.repository.createNote(
@@ -423,9 +423,8 @@ void main() {
       await controller.refreshNotes();
     });
 
-    // 角标显示剪藏数量（1）。
-    final badge = tester.widget<Badge>(find.byType(Badge));
-    expect(badge.isLabelVisible, isTrue);
+    // 底部导航不收件箱数量角标（2026-11-11 需求变更，见 AC-648）。
+    expect(find.byType(Badge), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('mobile-tab-1')));
     await _settle(tester);

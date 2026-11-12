@@ -34,16 +34,16 @@ class MobileShell extends StatefulWidget {
   State<MobileShell> createState() => _MobileShellState();
 }
 
-/// 壳层聚合计数（收件箱 / 归档 / 回收站 / 全部）。只在初始化、切 Tab、退出编辑时刷新。
+/// 壳层聚合计数（归档 / 回收站 / 全部）。只在初始化、切 Tab、退出编辑时刷新。
+///
+/// 收件箱篇数**不在此聚合**：底部导航不显示收件箱角标（AC-648），篇数只在收件箱页副标题呈现。
 class MobileViewCounts {
   const MobileViewCounts({
-    this.inbox = 0,
     this.archived = 0,
     this.trash = 0,
     this.total = 0,
   });
 
-  final int inbox;
   final int archived;
   final int trash;
   final int total;
@@ -106,7 +106,6 @@ class _MobileShellState extends State<MobileShell> {
     if (!mounted) return;
     setState(() {
       _counts = MobileViewCounts(
-        inbox: counts.inbox,
         archived: counts.archived,
         trash: counts.trash,
         total: counts.total,
@@ -349,7 +348,6 @@ class _MobileShellState extends State<MobileShell> {
             )
           : MobileNavBar(
               index: _tab,
-              inboxCount: _counts.inbox,
               onSelected: (index) => unawaited(_selectTab(index)),
             ),
     );
@@ -395,12 +393,10 @@ class MobileNavBar extends StatelessWidget {
   const MobileNavBar({
     super.key,
     required this.index,
-    required this.inboxCount,
     required this.onSelected,
   });
 
   final int index;
-  final int inboxCount;
   final ValueChanged<int> onSelected;
 
   @override
@@ -444,32 +440,32 @@ class MobileNavBar extends StatelessWidget {
               height: 64,
               selectedIndex: index,
               onDestinationSelected: onSelected,
-              destinations: [
-                const NavigationDestination(
+              destinations: const [
+                NavigationDestination(
                   key: ValueKey('mobile-tab-0'),
                   icon: Icon(Icons.notes_outlined),
                   selectedIcon: Icon(Icons.notes),
                   label: '笔记',
                 ),
                 NavigationDestination(
-                  key: const ValueKey('mobile-tab-1'),
-                  icon: _inboxIcon(Icons.inbox_outlined, inboxCount),
-                  selectedIcon: _inboxIcon(Icons.inbox, inboxCount),
+                  key: ValueKey('mobile-tab-1'),
+                  icon: Icon(Icons.inbox_outlined),
+                  selectedIcon: Icon(Icons.inbox),
                   label: '收件箱',
                 ),
-                const NavigationDestination(
+                NavigationDestination(
                   key: ValueKey('mobile-tab-2'),
                   icon: Icon(Icons.folder_outlined),
                   selectedIcon: Icon(Icons.folder),
                   label: '笔记本',
                 ),
-                const NavigationDestination(
+                NavigationDestination(
                   key: ValueKey('mobile-tab-3'),
                   icon: Icon(Icons.label_outline),
                   selectedIcon: Icon(Icons.label),
                   label: '标签',
                 ),
-                const NavigationDestination(
+                NavigationDestination(
                   key: ValueKey('mobile-tab-4'),
                   icon: Icon(Icons.person_outline),
                   selectedIcon: Icon(Icons.person),
@@ -482,12 +478,6 @@ class MobileNavBar extends StatelessWidget {
       ),
     );
   }
-
-  Widget _inboxIcon(IconData icon, int count) => Badge(
-        isLabelVisible: count > 0,
-        label: Text('$count'),
-        child: Icon(icon),
-      );
 }
 
 // ---------------------------------------------------------------------------

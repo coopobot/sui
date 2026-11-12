@@ -29,7 +29,12 @@ String _visibleText(InlineSpan span) {
       final style = s.style;
       final invisible = style != null &&
           (style.fontSize == 0 || style.color == Colors.transparent);
-      if (!invisible && s.text != null) buf.write(s.text);
+      if (!invisible && s.text != null) {
+        // FR-99：隐藏记号改用零宽填充字符（U+2060 / U+00A0）并入相邻文本 run，
+        // 它们不构成「可见文本」。
+        buf.write(
+            s.text!.replaceAll('\u2060', '').replaceAll('\u00A0', ''));
+      }
       for (final child in s.children ?? const <InlineSpan>[]) {
         walk(child);
       }

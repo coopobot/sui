@@ -266,7 +266,10 @@ class _SourceEditorState extends State<_SourceEditor> {
             ),
             Padding(
               padding: const EdgeInsets.all(kEditorBodyPadding),
-              child: _wrapKeys(_buildField(scheme, appearance)),
+              // FR-99 性能：编辑区独立成层，按键重绘不牵连左右栏与顶栏。
+              child: RepaintBoundary(
+                child: _wrapKeys(_buildField(scheme, appearance)),
+              ),
             ),
           ],
         ),

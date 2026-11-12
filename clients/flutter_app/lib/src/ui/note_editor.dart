@@ -22,8 +22,10 @@ import 'desktop_commands.dart';
 import 'editor_context_menu.dart';
 import 'editor_focus_node.dart';
 import 'format_table.dart';
+import 'large_note_policy.dart';
 import 'markdown_editing_controller.dart';
 import 'markdown_editor.dart';
+import 'segmented_editor.dart';
 import 'note_window_manager.dart';
 import 'time_format.dart';
 
@@ -199,6 +201,22 @@ class _NoteEditorState extends State<NoteEditor>
   bool _loaded = false;
   String? _loadedNoteId;
 
+  /// 是否**推荐**分块模式（按字符数 + 样式段密度评估，加载时算一次）。
+  bool _segmentRecommended = false;
+
+  /// 当前是否处于分块模式（推荐且用户未手动切回全文）。
+  bool _segmented = false;
+
+  /// 用户手动「切回全文」（本笔记本次会话内有效；重新加载笔记后重新评估）。
+  bool _forceFullMode = false;
+
+  bool get _segmentedFormatted =>
+      _segmented && _mode == EditorMode.formatted;
+
+  /// 分块编辑器的状态句柄：格式工具栏据此作用到「当前块」。
+  final GlobalKey<SegmentedMarkdownEditorState> _segmentedKey =
+      GlobalKey<SegmentedMarkdownEditorState>();
+
   /// 正在进行的「写回模型」次数。非零期间禁止用模型内容重绑输入框，
   /// 否则每次敲字触发的保存都会重置标题/正文，selection 被置回 -1，光标跳行首。
   int _pendingSaves = 0;
@@ -314,6 +332,10 @@ class _NoteEditorState extends State<NoteEditor>
 
   void _loadNote() {
     final note = _note;
+    // 换笔记时重置「切回全文」偏好：分块与否按新笔记重新评估。
+    if (note != null && note.id != _loadedNoteId) {
+      _forceFullMode = false;
+    }
     if (note != null) {
       // v0.17.2（FR-99 / BR-99.2）：内容未变不重绑；真正变化时保留选区并按新长度钳制，
       // 不再把选区置为 -1（那会让光标跳到文末 / 行首）。
@@ -325,6 +347,7 @@ class _NoteEditorState extends State<NoteEditor>
       _loaded = true;
       _boundTitle = note.title;
       _boundContent = note.contentMarkdown;
+      _updateSegmentMode(note.contentMarkdown);
     }
     if (note?.id != _loadedNoteId) {
       _loadedNoteId = note?.id;
@@ -337,6 +360,66 @@ class _NoteEditorState extends State<NoteEditor>
         _attachments = [];
       }
     }
+  }
+
+  /// 评估是否进入分块模式（加载 / 换笔记时算一次；不进按键路径）。
+  ///
+  /// 判定口径见 `LargeNotePolicy`：`0.93×字符/千 + 5e-5×span^1.81 ≥ 16.7ms`。
+  void _updateSegmentMode(String text) {
+    final markers = EditorFormat.syntaxMarkers(text).length;
+    _segmentRecommended =
+        LargeNotePolicy.shouldSegment(chars: text.length, spans: markers);
+    _segmented = _segmentRecommended && !_forceFullMode;
+  }
+
+  /// 切回全文 / 重新启用分块。
+  void _toggleSegmentMode() {
+    setState(() {
+      _forceFullMode = !_forceFullMode;
+      _segmented = _segmentRecommended && !_forceFullMode;
+    });
+    if (_forceFullMode) {
+      _toast('已切回全文模式：超长笔记可能卡顿');
+    }
+  }
+
+  /// 分块模式提示条 / 切回入口。
+  Widget _buildSegmentBar() {
+    final chars = _content.text.length;
+    final label = chars >= 10000
+        ? '${(chars / 10000).toStringAsFixed(1)} 万'
+        : '$chars';
+    final segmentedNow = _segmentedFormatted;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      color: Theme.of(context)
+          .colorScheme
+          .surfaceContainerHighest
+          .withValues(alpha: 0.35),
+      child: Row(
+        children: [
+          Icon(
+            segmentedNow ? Icons.view_agenda_outlined : Icons.warning_amber,
+            size: 16,
+            color: Theme.of(context).colorScheme.primary,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              segmentedNow
+                  ? '大笔记分块模式 · 约 $label 字 · 点按段落编辑'
+                  : '笔记较大（约 $label 字），全文模式可能卡顿',
+              style: Theme.of(context).textTheme.bodySmall,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          TextButton(
+            onPressed: _toggleSegmentMode,
+            child: Text(segmentedNow ? '切回全文' : '启用分块'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 上一次绑定到输入框的标题 / 正文。
@@ -479,29 +562,53 @@ class _NoteEditorState extends State<NoteEditor>
             // —— 高频区 ——
             _fmtIcon(Icons.format_bold, '加粗', FormatCommand.bold),
             _fmtIcon(Icons.check_box_outlined, '勾选框', FormatCommand.taskList),
-            // 撤销 / 重做：与正文输入共用同一个撤销栈，故按钮可用性随其变化重绘。
-            ListenableBuilder(
-              listenable: _undoHistory,
-              builder: (context, _) => Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    tooltip: _tooltipWithShortcut('撤销'),
-                    icon: const Icon(Icons.undo),
-                    onPressed: _undoHistory.value.canUndo
-                        ? () => _undoHistory.undo()
-                        : null,
-                  ),
-                  IconButton(
-                    tooltip: _tooltipWithShortcut('重做'),
-                    icon: const Icon(Icons.redo),
-                    onPressed: _undoHistory.value.canRedo
-                        ? () => _undoHistory.redo()
-                        : null,
-                  ),
-                ],
-              ),
-            ),
+            // 撤销 / 重做：编辑块时用块内细粒度撤销栈；无块在编辑时用**文档级**撤销
+            // （按「块编辑会话」为一步，可跨块撤销/重做）；普通模式用全文撤销栈。
+            Builder(builder: (context) {
+              final segState =
+                  _segmentedFormatted ? _segmentedKey.currentState : null;
+              final blockUndo = segState?.activeUndo;
+              if (segState != null && blockUndo == null) {
+                final canUndo = segState.canUndoDocument;
+                final canRedo = segState.canRedoDocument;
+                return Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: _tooltipWithShortcut('撤销'),
+                      icon: const Icon(Icons.undo),
+                      onPressed: canUndo ? segState.undoDocument : null,
+                    ),
+                    IconButton(
+                      tooltip: _tooltipWithShortcut('重做'),
+                      icon: const Icon(Icons.redo),
+                      onPressed: canRedo ? segState.redoDocument : null,
+                    ),
+                  ],
+                );
+              }
+              final undo = blockUndo ?? _undoHistory;
+              return ListenableBuilder(
+                listenable: undo,
+                builder: (context, _) => Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: _tooltipWithShortcut('撤销'),
+                      icon: const Icon(Icons.undo),
+                      onPressed:
+                          undo.value.canUndo ? () => undo.undo() : null,
+                    ),
+                    IconButton(
+                      tooltip: _tooltipWithShortcut('重做'),
+                      icon: const Icon(Icons.redo),
+                      onPressed:
+                          undo.value.canRedo ? () => undo.redo() : null,
+                    ),
+                  ],
+                ),
+              );
+            }),
             _fmtIcon(Icons.format_italic, '斜体', FormatCommand.italic),
             _fmtIcon(
               Icons.format_strikethrough,
@@ -585,6 +692,18 @@ class _NoteEditorState extends State<NoteEditor>
     );
   }
 
+  /// 工具栏指针守卫：**按下**即挂起「失焦即结束编辑」。
+  ///
+  /// 按钮抢焦点发生在按下时，而 `onPressed` 在抬起时才执行；若等到 `onPressed` 里再挂起，
+  /// 帧后回调可能已经把当前块结束掉了（症状：点「插入图片 / 关联笔记」提示「请先点按一个段落」）。
+  Widget _toolbarPointerGuard(Widget child) {
+    if (!_segmentedFormatted) return child;
+    return Listener(
+      onPointerDown: (_) => _segmentedKey.currentState?.prepareToolbarAction(),
+      child: child,
+    );
+  }
+
   Widget _fmtIcon(IconData icon, String tooltip, FormatCommand command) {
     return IconButton(
       // 悬浮提示带**键位说明**（由快捷键映射反查，单一来源，§14.2 / BR-23.11）。
@@ -594,14 +713,28 @@ class _NoteEditorState extends State<NoteEditor>
     );
   }
 
+  /// 格式指令的作用目标：分块模式下是**当前块**的控制器，否则是全文控制器。
+  MarkdownEditingController? get _formatTarget => _segmentedFormatted
+      ? _segmentedKey.currentState?.activeController
+      : _content;
+
+  // 撤销/重做的目标在工具栏内按「块内 / 文档级 / 全文」三种情形就地选择（见 `_buildFormatToolbar`）。
+
   /// 对当前选区执行排版指令，并把结果即时回写正本。
   void _applyCommand(FormatCommand command) {
-    final value = _content.value;
+    final target = _formatTarget;
+    if (target == null) {
+      _toast('请先点按一个段落，再使用格式工具');
+      return;
+    }
+    // 工具栏点击会让块编辑框失焦；先挂起「失焦即结束编辑」。
+    _segmentedKey.currentState?.prepareToolbarAction();
+    final value = target.value;
     // 光标失焦时 selection 为 -1；此时以文末作为落点，避免指令无处施加。
     final sel = value.selection;
     final start = sel.isValid ? sel.start : value.text.length;
     final end = sel.isValid ? sel.end : value.text.length;
-    _writeBack(EditorFormat.apply(command, value.text, start, end));
+    _writeBackOn(target, EditorFormat.apply(command, value.text, start, end));
   }
 
   // ---------------------------------------------------------------------------
@@ -630,7 +763,13 @@ class _NoteEditorState extends State<NoteEditor>
 
   /// 正文：把链接写入**当前选区 / 光标处**（有选区时以选中文字预填「显示文字」）。
   Future<void> _openLinkDialog() async {
-    final value = _content.value;
+    final target = _formatTarget;
+    if (target == null) {
+      _toast('请先点按一个段落，再插入链接');
+      return;
+    }
+    _segmentedKey.currentState?.prepareToolbarAction();
+    final value = target.value;
     final text = value.text;
     final sel = value.selection;
     final start = (sel.isValid ? sel.start : text.length).clamp(0, text.length);
@@ -642,19 +781,23 @@ class _NoteEditorState extends State<NoteEditor>
         ? text.substring(lo, hi).replaceAll(RegExp(r'\s*\n\s*'), ' ')
         : '';
     final result = await _promptLink(initialLabel: selected);
-    if (result == null || !mounted) return;
+    if (result == null || !mounted) {
+      _segmentedKey.currentState?.focusActiveBlock();
+      return;
+    }
     final r = EditorFormat.insertLink(
-      _content.text,
+      text,
       lo,
       hi,
       label: result.label,
       url: result.url,
     );
-    if (r.text == _content.text) {
+    if (r.text == text) {
       _toast('网址为空，未插入链接');
       return;
     }
-    _writeBack(r);
+    _segmentedKey.currentState?.prepareToolbarAction();
+    _writeBackOn(target, r);
   }
 
   /// 单元格：把链接写入**活动单元格**（`<br>` 软换行追加，其余单元格逐字不动，BR-44.12）。
@@ -1016,6 +1159,10 @@ class _NoteEditorState extends State<NoteEditor>
   void openFind() {
     // FR-73：预览模式不提供笔记内查找（只读渲染，没有可编辑的正本视图）；入口也置灰。
     if (_mode == EditorMode.preview) return;
+    if (_segmentedFormatted) {
+      _toast('分块模式下暂不支持笔记内查找，请先切回全文');
+      return;
+    }
     if (_findVisible) {
       _focusFindQuery();
       return;
@@ -1502,16 +1649,25 @@ class _NoteEditorState extends State<NoteEditor>
   ///
   /// 通过 `controller.value` 整体赋值（而非只改 `text`），既能让 EditableText 的
   /// 原生撤销栈记录这次程序化写入，也能把选区落到 `FormatResult` 指定的位置。
-  void _writeBack(FormatResult result) {
+  void _writeBack(FormatResult result) => _writeBackOn(_content, result);
+
+  /// 把指令产物写回**指定控制器**（全文，或分块模式下的当前块），随后即时保存。
+  void _writeBackOn(MarkdownEditingController target, FormatResult result) {
     final text = result.text;
     final start = result.selectionStart.clamp(0, text.length);
     final end = result.selectionEnd.clamp(0, text.length);
-    _content.value = TextEditingValue(
+    target.value = TextEditingValue(
       text: text,
       selection: TextSelection(baseOffset: start, extentOffset: end),
     );
     // 点工具栏会让正文失焦；交还焦点，排版后可立即继续输入。
-    if (_mode != EditorMode.preview) _contentFocus.requestFocus();
+    if (identical(target, _content)) {
+      if (_mode != EditorMode.preview) _contentFocus.requestFocus();
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _segmentedKey.currentState?.focusActiveBlock();
+      });
+    }
     _save();
   }
 
@@ -1767,6 +1923,7 @@ class _NoteEditorState extends State<NoteEditor>
   /// （BR-23.2 / BR-75.1）。URL 恒由 [EditorFormat.noteRefUrl] 生成，**绝不**写裸
   /// `sui://<uuid>`——那会被附件引用正则误判并静默截断正本（FR-75 正本语法）。
   Future<void> _pickNoteRef() async {
+    _segmentedKey.currentState?.prepareToolbarAction();
     final picked = await showDialog<NoteSummary>(
       context: context,
       builder: (_) => _NotePickerDialog(
@@ -1774,8 +1931,16 @@ class _NoteEditorState extends State<NoteEditor>
         excludeNoteId: _noteId,
       ),
     );
-    if (picked == null || !mounted) return;
-    final value = _content.value;
+    if (picked == null || !mounted) {
+      _segmentedKey.currentState?.focusActiveBlock();
+      return;
+    }
+    final target = _formatTarget;
+    if (target == null) {
+      _toast('请先点按一个段落，再插入关联笔记');
+      return;
+    }
+    final value = target.value;
     final text = value.text;
     final sel = value.selection;
     final start = (sel.isValid ? sel.start : text.length).clamp(0, text.length);
@@ -1793,7 +1958,8 @@ class _NoteEditorState extends State<NoteEditor>
       _toast('未能插入关联笔记');
       return;
     }
-    _writeBack(r);
+    _segmentedKey.currentState?.prepareToolbarAction();
+    _writeBackOn(target, r);
   }
 
   // ---------------------------------------------------------------------------
@@ -2175,10 +2341,11 @@ class _NoteEditorState extends State<NoteEditor>
         // 不给排版入口，避免「点了没反应」的困惑。
         if (!widget.compactDock && _mode != EditorMode.preview) ...[
           const Divider(height: 1),
-          _buildFormatToolbar(),
+          _toolbarPointerGuard(_buildFormatToolbar()),
           // 图片尺寸条：点选 / 光标落在图片引用内时出现。用 ListenableBuilder
           // 监听正文控制器 —— 光标移动不会触发本组件重建，靠它才能即时显隐
           // （BR-27.2：点按图片即选中并显示手柄，不以光标落入引用跨度为前提）。
+          if (!_segmentedFormatted)
           ListenableBuilder(
             listenable: _content,
             builder: (context, _) {
@@ -2226,9 +2393,17 @@ class _NoteEditorState extends State<NoteEditor>
           ),
         ],
         // 查找栏（FR-73）：模式行 / 工具栏之下、编辑区之上；预览态不提供（FR-73）。
-        if (_findVisible && _mode != EditorMode.preview) ...[
+        // 分块模式（大笔记）不提供笔记内查找：先切回全文。
+        if (_findVisible &&
+            _mode != EditorMode.preview &&
+            !_segmentedFormatted) ...[
           const Divider(height: 1),
           _buildFindBar(),
+        ],
+        if (_mode == EditorMode.formatted &&
+            (_segmentedFormatted || _segmentRecommended)) ...[
+          const Divider(height: 1),
+          _buildSegmentBar(),
         ],
         if (!widget.compactDock) const Divider(height: 1),
         Expanded(
@@ -2242,6 +2417,30 @@ class _NoteEditorState extends State<NoteEditor>
               _content.paragraphWidth = width.isFinite
                   ? (width - 2 * kEditorBodyPadding).clamp(0.0, double.infinity)
                   : 0;
+              // 大笔记：分块模式（块级虚拟化 + 当前块编辑），单键成本与总长解耦。
+              if (_segmentedFormatted) {
+                return SegmentedMarkdownEditor(
+                  key: _segmentedKey,
+                  text: _content.text,
+                  onChanged: (text) {
+                    if (text == _content.text) return;
+                    _content.text = text;
+                    _scheduleSave();
+                  },
+                  imageBuilder: _buildImage,
+                  htmlImageBuilder: _buildHtmlImage,
+                  webClipBuilder: _buildWebClipPreview,
+                  formatImageBuilder: _buildFormatImage,
+                  formatTaskCheckboxBuilder: _buildTaskCheckbox,
+                  formatAttachmentLinkBuilder: _buildAttachmentLink,
+                  formatTableBuilder: _buildFormatTable,
+                  formatHtmlBlockBuilder: _buildHtmlBlock,
+                  formatWebClipBuilder: _buildWebClipFormat,
+                  formatLinkBuilder: _buildFormatLink,
+                  onToggleTask: _toggleTask,
+                  onActiveBlockChanged: () => setState(() {}),
+                );
+              }
               return _wrapShortcuts(
                 MarkdownEditor(
                   controller: _content,
@@ -2308,7 +2507,7 @@ class _NoteEditorState extends State<NoteEditor>
                     ? const Center(
                         child: Text('预览模式', style: TextStyle(fontSize: 12)),
                       )
-                    : _buildFormatToolbar(),
+                    : _toolbarPointerGuard(_buildFormatToolbar()),
               ),
               IconButton(
                 key: const ValueKey('mobile-more'),
@@ -2690,6 +2889,8 @@ class _NoteEditorState extends State<NoteEditor>
   Future<void> _pickAndAttach({VoidCallback? onChanged}) async {
     final id = _noteId;
     if (id == null || _attaching) return;
+    // 系统文件选择器会抢焦点：先挂起「失焦即结束编辑」，结束后再决定是否交还。
+    _segmentedKey.currentState?.prepareToolbarAction();
     _attaching = true;
     _notifyAttaching(onChanged);
     try {
@@ -2700,7 +2901,10 @@ class _NoteEditorState extends State<NoteEditor>
         _toast('打开文件选择器失败：$e');
         return;
       }
-      if (picked.isEmpty) return;
+      if (picked.isEmpty) {
+        _segmentedKey.currentState?.focusActiveBlock();
+        return;
+      }
 
       // 选完即公开「本批次有哪些文件」，面板下一帧就能列出（BR-91.1 / AC-516）。
       _attachPending
@@ -2708,10 +2912,20 @@ class _NoteEditorState extends State<NoteEditor>
         ..addAll(picked.map((f) => f.filename));
       _notifyAttaching(onChanged);
 
-      // 在打开文件选择器之前记下光标位置；选择器是异步的，回来时光标可能已移动。
-      final sel = _content.value.selection;
-      var insertAt = sel.isValid ? sel.start : _content.text.length;
+      // 分块模式：有当前块就插到光标处，没有就作为**文末新单元**；普通模式仍是全文。
+      final target = _formatTarget;
+      final segState = _segmentedFormatted ? _segmentedKey.currentState : null;
+      if (target == null && segState == null) {
+        _toast('请先点按一个段落，再插入附件');
+        return;
+      }
+      segState?.prepareToolbarAction();
+      final sel = target?.value.selection;
+      final baseText = target?.text ?? _content.text;
+      var insertAt = (sel != null && sel.isValid) ? sel.start : baseText.length;
       var count = 0;
+      // 分块模式：表格 / 图片 / 附件都是**独立单元**，收集后一次性作为新块插入。
+      final pendingUnits = <String>[];
       for (final f in picked) {
         // 编辑器已销毁（关闭笔记 / 切走窗口）就没必要继续落笔；已完成的项两边一致。
         if (!mounted) break;
@@ -2723,7 +2937,7 @@ class _NoteEditorState extends State<NoteEditor>
           );
           // 以**当前**正本落笔（不是批次开始时的快照），位置钳制到当前长度：
           // 即便内容在此期间被外部改写，也不会覆盖别人的字。
-          final current = _content.text;
+          final current = target?.text ?? _content.text;
           final at = insertAt.clamp(0, current.length);
           final result = EditorFormat.insertAttachment(
             current,
@@ -2733,13 +2947,16 @@ class _NoteEditorState extends State<NoteEditor>
             sha256: att.sha256,
             isImage: att.mimeKind == 'image',
           );
+          if (_segmentedFormatted) {
+            final insertedLen = result.text.length - current.length;
+            pendingUnits.add(result.text.substring(at, at + insertedLen));
+            count++;
+            continue;
+          }
+          if (target == null) continue;
           insertAt = result.selectionStart;
-          _content.value = TextEditingValue(
-            text: result.text,
-            selection: TextSelection.collapsed(offset: insertAt),
-          );
           // 逐项保存：映射刚入库，引用必须同一轮落库（BR-91.3 / AC-521）。
-          await _save();
+          _writeBackOn(target, result);
           count++;
         } catch (e) {
           _toast('附件「${f.filename}」添加失败：$e');
@@ -2752,11 +2969,17 @@ class _NoteEditorState extends State<NoteEditor>
           }
         }
       }
+      if (pendingUnits.isNotEmpty) {
+        _segmentedKey.currentState?.insertBlockUnit(pendingUnits.join('\n\n'));
+      }
       if (count > 0 && mounted) _toast('已添加 $count 个附件');
     } finally {
       _attaching = false;
       _attachPending.clear();
       _notifyAttaching(onChanged);
+      if (_segmentedFormatted) {
+        _segmentedKey.currentState?.focusActiveBlock();
+      }
     }
   }
 
@@ -2961,11 +3184,16 @@ class _NoteEditorState extends State<NoteEditor>
   /// 表格插入面板（ui-spec §18.1 / FR-44 / BR-44.1）：自定义行 / 列数后于光标处
   /// 插入一张空表；超界（行 1~20、列 1~8）时提示并钳制到边界值。
   Future<void> _openTablePanel() async {
+    // 弹层会抢焦点：分块模式下先挂起「失焦即结束编辑」，取消时再交还焦点。
+    _segmentedKey.currentState?.prepareToolbarAction();
     final picked = await showDialog<({int rows, int columns})>(
       context: context,
       builder: (_) => const _TableSizeDialog(),
     );
-    if (picked == null) return;
+    if (picked == null) {
+      _segmentedKey.currentState?.focusActiveBlock();
+      return;
+    }
     final rows = picked.rows;
     final columns = picked.columns;
     final clampedRows = rows.clamp(
@@ -2988,20 +3216,35 @@ class _NoteEditorState extends State<NoteEditor>
   }
 
   /// 在光标 / 选区处插入一张 [rows] × [columns] 的空表（GFM 管道表，BR-44.2）。
+  ///
+  /// 分块模式下作用于**当前块**（表格会插入该块内部，退出编辑时重新分块）。
   void _insertTableAtCursor(int rows, int columns) {
-    final value = _content.value;
+    final target = _formatTarget;
+    if (target == null) {
+      _toast('请先点按一个段落，再插入表格');
+      return;
+    }
+    _segmentedKey.currentState?.prepareToolbarAction();
+    final value = target.value;
     final sel = value.selection;
     final start = sel.isValid ? sel.start : value.text.length;
     final end = sel.isValid ? sel.end : value.text.length;
-    _writeBack(
-      EditorFormat.insertTable(
-        value.text,
-        start,
-        end,
-        rows: rows,
-        columns: columns,
-      ),
+    final result = EditorFormat.insertTable(
+      value.text,
+      start,
+      end,
+      rows: rows,
+      columns: columns,
     );
+    if (_segmentedFormatted) {
+      // 表格是**独立单元**：插入到光标处，但把光标前后文字与表格各自成块。
+      final insertedLen =
+          result.text.length - value.text.length + (end - start);
+      final snippet = result.text.substring(start, start + insertedLen);
+      _segmentedKey.currentState?.insertBlockUnit(snippet);
+      return;
+    }
+    _writeBackOn(target, result);
   }
 
   /// 打开附件 = **预览**（ui-spec §18.3 / FR-47 / AC-148 / BR-47.1）。

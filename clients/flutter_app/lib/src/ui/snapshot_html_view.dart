@@ -23,7 +23,11 @@ typedef SnapshotHtmlImageBuilder = Widget Function(
 );
 
 /// 快照 HTML 块的渲染组件。
-class SnapshotHtmlView extends StatelessWidget {
+///
+/// FR-99 性能：解析结果按 `html` 字符串**记忆化**（故为 [StatefulWidget]）——
+/// 格式模式下 `buildTextSpan` 每次按键都会重建本组件，旧实现每键都重新
+/// [parseSnapshotHtml] 整块 HTML（剪藏笔记可达数十 KB）。
+class SnapshotHtmlView extends StatefulWidget {
   const SnapshotHtmlView({
     super.key,
     required this.html,
@@ -45,9 +49,27 @@ class SnapshotHtmlView extends StatelessWidget {
   final void Function(String url)? onOpenLink;
 
   @override
+  State<SnapshotHtmlView> createState() => _SnapshotHtmlViewState();
+}
+
+class _SnapshotHtmlViewState extends State<SnapshotHtmlView> {
+  /// 已缓存解析结果的 HTML 原文（与 [widget.html] 比较；不同才重新解析）。
+  String? _cachedHtml;
+
+  /// 已解析结果（[parseSnapshotHtml] 返回根元素）。
+  SnapshotElement? _cachedRoot;
+
+  SnapshotElement get _parsedRoot {
+    final cached = _cachedRoot;
+    if (cached != null && _cachedHtml == widget.html) return cached;
+    _cachedHtml = widget.html;
+    return _cachedRoot = parseSnapshotHtml(widget.html);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final root = parseSnapshotHtml(html);
-    final style = baseStyle ?? DefaultTextStyle.of(context).style;
+    final root = _parsedRoot;
+    final style = widget.baseStyle ?? DefaultTextStyle.of(context).style;
     return _children(context, root.children, style, const <String, String>{});
   }
 
@@ -196,7 +218,7 @@ class SnapshotHtmlView extends StatelessWidget {
       decoration: TextDecoration.underline,
       decorationColor: Theme.of(context).colorScheme.primary,
     );
-    final open = onOpenLink;
+    final open = widget.onOpenLink;
     final label = _plainText(element);
     // 可点链接渲染为 **WidgetSpan**（真 widget 手势），不可点时只保留链接样式文本。
     if (open == null || href.isEmpty) {
@@ -228,7 +250,7 @@ class SnapshotHtmlView extends StatelessWidget {
     final width = _sizeOf(element, styles, 'width');
     final height = _sizeOf(element, styles, 'height');
     final uri = Uri.tryParse(src);
-    final builder = suiImageBuilder;
+    final builder = widget.suiImageBuilder;
     if (uri != null && uri.scheme == 'sui' && uri.host.isNotEmpty && builder != null) {
       return builder(uri.host, label.isEmpty ? '附件' : label, width, height);
     }

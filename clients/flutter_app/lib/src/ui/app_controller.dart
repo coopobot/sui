@@ -1273,11 +1273,19 @@ class AppController extends ChangeNotifier {
     _syncError = null;
     notifyListeners();
     try {
-      await client.sync();
+      final (_, pulled) = await client.sync();
       if (generation != _connGeneration) return;
       _lastSyncedAt = DateTime.now();
       _syncState = SyncState.idle;
-      await _refreshLocalViews();
+      // FR-99 性能：只有**远端确有下行数据**时才重建本地视图。
+      // 纯 push（本机编辑上行）不改本地内容，却会触发全量列表 / 标签 / 笔记本刷新——
+      // 1000+ 篇的库上，一次刷新就是上千次标签查询 + 上千篇正文读出，这正是每次
+      // 「停顿 → 保存 → 700ms 同步」之后那一下卡顿的来源。
+      if (pulled > 0) {
+        await _refreshLocalViews();
+      } else {
+        await client.refreshQueuedCount();
+      }
     } on CloudInstanceChangedException catch (e) {
       // 换库 / 重建**不是错误态**：落待决状态交界面弹窗（AC-191；选择前不动任何数据）。
       if (generation != _connGeneration) return;

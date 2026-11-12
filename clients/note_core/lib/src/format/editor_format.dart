@@ -2361,15 +2361,18 @@ abstract final class EditorFormat {
     final lineStart = pos == 0 ? 0 : text.lastIndexOf('\n', pos - 1) + 1;
     final line = _stripCr(text.substring(lineStart, _lineEndAt(text, lineStart)));
 
-    // ① 围栏块状态。
+    // ① 围栏块状态。FR-99 性能：全文没有围栏起始标记时不必逐行回溯到光标。
+    final hasFence = text.contains('```') || text.contains('~~~');
     var inFence = false;
-    var ls = 0;
-    while (ls < lineStart) {
-      final le = _lineEndAt(text, ls);
-      if (_fencePrefixRe.hasMatch(_stripCr(text.substring(ls, le)))) {
-        inFence = !inFence;
+    if (hasFence) {
+      var ls = 0;
+      while (ls < lineStart) {
+        final le = _lineEndAt(text, ls);
+        if (_fencePrefixRe.hasMatch(_stripCr(text.substring(ls, le)))) {
+          inFence = !inFence;
+        }
+        ls = le + 1;
       }
-      ls = le + 1;
     }
     if (inFence || _fencePrefixRe.hasMatch(line)) return true;
 
@@ -2786,6 +2789,8 @@ abstract final class EditorFormat {
   /// 所有**良构表格**块的区间（`[start, end]`，`end` 为末行末字符下标）。
   static List<(int, int)> _wellFormedTableRanges(String text) {
     final ranges = <(int, int)>[];
+    // FR-99 性能：无 `|` 的正文不可能有管道表，直接返回（避免逐行 `parseTable`）。
+    if (!text.contains('|')) return ranges;
     var from = 0;
     while (from < text.length) {
       final table = parseTable(text, from);
@@ -2854,35 +2859,51 @@ abstract final class EditorFormat {
     final n = text.length;
     if (n == 0) return out;
     final tables = _wellFormedTableRanges(text);
-    final ordered = orderedListNumbers(text);
+    // FR-99 性能：没有任何「行首数字 + `.`」时跳过 `orderedListNumbers`
+    // （它要 `split('\n')` 建全文行数组 + 逐行正则）。
+    final ordered =
+        _hasOrderedListLine(text) ? orderedListNumbers(text) : const <int?>[];
+    final tracker = ListIndentTracker();
     var pairId = 0;
     int nextPair() => pairId++;
     var lineStart = 0;
     var lineIndex = 0;
     var inFence = false;
     var fencePair = -1;
+    // 表格区间已按起点有序：指针推进即可，避免逐行 `any(...)` 线性查找。
+    var tableIndex = 0;
     while (lineStart <= n) {
       final nl = text.indexOf('\n', lineStart);
       final lineEnd = nl == -1 ? n : nl;
       final line = _stripCr(text.substring(lineStart, lineEnd));
-      final inTable =
-          tables.any((r) => lineStart >= r.$1 && lineStart <= r.$2);
+      while (tableIndex < tables.length && lineStart > tables[tableIndex].$2) {
+        tableIndex++;
+      }
+      final inTable = tableIndex < tables.length &&
+          lineStart >= tables[tableIndex].$1 &&
+          lineStart <= tables[tableIndex].$2;
+      final indent = ListIndentTracker.indentOf(line);
+      // FR-99 性能：围栏行首个非空白字符必然是 `` ` `` 或 `~`，否则不必跑正则。
+      final mayBeFence = indent < line.length &&
+          (line.codeUnitAt(indent) == 0x60 || line.codeUnitAt(indent) == 0x7E);
       if (inFence) {
-        if (_fencePrefixRe.hasMatch(line)) {
+        if (mayBeFence && _fencePrefixRe.hasMatch(line)) {
           out.add(SyntaxMarker(lineStart, lineEnd, SyntaxMarkerKind.fence,
               lineStart: lineStart, pairId: fencePair));
           inFence = false;
           fencePair = -1;
         }
-      } else if (!inTable && _fencePrefixRe.hasMatch(line)) {
+      } else if (!inTable && mayBeFence && _fencePrefixRe.hasMatch(line)) {
         inFence = true;
         fencePair = nextPair();
         out.add(SyntaxMarker(lineStart, lineEnd, SyntaxMarkerKind.fence,
             lineStart: lineStart, pairId: fencePair));
       } else if (!inTable) {
-        _scanLineMarkers(
-            text, lineStart, lineEnd, line, ordered, lineIndex, out, nextPair);
+        _scanLineMarkers(text, lineStart, lineEnd, line, ordered, lineIndex, out,
+            nextPair, tracker, indent);
       }
+      // 列表缩进上下文对**所有行**生效（`_listIndentLimit` 也是逐行向上扫、不跳过围栏）。
+      tracker.observe(line, indent);
       if (lineEnd >= n) break;
       lineStart = lineEnd + 1;
       lineIndex++;
@@ -2901,6 +2922,67 @@ abstract final class EditorFormat {
     return out;
   }
 
+  /// 行首是否是**块级前缀**的起始字符（`#` `>` `-` `*` `+` `_` `=`）。
+  ///
+  /// FR-99 性能：普通正文行（中文 / 字母开头）据此跳过 6~7 条行级正则与列表缩进回溯。
+  static bool _isBlockPrefixStart(int c) =>
+      c == 0x23 || // #
+      c == 0x3E || // >
+      c == 0x2D || // -
+      c == 0x2A || // *
+      c == 0x2B || // +
+      c == 0x5F || // _
+      c == 0x3D; // =
+
+  /// ASCII 数字（`0x30..0x39`）。
+  static bool _isAsciiDigit(int c) => c >= 0x30 && c <= 0x39;
+
+  /// 行内记号触发字符（`` ` `` / `!` / `[` / `*` / `_` / `~` / `=` / `\`）。
+  ///
+  /// 一个都不含时 `_inlineMarkerRe` 不可能命中，转义蒙版也不必做（FR-99 性能）。
+  static bool _hasInlineTrigger(String line) {
+    for (var i = 0; i < line.length; i++) {
+      switch (line.codeUnitAt(i)) {
+        case 0x60: // `
+        case 0x21: // !
+        case 0x5B: // [
+        case 0x2A: // *
+        case 0x5F: // _
+        case 0x7E: // ~
+        case 0x3D: // =
+        case 0x5C: // \
+          return true;
+      }
+    }
+    return false;
+  }
+
+  /// 是否存在「行首（可含缩进）数字 + `.`」的行——用于跳过 [orderedListNumbers]
+  /// 的整篇 `split('\n')` + 逐行正则（FR-99 性能）。
+  static bool _hasOrderedListLine(String text) {
+    final n = text.length;
+    var lineStart = 0;
+    while (lineStart < n) {
+      var i = lineStart;
+      while (i < n) {
+        final c = text.codeUnitAt(i);
+        if (c != 0x20 && c != 0x09) break;
+        i++;
+      }
+      if (i < n && _isAsciiDigit(text.codeUnitAt(i))) {
+        var j = i;
+        while (j < n && _isAsciiDigit(text.codeUnitAt(j))) {
+          j++;
+        }
+        if (j < n && text.codeUnitAt(j) == 0x2E) return true;
+      }
+      final nl = text.indexOf('\n', lineStart);
+      if (nl == -1) break;
+      lineStart = nl + 1;
+    }
+    return false;
+  }
+
   /// 单行内的行级前缀 + 行内记号扫描。
   static void _scanLineMarkers(
     String text,
@@ -2911,14 +2993,22 @@ abstract final class EditorFormat {
     int lineIndex,
     List<SyntaxMarker> out,
     int Function() nextPair,
+    ListIndentTracker tracker,
+    int indent,
   ) {
-    final indent = _leadingWhitespace.firstMatch(line)!.group(0)!.length;
+    // FR-99 性能：行首不是任何块级前缀的起始字符、也不是数字 → 本行不可能有行级记号，
+    // 直接跳到行内扫描（普通正文行省掉 6~7 条行级正则与列表缩进回溯）。
+    final first = indent < line.length ? line.codeUnitAt(indent) : -1;
+    if (first == -1 || (!_isBlockPrefixStart(first) && !_isAsciiDigit(first))) {
+      _scanInlineMarkers(line, lineStart, out, nextPair);
+      return;
+    }
     final task = _taskLine.firstMatch(line);
     final bullet = _bulletPrefixRe.firstMatch(line);
     final orderedLine = _orderedPrefixRe.firstMatch(line);
     final heading = _headingPrefixRe.firstMatch(line);
     final quote = _quotePrefixRe.firstMatch(line);
-    if (task != null && isListLineAt(text, lineStart)) {
+    if (task != null && tracker.allows(indent)) {
       var end = lineStart + task.group(1)!.length + 3;
       if (end < lineEnd && (text[end] == ' ' || text[end] == '\t')) end++;
       out.add(SyntaxMarker(
@@ -2928,14 +3018,14 @@ abstract final class EditorFormat {
         lineStart: lineStart,
         checked: task.group(2)!.toLowerCase() == 'x',
       ));
-    } else if (bullet != null && isListLineAt(text, lineStart)) {
+    } else if (bullet != null && tracker.allows(indent)) {
       out.add(SyntaxMarker(
         lineStart + indent,
         lineStart + bullet.group(1)!.length + bullet.group(2)!.length,
         SyntaxMarkerKind.bullet,
         lineStart: lineStart,
       ));
-    } else if (orderedLine != null && isListLineAt(text, lineStart)) {
+    } else if (orderedLine != null && tracker.allows(indent)) {
       final digitsStart = lineStart + indent;
       final digits = orderedLine.group(2)!.trimRight().length;
       var end = digitsStart + digits;
@@ -3028,8 +3118,8 @@ abstract final class EditorFormat {
   /// 分支都不可能匹配），从而：
   /// ① 匹配不会从被转义字符开始；② 匹配不会跨越被转义字符而错配（`*a\*b*` 仍能整体成对）。
   /// 蒙版与原始行**等长**，下标可直接复用；正本字节一字不改（FR-78 / BR-78.4）。
-  static String _maskEscapes(String line) {
-    final spans = _escapeSpans(line);
+  /// 把**已计算好的**转义区间 `spans` 替换为等长占位字符（FR-99：避免重复扫行）。
+  static String _maskEscapesWith(String line, List<(int, int)> spans) {
     if (spans.isEmpty) return line;
     final buf = StringBuffer();
     var cursor = 0;
@@ -3052,10 +3142,21 @@ abstract final class EditorFormat {
     List<SyntaxMarker> out,
     int Function() nextPair,
   ) {
-    for (final (bs, end) in _escapeSpans(line)) {
+    // FR-99 性能：先把转义序列**蒙版**掉再判断是否还有真正的行内记号触发字符。
+    // 一篇被大量 `\*` / `\`` 转义过的笔记里，绝大多数行的触发字符都被蒙版覆盖，
+    // 于是省掉逐行的 `_inlineMarkerRe` 与递归扫描。
+    final escapes = _escapeSpans(line);
+    if (escapes.isEmpty) {
+      if (!_hasInlineTrigger(line)) return;
+      _scanInlineRange(line, 0, line.length, offset, out, nextPair);
+      return;
+    }
+    for (final (bs, end) in escapes) {
       out.add(SyntaxMarker(offset + bs, offset + end, SyntaxMarkerKind.escape));
     }
-    _scanInlineRange(_maskEscapes(line), 0, line.length, offset, out, nextPair);
+    final masked = _maskEscapesWith(line, escapes);
+    if (!_hasInlineTrigger(masked)) return;
+    _scanInlineRange(masked, 0, line.length, offset, out, nextPair);
   }
 
   /// 在 `[from, to)` 内扫描行内记号；成对记号命中后**递归进入其内容区间**（FR-79 / BR-79.1）。
@@ -3784,4 +3885,59 @@ class SyntaxMarker {
 
   @override
   String toString() => 'SyntaxMarker($kind, $start..$end, pair=$pairId)';
+}
+
+/// 列表缩进上下文跟踪器（FR-99 性能优化）。
+///
+/// 把 [EditorFormat.isListLineAt] 内部的「向上逐行回溯」判定（`_listIndentLimit`）
+/// 改写为一次扫描中维护的**缩进栈**，均摊 O(1)；渲染热路径（`syntaxMarkers` 与格式模式
+/// 的 `characterStyles`）每行调用一次。语义与 `_listIndentLimit` 逐条对齐：
+///
+/// * 空行 / 纯空白行：跳过（不改变上下文）；
+/// * 非列表的非空行（含围栏 / 引用 / 标题 / 表格行）：清空上下文，上限回落 3；
+/// * 列表行：弹出所有「缩进 >= 本行缩进」的项后压入本行——栈顶即最近的**父列表项**，
+///   上限 = 父缩进 + 父标记宽度 + 3；栈空时上限 3。
+///
+/// 顺序约定：**先** [allows]（判当前行）**再** [observe]（把当前行并入上下文）。
+class ListIndentTracker {
+  final List<(int indent, int width)> _stack = <(int indent, int width)>[];
+
+  /// 行首空白宽度（空格 / TAB 计数；与 `_leadingWhitespace` 等价但零分配）。
+  static int indentOf(String line) {
+    var i = 0;
+    while (i < line.length) {
+      final c = line.codeUnitAt(i);
+      if (c != 0x20 && c != 0x09) break;
+      i++;
+    }
+    return i;
+  }
+
+  /// 缩进 [indent] 的列表行是否在**合法层级**内（等价 `isListLineAt` 的缩进判定）。
+  bool allows(int indent) {
+    if (_stack.isEmpty) return indent <= 3;
+    final (parentIndent, parentWidth) = _stack.last;
+    return indent <= parentIndent + parentWidth + 3;
+  }
+
+  /// 把 [line]（缩进 [indent]）并入上下文。必须在本行 [allows] **之后**调用。
+  void observe(String line, int indent) {
+    if (indent >= line.length) return; // 空行 / 纯空白行：不断上下文
+    final c = line.codeUnitAt(indent);
+    final mayBeList =
+        c == 0x2D || c == 0x2A || c == 0x2B || (c >= 0x30 && c <= 0x39);
+    if (!mayBeList) {
+      _stack.clear();
+      return;
+    }
+    final width = EditorFormat._listMarkerWidth(line);
+    if (width == 0) {
+      _stack.clear();
+      return;
+    }
+    while (_stack.isNotEmpty && _stack.last.$1 >= indent) {
+      _stack.removeLast();
+    }
+    _stack.add((indent, width));
+  }
 }
