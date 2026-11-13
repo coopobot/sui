@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -298,7 +299,7 @@ func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
 		return
 	}
-	exists, err := s.store.BlobExists(hash)
+	exists, _, err := s.blobOnDisk(hash)
 	if err != nil {
 		writeInternalError(w, r, err)
 		return
@@ -308,6 +309,31 @@ func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNotFound)
+}
+
+// blobOnDisk 报告内容是否真实存在于内容寻址存储，并返回其字节数。
+//
+// `blobs` 行只承担引用计数 / 大小记账，可能**先于字节**出现（附件映射先到、
+// 上传尚未成功），因此 HEAD / PUT 不能只看 DB 行（v0.19.3 / BR-118.1）。
+func (s *Server) blobOnDisk(hash string) (bool, int64, error) {
+	p, err := s.blobs.Path(hash)
+	if os.IsNotExist(err) {
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, err
+	}
+	fi, err := os.Stat(p)
+	if os.IsNotExist(err) {
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, err
+	}
+	if !fi.Mode().IsRegular() {
+		return false, 0, nil
+	}
+	return true, fi.Size(), nil
 }
 
 // handleBlobPut 上传 hash 对应的字节；已存在则幂等返回。
@@ -328,18 +354,19 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
 		return
 	}
-	exists, err := s.store.BlobExists(hash)
+	// 文件存在才算已上传；不能只看 `blobs` 行——映射先到时行存在但没有字节，
+	// 旧逻辑会跳过读体并永远不落盘（v0.19.3 / BR-118.3）。
+	exists, size, err := s.blobOnDisk(hash)
 	if err != nil {
 		writeInternalError(w, r, err)
 		return
 	}
-	size := int64(0)
 	if !exists {
 		body := http.MaxBytesReader(w, r.Body, maxBlobBytes())
 		n, err := s.blobs.Put(hash, body)
 		switch {
 		case err == nil:
-			size = n
+			// 正常写入；size 在下面按磁盘实际大小回填。
 		case errors.Is(err, blob.ErrDigestMismatch):
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid payload"})
 			return
@@ -354,8 +381,13 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 			writeInternalError(w, r, err)
 			return
 		}
+		size = n
+	} else {
+		// 幂等重传：文件已存在时也要把请求体读完再响应，否则客户端可能
+		// 在写体阶段收到早响应 / broken pipe，永远置不上 uploaded_at（v0.19.3）。
+		_, _ = io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, maxBlobBytes()))
 	}
-	// 记账口径：以磁盘实际大小为权威（幂等短路时 Put 返回 0，不能据此记 0）。
+	// 记账口径：以磁盘实际大小为权威（自愈写入 / 幂等命中都从 stat 取）。
 	if p, perr := s.blobs.Path(hash); perr == nil {
 		if fi, serr := os.Stat(p); serr == nil {
 			size = fi.Size()
@@ -377,17 +409,13 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
 		return
 	}
-	exists, err := s.store.BlobExists(hash)
-	if err != nil {
-		writeInternalError(w, r, err)
-		return
-	}
-	if !exists {
-		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "blob not found"})
-		return
-	}
 	reader, err := s.blobs.Open(hash)
 	if err != nil {
+		// 行在、文件缺失是「资源不存在」，不是服务端内部错误（v0.19.3 / BR-118.2）。
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "blob not found"})
+			return
+		}
 		writeInternalError(w, r, err)
 		return
 	}

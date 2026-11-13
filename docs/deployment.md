@@ -490,6 +490,28 @@ sui.example.com {
 | 7 | 资源上限 | 请求体 / 单 blob / 条目数上限与**大传输路由单独延长读写期限**（M10-T25） | nginx `client_max_body_size` 与上表对齐（双层限长） |
 | 8 | 数据备份 | 手动 | 定期备份数据目录（`sui.db` + `blobs/` + `securechan.key`） |
 
+### 9.1 附件单 blob 上限（`v0.19.3` / FR-118）
+
+单个附件字节默认上限 **128 MiB**；超过时 `PUT /api/v1/blobs/{hash}` 返回 **413**
+（`payload too large`），客户端表现为「待上传」并按周期重试。
+
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `SUI_MAX_BLOB_BYTES` | `134217728`（128 MiB） | 单 blob 上限（字节）；非法 / 非正数回落默认 |
+
+需要同步更大的安装包 / 视频时显式调大，例如：
+
+```bash
+SUI_MAX_BLOB_BYTES=536870912 ./bin/sui-server   # 512 MiB
+```
+
+> ⚠️ 受保护通道（`http://` 部署）会**整包缓冲**请求 / 响应，峰值内存约为报文大小的 2 倍；
+> 调大前先确认服务端内存，并同步调整反向代理的 `client_max_body_size`。
+> 默认 128 MiB 已与通道密文上限 **256 MiB** 对齐；若把 blob 上限调到 128 MiB 以上，
+> 还需同步调大 `MaxEncryptedBody`（`server/internal/securechan/middleware.go` 常量），
+> 否则请求会在通道层被拒。
+> 另：客户端目前对超限只表现为「待上传 + 重试」，不会弹出「文件过大」提示（已知限制）。
+
 源码位置：`server/internal/api` 与 `server/internal/store`。
 
 ## 10. 客户端接入

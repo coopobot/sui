@@ -19,10 +19,12 @@ const (
 	HeaderReqID = "X-Sui-Req-Id"
 )
 
-// MaxEncryptedBody 是**密文**正文上限：明文上限（blob 32 MiB）base64 后约 4/3，再留余量。
+// MaxEncryptedBody 是**密文**正文上限：明文 blob 上限默认 128 MiB，base64 后约 4/3
+// （≈171 MiB），再留余量到 256 MiB。
 //
 // 通道整包缓冲（§9.6 已记录该边界），故上限必须显式，不能无界读。
-const MaxEncryptedBody = 48 << 20
+// 调大 SUI_MAX_BLOB_BYTES 超过 128 MiB 时，需要同步评估本上限（否则请求在通道层被拒）。
+const MaxEncryptedBody = 256 << 20
 
 var defaultReplay = NewReplayCache(0, 0)
 

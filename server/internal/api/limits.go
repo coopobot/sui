@@ -14,10 +14,10 @@ import (
 // 默认值可用环境变量覆盖；取值非法（非数字 / <= 0）一律回落默认值——
 // 不给「配置写错就放行」的余地。
 const (
-	defaultMaxBodyBytes    = 8 << 20  // 8 MiB：POST /api/v1/clips、/api/v1/sync/push
-	defaultMaxBlobBytes    = 32 << 20 // 32 MiB：单个 blob（PUT /api/v1/blobs/{hash}）
-	defaultMaxRefreshBytes = 4 << 10  // 4 KiB：POST /api/v1/refresh（只需装一个令牌）
-	defaultMaxPushItems    = 500      // sync/push 单次条目数上限
+	defaultMaxBodyBytes    = 8 << 20   // 8 MiB：POST /api/v1/clips、/api/v1/sync/push
+	defaultMaxBlobBytes    = 128 << 20 // 128 MiB：单个 blob（PUT /api/v1/blobs/{hash}）
+	defaultMaxRefreshBytes = 4 << 10   // 4 KiB：POST /api/v1/refresh（只需装一个令牌）
+	defaultMaxPushItems    = 500       // sync/push 单次条目数上限
 )
 
 // maxBodyBytes 返回 clips / sync.push 的请求体上限（SUI_MAX_BODY_BYTES）。
