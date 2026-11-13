@@ -5,6 +5,20 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.20.0] - 2026-11-13
+
+### 新增
+
+- **大附件分片断点续传**（M20 / FR-119）：超过 **16 MiB** 的附件按 **8 MiB/片** 上传，
+  每片独立请求（密文约 11 MiB，远低于受保护通道 256 MiB 上限）；服务端把分片落到
+  临时会话目录，`complete` 时**流式拼接 + sha256 校验**再原子转正。
+  网络中断后重新 `init` 只补缺失片；分片乱序 / 重复上传幂等；超过 24h 的未完成会话自动清理。
+  旧客户端整包 `PUT` 保持兼容；新客户端遇旧服务端（404/405）自动回退整包上传。
+  单附件默认上限 **128 MiB → 512 MiB**（`SUI_MAX_BLOB_BYTES` 可调）。
+  430 MB 安装包已实测分片上传 / 下载成功（SHA256 一致）。
+- **分片端点**：`POST /blobs/{hash}/upload`（init/状态）、`PUT …/upload/{index}`（分片）、
+  `POST …/upload/complete`（校验转正）、`DELETE …/upload`（放弃会话）。
+
 ## [0.19.3] - 2026-11-13
 
 ### 修复

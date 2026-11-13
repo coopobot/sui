@@ -16,6 +16,10 @@ Base URL：`http://<host>:8080`。受保护接口需请求头 `Authorization: Be
 | PUT | `/api/v1/blobs/{hash}` | ✅ | 上传附件字节 |
 | GET | `/api/v1/blobs/{hash}` | ✅ | 下载附件字节 |
 | HEAD | `/api/v1/blobs/{hash}` | ✅ | 附件存在性 |
+| POST | `/api/v1/blobs/{hash}/upload` | ✅ | 分片会话 init / 状态：`{"size","chunkSize"}` → `{"size","chunkSize","uploaded":[...],"complete":bool}`（M20 / FR-119） |
+| PUT | `/api/v1/blobs/{hash}/upload/{index}` | ✅ | 上传一个分片（乱序 / 重复幂等；8 MiB 默认） |
+| POST | `/api/v1/blobs/{hash}/upload/complete` | ✅ | 全片齐全后流式拼接 + sha256 校验并转正；缺片 409 + `missing[]` |
+| DELETE | `/api/v1/blobs/{hash}/upload` | ✅ | 放弃分片会话并清理临时目录 |
 | GET | `/api/v1/notes/{id}/revisions` | ✅ | 修订列表 |
 | GET | `/api/v1/notes/{id}/revisions/{version}` | ✅ | 修订详情 |
 | POST | `/api/v1/clips` | ✅ | 网页剪藏：`{"url","title","html","mode"}` → 净化 + 图片本地化后入库（**每次新建一条笔记**，唯一性按 `noteId`，不按 URL）；`mode` 取 `article`（默认，智能提取正文）/ `snapshot`（全页快照，语义等价 Markdown） |

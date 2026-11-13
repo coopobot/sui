@@ -42,6 +42,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("init blob store: %v", err)
 	}
+	// M20 / FR-119：启动时清理超过 24h 的未完成分片会话（不阻塞启动）。
+	_ = blobs.CleanupUploads(time.Now())
 
 	apiSrv := api.New(st, blobs)
 	// M10-T27 / FR-50：受保护通道的长期密钥（首次启动生成并持久化，0600；信任根，TOFU + 指纹）。

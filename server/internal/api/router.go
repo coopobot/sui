@@ -193,6 +193,11 @@ func NewRouter(s *Server) *http.ServeMux {
 	sub.HandleFunc("HEAD /api/v1/blobs/{hash}", s.handleBlobHead)
 	sub.HandleFunc("GET /api/v1/blobs/{hash}", s.handleBlobGet)
 	sub.HandleFunc("PUT /api/v1/blobs/{hash}", s.handleBlobPut)
+	// M20 / FR-119：大附件分片断点续传（ADR-044）。
+	sub.HandleFunc("POST /api/v1/blobs/{hash}/upload", s.handleUploadInit)
+	sub.HandleFunc("DELETE /api/v1/blobs/{hash}/upload", s.handleUploadAbort)
+	sub.HandleFunc("PUT /api/v1/blobs/{hash}/upload/{index}", s.handleUploadPart)
+	sub.HandleFunc("POST /api/v1/blobs/{hash}/upload/complete", s.handleUploadComplete)
 	sub.HandleFunc("GET /api/v1/notes/{id}/revisions", s.handleListRevisions)
 	sub.HandleFunc("GET /api/v1/notes/{id}/revisions/{version}", s.handleGetRevision)
 	sub.HandleFunc("POST /api/v1/clips", s.handleClip)

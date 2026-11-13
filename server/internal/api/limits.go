@@ -15,7 +15,7 @@ import (
 // 不给「配置写错就放行」的余地。
 const (
 	defaultMaxBodyBytes    = 8 << 20   // 8 MiB：POST /api/v1/clips、/api/v1/sync/push
-	defaultMaxBlobBytes    = 128 << 20 // 128 MiB：单个 blob（PUT /api/v1/blobs/{hash}）
+	defaultMaxBlobBytes    = 512 << 20 // 512 MiB：单个 blob（整包 PUT 或分片 complete）
 	defaultMaxRefreshBytes = 4 << 10   // 4 KiB：POST /api/v1/refresh（只需装一个令牌）
 	defaultMaxPushItems    = 500       // sync/push 单次条目数上限
 )

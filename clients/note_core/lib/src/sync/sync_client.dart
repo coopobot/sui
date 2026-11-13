@@ -64,7 +64,8 @@ class SyncClient {
 
   /// 令牌刷新成功后的回调：上层据此**持久化新令牌并重连 WebSocket**
   /// （WS 子协议里带的是旧访问令牌，不重连则实时通知静默失效）。
-  final Future<void> Function(String accessToken, String refreshToken)? onTokensRefreshed;
+  final Future<void> Function(String accessToken, String refreshToken)?
+      onTokensRefreshed;
 
   /// 刷新令牌失效（refresh-expired / refresh-revoked）时的回调：上层提示重新登录。
   final Future<void> Function()? onAuthExpired;
@@ -83,6 +84,12 @@ class SyncClient {
 
   /// 单次上行批次上限（遵守服务端单次条目上限，BR-54.4）。
   static const int pushBatchSize = 200;
+
+  /// 超过该字节数的附件走分片断点续传（M20 / FR-119）；以下仍整包 PUT。
+  static const int chunkThresholdBytes = 16 << 20;
+
+  /// 分片大小（每请求一片，密文约 11 MiB，远低于通道上限）。
+  static const int chunkSizeBytes = 8 << 20;
 
   /// 刷新待上传条数缓存。
   Future<void> refreshQueuedCount() async {
@@ -267,8 +274,7 @@ class SyncClient {
             includeHeld: includeHeld, limit: pushBatchSize);
     final batch = _PushBatch();
     for (final id in noteIds) {
-      batch.notes.add(_QueuedNote(
-          id, await repository.maxRevisionVersion(id)));
+      batch.notes.add(_QueuedNote(id, await repository.maxRevisionVersion(id)));
     }
     if (onlyNotebookIds != null) {
       batch.notebooks.addAll(onlyNotebookIds);
@@ -641,7 +647,8 @@ class SyncClient {
       }
       if (!localDirty) {
         // 下行收口：置「已同步」并回写服务端基线镜像（含核对时间）。
-        await repository.markSynced(SyncEntityKind.note, id, serverVersion: ver);
+        await repository.markSynced(SyncEntityKind.note, id,
+            serverVersion: ver);
       }
     }
     return count;
@@ -694,7 +701,8 @@ class SyncClient {
 
     onProgress?.call(const ReconcileProgress(
         phase: 'check', done: 0, total: 1, detail: '正在核对云端数据'));
-    final page = await _fetchPage(DateTime.fromMillisecondsSinceEpoch(0, isUtc: true));
+    final page =
+        await _fetchPage(DateTime.fromMillisecondsSinceEpoch(0, isUtc: true));
 
     final change = await _detectInstanceChange(page);
     if (change != null && !hasUserDecision) {
@@ -875,6 +883,19 @@ class SyncClient {
     final bytes = await store.read(sha256);
     if (bytes == null || bytes.isEmpty) return false;
 
+    // 大附件走分片断点续传（M20 / FR-119 / ADR-044）：每片独立经通道，
+    // 不再受整包密文上限约束，失败后下一次 init 只补缺失片。
+    if (bytes.length > chunkThresholdBytes) {
+      final outcome = await _uploadChunked(sha256, bytes);
+      if (outcome == _ChunkOutcome.unsupported) {
+        // 旧服务端没有分片端点：回退整包 PUT（v0.19.x 及以前）。
+      } else {
+        if (outcome != _ChunkOutcome.done) return false;
+        if (store is CachedBlobStore) await store.markUploaded(sha256);
+        return true;
+      }
+    }
+
     final uri =
         Uri.parse('$baseUrl/api/v1/blobs/${Uri.encodeComponent(sha256)}');
     // 内容寻址上传是幂等的，重放安全。
@@ -888,6 +909,65 @@ class SyncClient {
     if (resp.statusCode != 200) return false;
     if (store is CachedBlobStore) await store.markUploaded(sha256);
     return true;
+  }
+
+  /// 分片上传：init（拿回已传分片）→ 补缺失片 → complete。
+  ///
+  /// 返回 [ _ChunkOutcome.done ] 表示服务端已持有；`unsupported` 表示旧服务端
+  ///（404/405/501），调用方回退整包 PUT；`failed` 表示本次失败，下个同步周期重试。
+  Future<_ChunkOutcome> _uploadChunked(
+    String sha256,
+    Uint8List bytes,
+  ) async {
+    final base = '$baseUrl/api/v1/blobs/${Uri.encodeComponent(sha256)}/upload';
+    final init = await _withAuth(
+      (h) => _http.post(
+        Uri.parse(base),
+        headers: h,
+        body: jsonEncode({
+          'size': bytes.length,
+          'chunkSize': chunkSizeBytes,
+        }),
+      ),
+      json: true,
+    );
+    if (init.statusCode == 404 ||
+        init.statusCode == 405 ||
+        init.statusCode == 501) {
+      return _ChunkOutcome.unsupported;
+    }
+    if (init.statusCode != 200) return _ChunkOutcome.failed;
+
+    final data = jsonDecode(init.body) as Map<String, dynamic>;
+    if (data['complete'] == true) return _ChunkOutcome.done;
+    final uploaded = <int>{
+      for (final v in (data['uploaded'] as List? ?? const []))
+        if (v is int) v,
+    };
+
+    final total = (bytes.length + chunkSizeBytes - 1) ~/ chunkSizeBytes;
+    for (var i = 0; i < total; i++) {
+      if (uploaded.contains(i)) continue;
+      final start = i * chunkSizeBytes;
+      final end = start + chunkSizeBytes < bytes.length
+          ? start + chunkSizeBytes
+          : bytes.length;
+      final part = Uint8List.sublistView(bytes, start, end);
+      final resp = await _withAuth(
+        (h) => _http.put(
+          Uri.parse('$base/$i'),
+          headers: {...h, 'Content-Type': 'application/octet-stream'},
+          body: part,
+        ),
+      );
+      if (resp.statusCode != 200) return _ChunkOutcome.failed;
+    }
+
+    final done = await _withAuth(
+      (h) => _http.post(Uri.parse('$base/complete'), headers: h),
+      json: true,
+    );
+    return done.statusCode == 200 ? _ChunkOutcome.done : _ChunkOutcome.failed;
   }
 
   /// 确保附件字节已缓存在本地（方案 B 按需下载入口）。
@@ -1021,8 +1101,8 @@ class SyncClient {
 
   Future<String> _authPost(String path, String body) async {
     final uri = Uri.parse('$baseUrl$path');
-    final resp = await _withAuth((h) =>
-        _http.post(uri, headers: h, body: body), json: true);
+    final resp = await _withAuth((h) => _http.post(uri, headers: h, body: body),
+        json: true);
     if (resp.statusCode != 200) {
       throw HttpException(resp.statusCode, resp.body);
     }
@@ -1183,8 +1263,8 @@ class PushResultItem {
       appliedVersion: (json['appliedVersion'] as int?) ?? 0,
       // 旧服务端不返回 `notFound`：此时 `accepted == false && serverVersion == 0`
       // 同样是「服务端没有该实体」（v0.11.3 之前的行为即如此），故按同一分支自愈。
-      notFound: (json['notFound'] as bool?) ??
-          (!accepted && serverVersion == 0),
+      notFound:
+          (json['notFound'] as bool?) ?? (!accepted && serverVersion == 0),
     );
   }
 }
@@ -1316,6 +1396,7 @@ class HttpException implements Exception {
   @override
   String toString() => 'HttpException($statusCode): $body';
 }
+
 /// 上行批次中一篇笔记的入队元数据。
 class _QueuedNote {
   _QueuedNote(this.id, this.revisionVersion);
@@ -1336,7 +1417,8 @@ class _RebaseSet {
   final Set<String> notebooks = {};
   final Set<String> tags = {};
 
-  bool get hasAny => notes.isNotEmpty || notebooks.isNotEmpty || tags.isNotEmpty;
+  bool get hasAny =>
+      notes.isNotEmpty || notebooks.isNotEmpty || tags.isNotEmpty;
 }
 
 /// 一次上行批次的构成（笔记 / 笔记本 / 标签各自的 id）。
@@ -1351,3 +1433,6 @@ class _PushBatch {
 extension _FirstOrNull<E> on Iterable<E> {
   E? get firstOrNull => isEmpty ? null : first;
 }
+
+/// 分片上传结果（内部）。
+enum _ChunkOutcome { done, unsupported, failed }
