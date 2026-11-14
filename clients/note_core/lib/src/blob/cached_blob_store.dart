@@ -73,7 +73,8 @@ abstract interface class BlobCacheMeta {
 /// 引用计数（[BlobCacheEntry.refCount]）的唯一来源是**附件映射**，见
 /// `NoteRepository`；本类不参与计数，避免「上传/下载字节」与「挂载附件」
 /// 对同一 blob 重复计账。
-class CachedBlobStore implements BlobStore {
+class CachedBlobStore
+    implements BlobStore, RangeReadableBlobStore, FilePathBlobStore {
   final LocalBlobStore _local;
   final BlobCacheMeta _meta;
 
@@ -138,6 +139,39 @@ class CachedBlobStore implements BlobStore {
 
   @override
   Future<bool> exists(String sha256) => _local.exists(sha256);
+
+  /// 从本地文件流式入库（原生端）：哈希 / 复制由 [LocalBlobStore] 完成，
+  /// 这里只补缓存记账与淘汰（M21 / FR-120）。
+  @override
+  Future<String> putFromFile(String path) async {
+    final local = _local;
+    if (local is! FilePathBlobStore) {
+      throw StateError('当前 BlobStore 不支持从文件路径入库');
+    }
+    final hash = await (local as FilePathBlobStore).putFromFile(path);
+    final size = await local.byteLength(hash) ?? 0;
+    await _meta.upsert(
+      sha256: hash,
+      byteSize: size,
+      lastAccessAt: DateTime.now(),
+    );
+    await _evictIfNeeded(protect: hash);
+    return hash;
+  }
+
+  @override
+  Future<int?> byteLength(String sha256) async {
+    final n = await _local.byteLength(sha256);
+    if (n != null) await _meta.touch(sha256, DateTime.now());
+    return n;
+  }
+
+  @override
+  Future<Uint8List?> readRange(String sha256, int start, int length) async {
+    final bytes = await _local.readRange(sha256, start, length);
+    if (bytes != null) await _meta.touch(sha256, DateTime.now());
+    return bytes;
+  }
 
   @override
   Future<void> delete(String sha256) async {

@@ -211,8 +211,7 @@ class _NoteEditorState extends State<NoteEditor>
   /// 用户手动「切回全文」（本笔记本次会话内有效；重新加载笔记后重新评估）。
   bool _forceFullMode = false;
 
-  bool get _segmentedFormatted =>
-      _segmented && _mode == EditorMode.formatted;
+  bool get _segmentedFormatted => _segmented && _mode == EditorMode.formatted;
 
   /// 分块编辑器的状态句柄：格式工具栏据此作用到「当前块」。
   final GlobalKey<SegmentedMarkdownEditorState> _segmentedKey =
@@ -387,9 +386,8 @@ class _NoteEditorState extends State<NoteEditor>
   /// 分块模式提示条 / 切回入口。
   Widget _buildSegmentBar() {
     final chars = _content.text.length;
-    final label = chars >= 10000
-        ? '${(chars / 10000).toStringAsFixed(1)} 万'
-        : '$chars';
+    final label =
+        chars >= 10000 ? '${(chars / 10000).toStringAsFixed(1)} 万' : '$chars';
     final segmentedNow = _segmentedFormatted;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -597,14 +595,12 @@ class _NoteEditorState extends State<NoteEditor>
                     IconButton(
                       tooltip: _tooltipWithShortcut('撤销'),
                       icon: const Icon(Icons.undo),
-                      onPressed:
-                          undo.value.canUndo ? () => undo.undo() : null,
+                      onPressed: undo.value.canUndo ? () => undo.undo() : null,
                     ),
                     IconButton(
                       tooltip: _tooltipWithShortcut('重做'),
                       icon: const Icon(Icons.redo),
-                      onPressed:
-                          undo.value.canRedo ? () => undo.redo() : null,
+                      onPressed: undo.value.canRedo ? () => undo.redo() : null,
                     ),
                   ],
                 ),
@@ -847,8 +843,9 @@ class _NoteEditorState extends State<NoteEditor>
 
   /// 组装 tooltip：`加粗 (Ctrl+B)`；无快捷键时原样返回按钮名称（BR-23.11）。
   static String _tooltipWithShortcut(String label, {FormatCommand? command}) {
-    final key =
-        command == null ? _panelShortcutLabels[label] : _shortcutLabelFor(command);
+    final key = command == null
+        ? _panelShortcutLabels[label]
+        : _shortcutLabelFor(command);
     return key == null || key.isEmpty ? label : '$label ($key)';
   }
 
@@ -941,8 +938,10 @@ class _NoteEditorState extends State<NoteEditor>
   /// 网页原件（M16 / FR-83）：格式态原子卡片。
   Widget _buildWebClipFormat(BuildContext context, WebClipRef ref) {
     final sel = _content.value.selection;
-    final selected =
-        sel.isValid && sel.isCollapsed && sel.start >= ref.start && sel.start <= ref.end;
+    final selected = sel.isValid &&
+        sel.isCollapsed &&
+        sel.start >= ref.start &&
+        sel.start <= ref.end;
     return DecoratedBox(
       decoration: BoxDecoration(
         border: selected
@@ -1001,8 +1000,9 @@ class _NoteEditorState extends State<NoteEditor>
       );
 
   /// 快照 HTML 块的基础文字样式：与正文**同源**（笔记正文字体 + 1.6 倍行距）。
-  TextStyle _htmlBlockBaseStyle(BuildContext context) => SuiAppearance.of(context)
-      .applyBodyFont(const TextStyle(fontSize: 15, height: 1.6));
+  TextStyle _htmlBlockBaseStyle(BuildContext context) =>
+      SuiAppearance.of(context)
+          .applyBodyFont(const TextStyle(fontSize: 15, height: 1.6));
 
   /// 格式模式下把附件链接引用 `[name](sui://<sha256>)` 渲染为原子呈现单元（FR-46）。
   Widget _buildAttachmentLink(BuildContext context, AttachmentRef ref) {
@@ -1173,8 +1173,10 @@ class _NoteEditorState extends State<NoteEditor>
     final sel = _content.value.selection;
     final text = _content.text;
     if (sel.isValid && !sel.isCollapsed) {
-      final lo = (sel.start <= sel.end ? sel.start : sel.end).clamp(0, text.length);
-      final hi = (sel.start <= sel.end ? sel.end : sel.start).clamp(0, text.length);
+      final lo =
+          (sel.start <= sel.end ? sel.start : sel.end).clamp(0, text.length);
+      final hi =
+          (sel.start <= sel.end ? sel.end : sel.start).clamp(0, text.length);
       final selected = text.substring(lo, hi);
       if (selected.isNotEmpty && !selected.contains('\n')) {
         _findQuery.text = selected;
@@ -1479,7 +1481,8 @@ class _NoteEditorState extends State<NoteEditor>
   /// **独立于** [_formatShortcuts]：那张表只在格式模式挂载，且不应把排版键带进源码态
   /// （BR-30.5）。键位归**编辑器子树**（ADR-030 决策 1）：壳层菜单命令只给提示文案、
   /// **不注册 activator**，避免菜单与编辑器双重触发。
-  Map<ShortcutActivator, Intent> _findShortcuts() => <ShortcutActivator, Intent>{
+  Map<ShortcutActivator, Intent> _findShortcuts() =>
+      <ShortcutActivator, Intent>{
         const SingleActivator(LogicalKeyboardKey.keyF, control: true):
             const _FindIntent(),
         const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
@@ -1578,9 +1581,11 @@ class _NoteEditorState extends State<NoteEditor>
   /// 「添加关联笔记 / 插入附件」等项，故桌面改为应用内菜单（ADR-038 决策 1）：
   /// 先 `hideToolbar()` 丢掉框架菜单，再在**指针处**用 `showMenu` 弹出；
   /// 移动端 / Web 原样返回框架默认工具栏（BR-107.4）。
-  Widget _buildEditorContextMenu(BuildContext context, EditableTextState state) {
+  Widget _buildEditorContextMenu(
+      BuildContext context, EditableTextState state) {
     if (!isDesktopPlatform) {
-      return AdaptiveTextSelectionToolbar.editableText(editableTextState: state);
+      return AdaptiveTextSelectionToolbar.editableText(
+          editableTextState: state);
     }
     if (_contextMenuOpen) return const SizedBox.shrink();
     _contextMenuOpen = true;
@@ -2298,12 +2303,12 @@ class _NoteEditorState extends State<NoteEditor>
                   onChanged: (_) => _scheduleSave(),
                   // M14（FR-65 / AC-286）：笔记**标题**同用「笔记正文字体」。
                   style: SuiAppearance.of(context).applyBodyFont(
-                        Theme.of(context)
-                                .textTheme
-                                .headlineSmall
-                                ?.copyWith(fontWeight: FontWeight.w600) ??
-                            const TextStyle(),
-                      ),
+                    Theme.of(context)
+                            .textTheme
+                            .headlineSmall
+                            ?.copyWith(fontWeight: FontWeight.w600) ??
+                        const TextStyle(),
+                  ),
                   decoration: const InputDecoration(
                     hintText: '标题',
                     border: InputBorder.none,
@@ -2347,51 +2352,51 @@ class _NoteEditorState extends State<NoteEditor>
           // 监听正文控制器 —— 光标移动不会触发本组件重建，靠它才能即时显隐
           // （BR-27.2：点按图片即选中并显示手柄，不以光标落入引用跨度为前提）。
           if (!_segmentedFormatted)
-          ListenableBuilder(
-            listenable: _content,
-            builder: (context, _) {
-              final image = _imageAtCursor;
-              final bodyLink = _linkAtCursor;
-              final cellLink = _activeCellLink;
-              if (image == null && bodyLink == null && cellLink == null) {
-                return const SizedBox.shrink();
-              }
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (image != null) ...[
-                    const Divider(height: 1),
-                    _ImageSizeBar(
-                      image: image,
-                      onApply: (size) => _applyImageSize(image, size),
-                    ),
+            ListenableBuilder(
+              listenable: _content,
+              builder: (context, _) {
+                final image = _imageAtCursor;
+                final bodyLink = _linkAtCursor;
+                final cellLink = _activeCellLink;
+                if (image == null && bodyLink == null && cellLink == null) {
+                  return const SizedBox.shrink();
+                }
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (image != null) ...[
+                      const Divider(height: 1),
+                      _ImageSizeBar(
+                        image: image,
+                        onApply: (size) => _applyImageSize(image, size),
+                      ),
+                    ],
+                    // FR-70：光标落在链接里（正文或活动单元格）时给「打开 / 编辑」入口。
+                    // FR-75：**笔记引用**（`sui://note/<id>`）按钮文案为「跳转」，且**隐藏
+                    // 「编辑」**——就地改网址会把引用改坏（正本里它是标准 Markdown 链接，
+                    // 但 URL 是应用生成的 scheme，手改没有意义）。
+                    if (cellLink != null) ...[
+                      const Divider(height: 1),
+                      _LinkBar(
+                        url: cellLink,
+                        noteRef: EditorFormat.noteRefId(cellLink) != null,
+                        onOpen: () => _openUrl(cellLink),
+                      ),
+                    ] else if (bodyLink != null) ...[
+                      const Divider(height: 1),
+                      _LinkBar(
+                        url: bodyLink.url,
+                        noteRef: EditorFormat.noteRefId(bodyLink.url) != null,
+                        onOpen: () => _openUrl(bodyLink.url),
+                        onEdit: EditorFormat.noteRefId(bodyLink.url) != null
+                            ? null
+                            : () => _editLink(bodyLink),
+                      ),
+                    ],
                   ],
-                  // FR-70：光标落在链接里（正文或活动单元格）时给「打开 / 编辑」入口。
-                  // FR-75：**笔记引用**（`sui://note/<id>`）按钮文案为「跳转」，且**隐藏
-                  // 「编辑」**——就地改网址会把引用改坏（正本里它是标准 Markdown 链接，
-                  // 但 URL 是应用生成的 scheme，手改没有意义）。
-                  if (cellLink != null) ...[
-                    const Divider(height: 1),
-                    _LinkBar(
-                      url: cellLink,
-                      noteRef: EditorFormat.noteRefId(cellLink) != null,
-                      onOpen: () => _openUrl(cellLink),
-                    ),
-                  ] else if (bodyLink != null) ...[
-                    const Divider(height: 1),
-                    _LinkBar(
-                      url: bodyLink.url,
-                      noteRef: EditorFormat.noteRefId(bodyLink.url) != null,
-                      onOpen: () => _openUrl(bodyLink.url),
-                      onEdit: EditorFormat.noteRefId(bodyLink.url) != null
-                          ? null
-                          : () => _editLink(bodyLink),
-                    ),
-                  ],
-                ],
-              );
-            },
-          ),
+                );
+              },
+            ),
         ],
         // 查找栏（FR-73）：模式行 / 工具栏之下、编辑区之上；预览态不提供（FR-73）。
         // 分块模式（大笔记）不提供笔记内查找：先切回全文。
@@ -2455,8 +2460,9 @@ class _NoteEditorState extends State<NoteEditor>
                   showCursor: !_tableHasFocus,
                   // FR-75：预览态点笔记引用 → **库内跳转**（与普通外链分流的接缝）。
                   noteRefOpener: _openNoteRef,
-                  onBlockNewline:
-                      _mode == EditorMode.formatted ? _handleBlockNewline : null,
+                  onBlockNewline: _mode == EditorMode.formatted
+                      ? _handleBlockNewline
+                      : null,
                   onSoftNewline:
                       _mode == EditorMode.formatted ? _handleSoftNewline : null,
                   onStructuralDelete: _mode == EditorMode.formatted
@@ -2465,7 +2471,8 @@ class _NoteEditorState extends State<NoteEditor>
                   // M18（FR-107）：桌面由本编辑器接管正文右键菜单。
                   contextMenuBuilder: _buildEditorContextMenu,
                   // M18（FR-108）：仅格式模式拦 Tab；不适用时交还默认焦点移动。
-                  onListTab: _mode == EditorMode.formatted ? _handleListTab : null,
+                  onListTab:
+                      _mode == EditorMode.formatted ? _handleListTab : null,
                   // M19（FR-116）：移动端格式工具在底部工具坞，空正文提示同步改为「下方」。
                   toolbarBelow: widget.compactDock,
                 ),
@@ -2607,7 +2614,8 @@ class _NoteEditorState extends State<NoteEditor>
                     _moreAction('history', Icons.history, '版本历史'),
                     _moreAction('find', Icons.search, '笔记内查找'),
                     _moreAction('tags', Icons.label_outline, '标签'),
-                    _moreAction('export', Icons.file_download_outlined, '导出 Markdown'),
+                    _moreAction(
+                        'export', Icons.file_download_outlined, '导出 Markdown'),
                     _moreAction('delete', Icons.delete_outline, '删除笔记',
                         danger: true),
                   ],
@@ -2887,6 +2895,26 @@ class _NoteEditorState extends State<NoteEditor>
   /// * **逐项落笔**——每成功一个就立即把引用写进**当前**正本并保存：附件映射、
   ///   正文引用、笔记落库三者逐项同进，中途退出也不会出现「有列表无引用」；
   /// * **形态随类型**——图片插 `![…](sui://…)`，其余插 `[…](sui://…)`（附件卡片）。
+  /// 选择结果入库：有路径走流式（M21 / FR-120），否则走字节。
+  Future<Attachment> _addPickedAttachment(
+    String noteId,
+    PickedAttachment f,
+  ) {
+    final path = f.path;
+    if (path != null) {
+      return _controller.addAttachmentFromPath(
+        noteId: noteId,
+        filename: f.filename,
+        path: path,
+      );
+    }
+    return _controller.addAttachmentFromBytes(
+      noteId: noteId,
+      filename: f.filename,
+      bytes: f.bytes!,
+    );
+  }
+
   Future<void> _pickAndAttach({VoidCallback? onChanged}) async {
     final id = _noteId;
     if (id == null || _attaching) return;
@@ -2931,11 +2959,7 @@ class _NoteEditorState extends State<NoteEditor>
         // 编辑器已销毁（关闭笔记 / 切走窗口）就没必要继续落笔；已完成的项两边一致。
         if (!mounted) break;
         try {
-          final att = await _controller.addAttachmentFromBytes(
-            noteId: id,
-            filename: f.filename,
-            bytes: f.bytes,
-          );
+          final att = await _addPickedAttachment(id, f);
           // 以**当前**正本落笔（不是批次开始时的快照），位置钳制到当前长度：
           // 即便内容在此期间被外部改写，也不会覆盖别人的字。
           final current = target?.text ?? _content.text;
@@ -3020,11 +3044,7 @@ class _NoteEditorState extends State<NoteEditor>
     var count = 0;
     for (final f in picked) {
       try {
-        final att = await _controller.addAttachmentFromBytes(
-          noteId: id,
-          filename: f.filename,
-          bytes: f.bytes,
-        );
+        final att = await _addPickedAttachment(id, f);
         // 每次落笔都以**当前正本**重新解析同一表格，拿到最新结构再写入。
         final parsed = EditorFormat.parseTable(text, fallback.start);
         final table = (parsed != null && parsed.start == fallback.start)
@@ -3179,9 +3199,8 @@ class _NoteEditorState extends State<NoteEditor>
                     : const Icon(Icons.add),
                 label: Text(busy ? '正在添加…' : '添加附件'),
                 // 批次互斥：置灰即连点无效（BR-91.2 / AC-518）。
-                onPressed: busy
-                    ? null
-                    : () => _pickAndAttach(onChanged: refreshPanel),
+                onPressed:
+                    busy ? null : () => _pickAndAttach(onChanged: refreshPanel),
               ),
               TextButton(
                 onPressed: () => Navigator.of(dialogContext).pop(),
@@ -4834,9 +4853,7 @@ class _AttachmentPreviewDialog extends StatelessWidget {
     switch (result.outcome) {
       case ExternalOpenOutcome.opened:
         // 只有桌面端会做外部编辑回写；Android 是只读授权，不能作此承诺（BR-110.6）。
-        return isDesktopPlatform
-            ? '已用系统默认应用打开；编辑保存后将自动回写'
-            : '已用系统默认应用打开';
+        return isDesktopPlatform ? '已用系统默认应用打开；编辑保存后将自动回写' : '已用系统默认应用打开';
       case ExternalOpenOutcome.noHandler:
         return '没有可打开「${attachment.filename}」的应用，可先用内置预览查看';
       case ExternalOpenOutcome.unsupported:

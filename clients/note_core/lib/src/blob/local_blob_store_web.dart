@@ -13,7 +13,7 @@ import 'blob_store.dart';
 ///
 /// M10-T30：与原生实现**同语义**——写入拒绝非法摘要；读取 / 存在性 / 删除按「不存在」
 /// 处理（各端行为一致，避免「只有某端才校验」）。
-class LocalBlobStore implements BlobStore {
+class LocalBlobStore implements BlobStore, RangeReadableBlobStore {
   final String rootDir;
 
   LocalBlobStore(this.rootDir);
@@ -36,6 +36,23 @@ class LocalBlobStore implements BlobStore {
   @override
   Future<bool> exists(String sha256) async =>
       isValidSha256(sha256) && _bytes.containsKey(sha256);
+
+  @override
+  Future<int?> byteLength(String sha256) async {
+    if (!isValidSha256(sha256)) return null;
+    return _bytes[sha256]?.length;
+  }
+
+  /// Web 端数据本就在内存：区间读取只是列表切片（无法避免整文件已驻留）。
+  @override
+  Future<Uint8List?> readRange(String sha256, int start, int length) async {
+    if (!isValidSha256(sha256) || start < 0 || length <= 0) return null;
+    final bytes = _bytes[sha256];
+    if (bytes == null || start >= bytes.length) return null;
+    final end =
+        (start + length <= bytes.length) ? start + length : bytes.length;
+    return Uint8List.sublistView(bytes, start, end);
+  }
 
   @override
   Future<void> delete(String sha256) async {

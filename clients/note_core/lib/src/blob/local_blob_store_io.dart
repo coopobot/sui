@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import '../util/hashes.dart';
@@ -18,7 +19,8 @@ import 'blob_store.dart';
 ///   - **读取 / 存在性 / 删除按「不存在」处理**——非法摘要在本存储里**永不可能存在**
 ///     （写入已被拒），返回「无」既真实、又不会让维护性扫描（LRU 淘汰、待上传盘点）
 ///     或 UI 读取因一行脏数据整体失败。
-class LocalBlobStore implements BlobStore {
+class LocalBlobStore
+    implements BlobStore, RangeReadableBlobStore, FilePathBlobStore {
   final String rootDir;
 
   LocalBlobStore(this.rootDir);
@@ -68,6 +70,56 @@ class LocalBlobStore implements BlobStore {
   Future<bool> exists(String sha256) async {
     if (!isValidSha256(sha256)) return false;
     return File(_fileFor(sha256)).exists();
+  }
+
+  /// 从路径流式入库（M21 / FR-120）：先流式算 sha256，再 `File.copy` 复制；
+  /// 全程不把文件读入内存（原生桌面 / Android / iOS）。
+  @override
+  Future<String> putFromFile(String path) async {
+    final src = File(path);
+    if (!await src.exists()) {
+      throw FileSystemException('源文件不存在', path);
+    }
+    final digest = await sha256.bind(src.openRead()).first;
+    final hash = digest.toString();
+    if (!isValidSha256(hash)) {
+      throw ArgumentError.value(hash, 'sha256', '计算的摘要非法');
+    }
+    final dst = File(_fileFor(hash));
+    if (await dst.exists()) return hash;
+    await dst.parent.create(recursive: true);
+    await src.copy(dst.path);
+    return hash;
+  }
+
+  @override
+  Future<int?> byteLength(String sha256) async {
+    if (!isValidSha256(sha256)) return null;
+    final f = File(_fileFor(sha256));
+    if (!await f.exists()) return null;
+    return f.length();
+  }
+
+  /// 按区间读取（M21 / FR-120）：大附件上传逐片读盘，不把整文件读入内存。
+  @override
+  Future<Uint8List?> readRange(
+    String sha256,
+    int start,
+    int length,
+  ) async {
+    if (!isValidSha256(sha256) || start < 0 || length <= 0) return null;
+    final f = File(_fileFor(sha256));
+    if (!await f.exists()) return null;
+    final raf = await f.open();
+    try {
+      final total = await raf.length();
+      if (start >= total) return null;
+      final n = (start + length <= total) ? length : total - start;
+      await raf.setPosition(start);
+      return await raf.read(n);
+    } finally {
+      await raf.close();
+    }
   }
 
   @override

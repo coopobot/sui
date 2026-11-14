@@ -13,7 +13,8 @@ class SqliteBlobCacheMeta implements BlobCacheMeta {
 
   @override
   Future<BlobCacheEntry?> entry(String sha256) async {
-    final row = await (db.select(db.blobRefs)..where((t) => t.sha256.equals(sha256)))
+    final row = await (db.select(db.blobRefs)
+          ..where((t) => t.sha256.equals(sha256)))
         .getSingleOrNull();
     if (row == null) return null;
     return BlobCacheEntry(

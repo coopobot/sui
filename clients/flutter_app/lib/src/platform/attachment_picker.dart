@@ -1,16 +1,26 @@
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 /// 一次「选择文件」的结果：文件名 + 字节。
 ///
 /// 统一带字节（`withData: true`）：note_core 是纯 Dart 包、不能碰 `dart:io`，
 /// 所以文件读取放在平台层完成，Web / 桌面 / 移动拿到的东西完全一致。
 class PickedAttachment {
-  const PickedAttachment({required this.filename, required this.bytes});
+  const PickedAttachment({
+    required this.filename,
+    this.bytes,
+    this.path,
+  }) : assert(bytes != null || path != null, 'bytes / path 至少一个');
 
   final String filename;
-  final Uint8List bytes;
+
+  /// 字节（Web / 测试 / 无路径平台）。
+  final Uint8List? bytes;
+
+  /// 本地文件路径（桌面 / Android / iOS）：大文件走流式入库，不整文件入内存。
+  final String? path;
 }
 
 /// **测试接缝**（生产代码从不写入；与 `platform_seams.dart` 同一范式）：
@@ -24,16 +34,18 @@ Future<List<PickedAttachment>> Function()? debugAttachmentPickerOverride;
 Future<List<PickedAttachment>> pickAttachments() async {
   final override = debugAttachmentPickerOverride;
   if (override != null) return override();
+  // Web 只能拿字节；原生端拿路径（大文件流式入库，M21 / FR-120）。
   final result = await FilePicker.platform.pickFiles(
     allowMultiple: true,
-    withData: true,
+    withData: kIsWeb,
     dialogTitle: '选择附件',
   );
   if (result == null) return const [];
   return [
     for (final f in result.files)
-      // withData 在部分平台可能拿不到字节（超大文件等），这类项直接跳过。
       if (f.bytes != null)
-        PickedAttachment(filename: f.name, bytes: f.bytes!),
+        PickedAttachment(filename: f.name, bytes: f.bytes)
+      else if (f.path != null)
+        PickedAttachment(filename: f.name, path: f.path),
   ];
 }

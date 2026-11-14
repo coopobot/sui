@@ -91,6 +91,9 @@ class SyncClient {
   /// 分片大小（每请求一片，密文约 11 MiB，远低于通道上限）。
   static const int chunkSizeBytes = 8 << 20;
 
+  /// 超过该字节数的附件**逐片读盘**上传，不把整文件读入内存（M21 / FR-120）。
+  static const int streamingThresholdBytes = 100 << 20;
+
   /// 刷新待上传条数缓存。
   Future<void> refreshQueuedCount() async {
     _queuedCount = await repository.countNeedingUpload();
@@ -880,13 +883,43 @@ class SyncClient {
     if (!isValidSha256(sha256)) return false;
     // exists 走本地物理层，避免 read 未命中时触发一次按需下载。
     if (!await store.exists(sha256)) return false;
+
+    final rangeStore = store is RangeReadableBlobStore
+        ? store as RangeReadableBlobStore
+        : null;
+    final length = rangeStore != null
+        ? await rangeStore.byteLength(sha256)
+        : (await store.read(sha256))?.length;
+    if (length == null || length == 0) return false;
+
+    // >100 MiB 且有区间读能力：上传时逐片读盘，**不把整文件读入内存**
+    // （M21 / FR-120；原生桌面 / 移动端由文件系统实现）。
+    if (length > streamingThresholdBytes && rangeStore != null) {
+      final outcome = await _uploadChunked(
+        sha256,
+        length,
+        (start, end) => rangeStore.readRange(sha256, start, end - start),
+      );
+      if (outcome == _ChunkOutcome.unsupported) {
+        // 旧服务端没有分片端点；大文件不再回退整包读入内存，直接留待升级。
+        return false;
+      }
+      if (outcome != _ChunkOutcome.done) return false;
+      if (store is CachedBlobStore) await store.markUploaded(sha256);
+      return true;
+    }
+
     final bytes = await store.read(sha256);
     if (bytes == null || bytes.isEmpty) return false;
 
     // 大附件走分片断点续传（M20 / FR-119 / ADR-044）：每片独立经通道，
     // 不再受整包密文上限约束，失败后下一次 init 只补缺失片。
     if (bytes.length > chunkThresholdBytes) {
-      final outcome = await _uploadChunked(sha256, bytes);
+      final outcome = await _uploadChunked(
+        sha256,
+        bytes.length,
+        (start, end) async => Uint8List.sublistView(bytes, start, end),
+      );
       if (outcome == _ChunkOutcome.unsupported) {
         // 旧服务端没有分片端点：回退整包 PUT（v0.19.x 及以前）。
       } else {
@@ -917,7 +950,8 @@ class SyncClient {
   ///（404/405/501），调用方回退整包 PUT；`failed` 表示本次失败，下个同步周期重试。
   Future<_ChunkOutcome> _uploadChunked(
     String sha256,
-    Uint8List bytes,
+    int size,
+    Future<Uint8List?> Function(int start, int end) readRange,
   ) async {
     final base = '$baseUrl/api/v1/blobs/${Uri.encodeComponent(sha256)}/upload';
     final init = await _withAuth(
@@ -925,7 +959,7 @@ class SyncClient {
         Uri.parse(base),
         headers: h,
         body: jsonEncode({
-          'size': bytes.length,
+          'size': size,
           'chunkSize': chunkSizeBytes,
         }),
       ),
@@ -945,14 +979,15 @@ class SyncClient {
         if (v is int) v,
     };
 
-    final total = (bytes.length + chunkSizeBytes - 1) ~/ chunkSizeBytes;
+    final total = (size + chunkSizeBytes - 1) ~/ chunkSizeBytes;
     for (var i = 0; i < total; i++) {
       if (uploaded.contains(i)) continue;
       final start = i * chunkSizeBytes;
-      final end = start + chunkSizeBytes < bytes.length
-          ? start + chunkSizeBytes
-          : bytes.length;
-      final part = Uint8List.sublistView(bytes, start, end);
+      final end = start + chunkSizeBytes < size ? start + chunkSizeBytes : size;
+      final part = await readRange(start, end);
+      if (part == null || part.length != end - start) {
+        return _ChunkOutcome.failed;
+      }
       final resp = await _withAuth(
         (h) => _http.put(
           Uri.parse('$base/$i'),

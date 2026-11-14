@@ -538,7 +538,8 @@ class AppController extends ChangeNotifier {
     _noteListCollapsed = _boolPref(await _settings.get(_kNoteListCollapsed));
     _noteListWidth = _noteListWidthPref(await _settings.get(_kNoteListWidth));
     _editorMode = editorModeFromName(await _settings.get(_kEditorMode));
-    _showPropertiesPanel = _boolPref(await _settings.get(_kPropertiesPanelVisible));
+    _showPropertiesPanel =
+        _boolPref(await _settings.get(_kPropertiesPanelVisible));
     // M14（FR-64 / FR-65 / FR-66）：外观偏好——主题、界面字体、笔记正文字体与
     // 各笔记本的字体覆盖。全部为**本机偏好**（不进同步净荷、无 drift 迁移）。
     _themeMode = themeModeFromName(await _settings.get(_kThemeMode));
@@ -946,8 +947,7 @@ class AppController extends ChangeNotifier {
       return;
     }
 
-    final before =
-        _notes.where((s) => s.note.id == id).firstOrNull;
+    final before = _notes.where((s) => s.note.id == id).firstOrNull;
     final note = await _repository.updateNoteContent(
       id,
       title: title,
@@ -1150,7 +1150,8 @@ class AppController extends ChangeNotifier {
   ///
   /// 成功后该笔记本保持**已解锁**（用户刚设的密码），并把笔记本与**受影响笔记**一并入队上行；
   /// 失败返回可直接展示的文案（UI 用 SnackBar 提示），不抛异常。
-  Future<String?> setNotebookEncrypted(String notebookId, String password) async {
+  Future<String?> setNotebookEncrypted(
+      String notebookId, String password) async {
     try {
       final res = await _repository.setNotebookEncrypted(notebookId, password);
       _enqueueNotebook(res.notebook);
@@ -1577,8 +1578,9 @@ class AppController extends ChangeNotifier {
   Future<Map<String, int>> _verifiedTableCounts() async {
     final out = <String, int>{};
     for (final table in kVerifiedTables) {
-      final row =
-          await _db.customSelect('SELECT COUNT(*) AS c FROM $table').getSingle();
+      final row = await _db
+          .customSelect('SELECT COUNT(*) AS c FROM $table')
+          .getSingle();
       out[table] = row.read<int>('c');
     }
     return out;
@@ -1776,7 +1778,8 @@ class AppController extends ChangeNotifier {
     if (visible == _showPropertiesPanel) return;
     _showPropertiesPanel = visible;
     notifyListeners();
-    unawaited(_persistPref(_kPropertiesPanelVisible, visible ? 'true' : 'false'));
+    unawaited(
+        _persistPref(_kPropertiesPanelVisible, visible ? 'true' : 'false'));
   }
 
   // ---- 桌面壳层：面板折叠与编辑模式（M7-T06，FR-40 / FR-41） ----
@@ -2114,8 +2117,10 @@ class AppController extends ChangeNotifier {
     final tracked = _activeWindows.remove(handle);
     final knownNote = _openNotes.containsValue(handle);
     if (!tracked && !knownNote) return;
-    final closedNoteIds =
-        _openNotes.entries.where((e) => e.value == handle).map((e) => e.key).toList();
+    final closedNoteIds = _openNotes.entries
+        .where((e) => e.value == handle)
+        .map((e) => e.key)
+        .toList();
     _openNotes.removeWhere((_, value) => value == handle);
     for (final id in closedNoteIds) {
       _windowNoteSummaries.remove(id);
@@ -2214,17 +2219,17 @@ class AppController extends ChangeNotifier {
     } catch (_) {
       return const [];
     }
-}
+  }
 
   /// 本地已同步修订节点（离线历史骨架，§8.3）。
   Future<List<Revision>> listSyncedRevisions(String noteId) async {
     return await _repository.listSyncedRevisions(noteId);
-}
+  }
 
   /// 本地未同步草稿分组（§8.3）。
   Future<List<Revision>> listUnsyncedRevisions(String noteId) async {
     return await _repository.listUnsyncedRevisions(noteId);
-}
+  }
 
   /// 恢复到指定历史版本。恢复后刷新笔记列表和编辑器内容。
   Future<void> restoreRevision(String noteId, int version) async {
@@ -2262,7 +2267,8 @@ class AppController extends ChangeNotifier {
   Future<String?> importTargetBlockReason() async {
     final store = _blobStore;
     if (store == null) return '本地存储尚未就绪，请稍后重试';
-    final service = FileImportService(repository: _repository, blobStore: store);
+    final service =
+        FileImportService(repository: _repository, blobStore: store);
     return service.checkTarget(_selectedNotebookId);
   }
 
@@ -2282,7 +2288,8 @@ class AppController extends ChangeNotifier {
     if (store == null) {
       throw StateError('本地存储尚未就绪，无法导入');
     }
-    final service = FileImportService(repository: _repository, blobStore: store);
+    final service =
+        FileImportService(repository: _repository, blobStore: store);
     final report = await service.run(
       files,
       notebookId: _selectedNotebookId,
@@ -2344,12 +2351,50 @@ class AppController extends ChangeNotifier {
     }
     final hash = await _hashAttachmentBytes(bytes);
     await store.put(sha256: hash, bytes: bytes);
+    return _addAttachmentRecord(
+      noteId: noteId,
+      filename: filename,
+      byteSize: bytes.length,
+      sha256: hash,
+    );
+  }
+
+  /// 从**文件路径**添加附件（M21 / FR-120）：流式计算 sha256 + 复制入库，
+  /// 不把大文件整体读入内存（桌面 / Android / iOS；Web 无路径，走字节路径）。
+  Future<Attachment> addAttachmentFromPath({
+    required String noteId,
+    required String filename,
+    required String path,
+  }) async {
+    final store = _blobStore;
+    if (store == null) {
+      throw StateError('附件缓存未初始化');
+    }
+    final hash = await store.putFromFile(path);
+    final size = await store.byteLength(hash);
+    if (size == null) {
+      throw StateError('附件入库后读取大小失败');
+    }
+    return _addAttachmentRecord(
+      noteId: noteId,
+      filename: filename,
+      byteSize: size,
+      sha256: hash,
+    );
+  }
+
+  Future<Attachment> _addAttachmentRecord({
+    required String noteId,
+    required String filename,
+    required int byteSize,
+    required String sha256,
+  }) async {
     final att = await _repository.addAttachment(
       noteId: noteId,
       filename: filename,
       mimeKind: mimeKindFor(filename),
-      byteSize: bytes.length,
-      sha256: hash,
+      byteSize: byteSize,
+      sha256: sha256,
     );
     await refreshAttachments(noteId);
 
@@ -2545,7 +2590,6 @@ class AppController extends ChangeNotifier {
     return true;
   }
 
-
   // ---- 加密笔记本：解锁 / 回锁 / 空闲自动回锁（M10-T29 / FR-51，详细设计 §6.1 / §7） ----
 
   /// 解锁态的**空闲自动回锁**时限（§7：默认 15 分钟；可注入以便测试）。
@@ -2586,7 +2630,6 @@ class AppController extends ChangeNotifier {
 
   /// 选中笔记所属笔记本（解锁 / 手动锁定入口用）。
   String? get selectedNoteNotebookId => selectedNoteSummary?.note.notebookId;
-
 
   /// 解锁加密笔记本。密码错误返回 `false`（不抛异常，由 UI 提示「锁定密码错误」）。
   Future<bool> unlockNotebook(String notebookId, String password) async {

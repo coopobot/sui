@@ -6,6 +6,44 @@ import 'package:http/testing.dart';
 import 'package:note_core/note_core.dart';
 import 'package:test/test.dart';
 
+/// 只支持区间读的 BlobStore：用于证明 >100 MiB 时**不会调用 read()**。
+class _FakeRangeStore implements BlobStore, RangeReadableBlobStore {
+  _FakeRangeStore(this.size);
+
+  final int size;
+  int readCalls = 0;
+  int rangeCalls = 0;
+
+  @override
+  Future<String> put(
+          {required String sha256, required Uint8List bytes}) async =>
+      sha256;
+
+  @override
+  Future<Uint8List?> read(String sha256) async {
+    readCalls++;
+    throw StateError('>100 MiB 不应整文件 read()');
+  }
+
+  @override
+  Future<bool> exists(String sha256) async => true;
+
+  @override
+  Future<int?> byteLength(String sha256) async => size;
+
+  @override
+  Future<Uint8List?> readRange(String sha256, int start, int length) async {
+    rangeCalls++;
+    return Uint8List(length);
+  }
+
+  @override
+  Future<void> delete(String sha256) async {}
+
+  @override
+  Future<void> dispose() async {}
+}
+
 /// 内存 BlobStore：只保存一份字节，供 [SyncClient.uploadBlob] 读取。
 class _FakeBlobStore implements BlobStore {
   _FakeBlobStore(this.bytes);
@@ -163,5 +201,45 @@ void main() {
     );
     expect(await client.uploadBlob(hash), isTrue);
     expect(wholePuts, 1);
+  });
+
+  test('>100 MiB 走区间读，不调用 read()', () async {
+    const size = 120 << 20;
+    final store = _FakeRangeStore(size);
+    final sent = <int>[];
+    db = AppDatabase.memory();
+    addTearDown(db.close);
+    client = SyncClient(
+      repository: NoteRepository(db, deviceId: 'stream'),
+      baseUrl: 'http://example.test',
+      deviceId: 'stream',
+      token: 'tok',
+      blobStore: store,
+      httpClient: MockClient((req) async {
+        final path = req.url.path;
+        if (req.method == 'POST' && path.endsWith('/upload')) {
+          return http.Response(
+            jsonEncode({
+              'ok': true,
+              'size': size,
+              'chunkSize': 8 << 20,
+              'uploaded': <int>[],
+              'complete': false,
+            }),
+            200,
+          );
+        }
+        if (req.method == 'PUT' && path.contains('/upload/')) {
+          sent.add(int.parse(path.split('/').last));
+          return http.Response('{"ok":true}', 200);
+        }
+        return http.Response('{"ok":true}', 200);
+      }),
+    );
+
+    expect(await client.uploadBlob(hash), isTrue);
+    expect(store.readCalls, 0, reason: '不得整文件读入内存');
+    expect(store.rangeCalls, 15, reason: '120 MiB / 8 MiB = 15 片');
+    expect(sent.length, 15);
   });
 }
