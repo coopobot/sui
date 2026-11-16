@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"sui/note-server/internal/blob"
@@ -316,24 +317,11 @@ func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
 // `blobs` 行只承担引用计数 / 大小记账，可能**先于字节**出现（附件映射先到、
 // 上传尚未成功），因此 HEAD / PUT 不能只看 DB 行（v0.19.3 / BR-118.1）。
 func (s *Server) blobOnDisk(hash string) (bool, int64, error) {
-	p, err := s.blobs.Path(hash)
-	if os.IsNotExist(err) {
-		return false, 0, nil
-	}
+	size, exists, err := s.blobs.Stat(hash)
 	if err != nil {
 		return false, 0, err
 	}
-	fi, err := os.Stat(p)
-	if os.IsNotExist(err) {
-		return false, 0, nil
-	}
-	if err != nil {
-		return false, 0, err
-	}
-	if !fi.Mode().IsRegular() {
-		return false, 0, nil
-	}
-	return true, fi.Size(), nil
+	return exists, size, nil
 }
 
 // handleBlobPut 上传 hash 对应的字节；已存在则幂等返回。
@@ -387,11 +375,9 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 		// 在写体阶段收到早响应 / broken pipe，永远置不上 uploaded_at（v0.19.3）。
 		_, _ = io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, maxBlobBytes()))
 	}
-	// 记账口径：以磁盘实际大小为权威（自愈写入 / 幂等命中都从 stat 取）。
-	if p, perr := s.blobs.Path(hash); perr == nil {
-		if fi, serr := os.Stat(p); serr == nil {
-			size = fi.Size()
-		}
+	// 记账口径：以存储层实际大小为权威（自愈写入 / 幂等命中都从 Stat 取）。
+	if n, ok, serr := s.blobs.Stat(hash); serr == nil && ok {
+		size = n
 	}
 	if _, err := s.store.EnsureBlob(hash, int(size)); err != nil {
 		writeInternalError(w, r, err)
@@ -409,13 +395,22 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid parameter"})
 		return
 	}
-	reader, err := s.blobs.Open(hash)
+	size, exists, err := s.blobs.Stat(hash)
 	if err != nil {
+		writeInternalError(w, r, err)
+		return
+	}
+	if !exists {
 		// 行在、文件缺失是「资源不存在」，不是服务端内部错误（v0.19.3 / BR-118.2）。
-		if os.IsNotExist(err) {
-			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "blob not found"})
-			return
-		}
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "blob not found"})
+		return
+	}
+	reader, err := s.blobs.Open(hash)
+	if errors.Is(err, blob.ErrNotFound) || os.IsNotExist(err) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "blob not found"})
+		return
+	}
+	if err != nil {
 		writeInternalError(w, r, err)
 		return
 	}
@@ -425,7 +420,8 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 	// M10-T24：附件内容不该被中间缓存留存。
 	w.Header().Set("Cache-Control", "private")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(w, r, hash, time.Time{}, reader)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	_, _ = io.Copy(w, reader)
 }
 
 // ---- 修订历史 ----

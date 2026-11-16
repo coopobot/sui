@@ -5,6 +5,18 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.22.0] - 2026-11-16
+
+### 新增
+
+- **S3 兼容附件存储后端**（M22 / FR-121）`SUI_BLOB_STORE=s3` 时附件字节改存
+  S3 兼容对象存储（AWS S3 / MinIO / R2 等），对象键为 `<prefix><sha256>`；
+  支持自定义 endpoint / region / bucket / prefix / path-style，凭据走环境变量或
+  AWS 标准凭据链。`PutObject` / `GetObject` / `HeadObject` / `DeleteObject` 全部接入，
+  下载流式返回；分片仍在本地临时装配、校验 sha256 后单对象上传（≤5 GB，不使用
+  S3 Multipart）。默认本地盘后端不变；S3 配置缺失时启动失败并明确报错。
+  引入 AWS SDK Go v2（经用户批准）。
+
 ## [0.21.0] - 2026-11-14
 
 ### 变更

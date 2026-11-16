@@ -143,8 +143,8 @@ func TestM10LocalStoreRejectsEscape(t *testing.T) {
 		if _, err := l.Open(hash); err == nil {
 			t.Errorf("Open(%q) 应当失败（越出存储根）", hash)
 		}
-		if _, err := l.Path(hash); err == nil {
-			t.Errorf("Path(%q) 应当失败（越出存储根）", hash)
+		if _, _, err := l.Stat(hash); err == nil {
+			t.Errorf("Stat(%q) 应当失败（越出存储根）", hash)
 		}
 		if err := l.Delete(hash); err == nil {
 			t.Errorf("Delete(%q) 应当失败（越出存储根）", hash)

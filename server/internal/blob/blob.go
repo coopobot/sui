@@ -33,10 +33,12 @@ type Store interface {
 	// 实现**必须**校验读入字节的 sha256 等于 hash，不一致时返回 ErrDigestMismatch，
 	// 且不得留下最终路径的文件。
 	Put(hash string, r io.Reader) (int64, error)
-	// Open 打开指定 hash 内容读取流；不存在返回 error。
-	Open(hash string) (io.ReadSeekCloser, error)
-	// Path 返回内容在磁盘/后端的可读路径（用于流式返回）。
-	Path(hash string) (string, error)
+	// Open 打开指定 hash 内容读取流；不存在返回 [ErrNotFound]。
+	//
+	// 返回 io.ReadCloser（不再要求 Seek）：本地文件天然可 Seek，S3 只提供流。
+	Open(hash string) (io.ReadCloser, error)
+	// Stat 返回内容大小与是否存在；不存在返回 (0,false,nil)。
+	Stat(hash string) (int64, bool, error)
 	// Delete 删除指定 hash 内容（仅 BlobStore 层；引用计数由 store 管理）。
 	Delete(hash string) error
 }
@@ -129,24 +131,35 @@ func (l *Local) Put(hash string, r io.Reader) (int64, error) {
 }
 
 // Open 打开内容读取流。
-func (l *Local) Open(hash string) (io.ReadSeekCloser, error) {
+func (l *Local) Open(hash string) (io.ReadCloser, error) {
 	p, err := l.pathOf(hash)
 	if err != nil {
 		return nil, err
 	}
-	return os.Open(p)
+	f, err := os.Open(p)
+	if os.IsNotExist(err) {
+		return nil, ErrNotFound
+	}
+	return f, err
 }
 
-// Path 返回内容路径。
-func (l *Local) Path(hash string) (string, error) {
+// Stat 返回内容大小与是否存在（本地文件）。
+func (l *Local) Stat(hash string) (int64, bool, error) {
 	p, err := l.pathOf(hash)
 	if err != nil {
-		return "", err
+		return 0, false, err
 	}
-	if _, err := os.Stat(p); err != nil {
-		return "", err
+	fi, err := os.Stat(p)
+	if os.IsNotExist(err) {
+		return 0, false, nil
 	}
-	return p, nil
+	if err != nil {
+		return 0, false, err
+	}
+	if !fi.Mode().IsRegular() {
+		return 0, false, nil
+	}
+	return fi.Size(), true, nil
 }
 
 // Delete 删除内容文件并清理空分片目录。

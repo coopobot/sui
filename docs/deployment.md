@@ -509,6 +509,38 @@ sui.example.com {
 > `client_max_body_size`（按单片而非总文件设置即可）。
 > 另：客户端对 413 只表现为「待上传 + 重试」，不会弹出「文件过大」提示（已知限制）。
 
+### 9.2 S3 兼容附件存储（`v0.22.0` / M22 / FR-121）
+
+默认仍把附件字节存本地 `<SUI_DATA>/blobs`。需要对象存储时：
+
+```bash
+SUI_BLOB_STORE=s3 \
+SUI_S3_ENDPOINT=http://127.0.0.1:9000 \
+SUI_S3_REGION=us-east-1 \
+SUI_S3_BUCKET=sui \
+SUI_S3_PREFIX=sui/ \
+SUI_S3_ACCESS_KEY=... SUI_S3_SECRET_KEY=... \
+SUI_S3_PATH_STYLE=1 \
+./bin/sui-server
+```
+
+| 环境变量 | 默认 | 说明 |
+|---------|------|------|
+| `SUI_BLOB_STORE` | 空（本地盘） | 置 `s3` 启用对象存储 |
+| `SUI_S3_ENDPOINT` | AWS 默认 | MinIO / R2 等填自定义 endpoint |
+| `SUI_S3_REGION` | `us-east-1` | 区域 |
+| `SUI_S3_BUCKET` | — | 必填；缺失启动失败 |
+| `SUI_S3_PREFIX` | `sui/` | 对象键前缀；对象键 = 前缀 + sha256 |
+| `SUI_S3_ACCESS_KEY` / `SUI_S3_SECRET_KEY` | 标准 AWS 凭据链 | 也可用 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` |
+| `SUI_S3_PATH_STYLE` | `1` | MinIO / R2 用 1；AWS 可设 0 |
+| `SUI_S3_TEMP` | `<tmp>/sui-s3-chunks` | 分片本地装配目录（需可写；24h 清理） |
+
+- 桶权限至少：`s3:PutObject` / `s3:GetObject` / `s3:DeleteObject` / `s3:ListBucket`（若用前缀）。
+- **单对象上限 5 GB**（PutObject；不使用 S3 Multipart）。分片在本地装配、校验 sha256 后上传。
+- S3 不可达 / bucket 缺失 / 凭据错误时**启动失败**，不会回退本地盘。
+- 下载为流式响应（不支持 HTTP Range）；`NoSuchKey` 返回 404。
+- 切换后端前先迁移已有 `blobs/` 对象（键 = 前缀 + sha256），否则对端会 404。
+
 源码位置：`server/internal/api` 与 `server/internal/store`。
 
 ## 10. 客户端接入

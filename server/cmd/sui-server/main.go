@@ -38,12 +38,26 @@ func main() {
 	}
 	defer st.Close()
 
-	blobs, err := blob.NewLocal(dataDir)
-	if err != nil {
-		log.Fatalf("init blob store: %v", err)
+	var blobs blob.Store
+	if os.Getenv("SUI_BLOB_STORE") == "s3" {
+		// M22 / FR-121 / ADR-045：S3 兼容对象存储。
+		s3Store, err := blob.NewS3(context.Background(), blob.S3ConfigFromEnv())
+		if err != nil {
+			log.Fatalf("init s3 blob store: %v", err)
+		}
+		blobs = s3Store
+		log.Printf("blob store: s3 bucket=%s endpoint=%s", os.Getenv("SUI_S3_BUCKET"), os.Getenv("SUI_S3_ENDPOINT"))
+	} else {
+		local, err := blob.NewLocal(dataDir)
+		if err != nil {
+			log.Fatalf("init blob store: %v", err)
+		}
+		blobs = local
 	}
 	// M20 / FR-119：启动时清理超过 24h 的未完成分片会话（不阻塞启动）。
-	_ = blobs.CleanupUploads(time.Now())
+	if chunks, ok := blobs.(blob.ChunkedStore); ok {
+		_ = chunks.CleanupUploads(time.Now())
+	}
 
 	apiSrv := api.New(st, blobs)
 	// M10-T27 / FR-50：受保护通道的长期密钥（首次启动生成并持久化，0600；信任根，TOFU + 指纹）。
