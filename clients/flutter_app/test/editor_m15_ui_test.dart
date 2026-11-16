@@ -12,7 +12,8 @@
 ///   打桩）、非白名单不打开、**正本逐字节不变**；
 /// * `EscapeInput`（FR-78 / BR-78.1\~78.5）：正文 `*` → `\*`、单元格 `|` 不双重转义、
 ///   IME 组合期不拦、源码模式不加工；
-/// * `PasteNormalize`（FR-77 / BR-77.2）：CRLF → LF，且**格式模式勾选框仍在**；
+/// * `PasteNormalize`（FR-77 / BR-77.2 / FR-122）：CRLF → LF，且**格式模式勾选框仍在**；
+///   源码态普通粘贴为**原样插入**（`v0.22.1` 起不再转义，见 `editor_paste_verbatim_test.dart`）；
 /// * `CodeBlockBand`（FR-81a / BR-81.1）：`paragraphWidth > 0` 时树中存在底色带 widget；
 /// * `PropertiesEntry`（FR-74）：属性图标存在且回调被调用。
 ///
@@ -702,10 +703,13 @@ void main() {
       await _settle(tester);
 
       expect(ctrl.text.contains('\r'), isFalse,
-          reason: '源码模式粘贴必须经 normalizePlainText（CRLF → LF，FR-77 / BR-77.2）');
-      expect(ctrl.text.contains(r'- \[x\] 乙'), isTrue,
-          reason: '粘贴内容完整落盘（纯文本按 Markdown 特殊字符**安全转义**插入，'
-              'FR-45 口径不变）');
+          reason: '粘贴只做 normalizeLineEndings（CRLF → LF，FR-77 / BR-77.2）');
+      // v0.22.1（FR-122）：源码态**普通粘贴**原样插入——不再逐字符转义。
+      // 改判前这里断言的是 `- \[x\] 乙`（转义形态）；用户报障「`[]` 变成 `\[\]`」即此。
+      expect(ctrl.text.contains('- [x] 乙'), isTrue,
+          reason: '源码态普通粘贴必须原样插入（FR-122 / BR-122.1；v0.22.1 改判）');
+      expect(ctrl.text.contains(r'- \[x\]'), isFalse,
+          reason: '源码态不得出现粘贴引入的转义（FR-77「无转义加工」）');
       await db.close();
     });
 

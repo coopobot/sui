@@ -1104,12 +1104,13 @@ class _NoteEditorState extends State<NoteEditor>
         _FormatIntent(FormatCommand.outdent),
     SingleActivator(LogicalKeyboardKey.space, control: true):
         _FormatIntent(FormatCommand.clearFormat),
-    // `Ctrl+Shift+V`（纯文本粘贴）为编辑器自有的显式入口（FR-45 / §12.2）。
-    // 注意：`Ctrl+V`（富文本粘贴）**不在此声明**——它沿用系统默认的文本编辑快捷键，
+    // `Ctrl+Shift+V`（纯文本粘贴）为编辑器自有的显式入口（FR-45 / §12.2），
+    // 也是 `v0.22.1` 起**唯一**的「按字面转义」粘贴入口（FR-122 / BR-122.3）。
+    // 注意：`Ctrl+V`（普通粘贴）**不在此声明**——它沿用系统默认的文本编辑快捷键，
     // 以免抢占剪贴板级按键（BR-30.2 / AC-88）；格式模式通过覆写 `PasteTextIntent`
     // 对应的 Action 来接管其行为（见 [_formatActions]）。
     SingleActivator(LogicalKeyboardKey.keyV, control: true, shift: true):
-        _PasteIntent(rich: false),
+        _PasteIntent(rich: false, escapePlain: true),
   };
 
   /// 快捷键动作：统一落到 [_applyCommand]，保证与工具栏「同源同效」（BR-30.4）。
@@ -1134,11 +1135,16 @@ class _NoteEditorState extends State<NoteEditor>
         ),
         _PasteIntent: CallbackAction<_PasteIntent>(
           onInvoke: (intent) {
-            _pasteFromClipboard(rich: intent.rich);
+            _pasteFromClipboard(
+              rich: intent.rich,
+              escapePlain: intent.escapePlain,
+            );
             return null;
           },
         ),
-        // 覆写系统默认粘贴：格式模式下 `Ctrl+V` 优先富文本（FR-45 / §12.2）。
+        // 覆写系统默认粘贴：格式模式下 `Ctrl+V` 优先富文本；无 HTML 表示时按 Markdown
+        // **原文插入**（`v0.22.1` / FR-122：Sui 内部复制只写 `text/plain`，逐字符转义会把
+        // 链接 / 图片 / 勾选框写成字面量）。
         // 采用 Action 覆写而非在 `Shortcuts` 中声明 `Ctrl+V`，以满足 BR-30.2「不抢占
         // 剪贴板级按键」：键位仍归系统默认文本编辑快捷键，仅行为由本层接管。
         PasteTextIntent: CallbackAction<PasteTextIntent>(
@@ -1508,11 +1514,22 @@ class _NoteEditorState extends State<NoteEditor>
         ),
       };
 
-  /// **源码模式**的 Actions：只覆写 [PasteTextIntent]（FR-77 粘贴归一）。
+  /// **源码模式**的 Actions：接管普通粘贴与「纯文本粘贴」（FR-77 / FR-122）。
   ///
-  /// 源码态走框架默认文本编辑快捷键（**不**纳入格式层），故只需接管粘贴这一处：
-  /// 读剪贴板纯文本 → `normalizeLineEndings` → 安全插入选区；其余键位照旧冒泡。
+  /// 源码态走框架默认文本编辑快捷键（**不**纳入格式层），但粘贴必须由本层接管：
+  /// 普通粘贴 → 读剪贴板纯文本 → `normalizeLineEndings` → **原样插入**（源码态零加工）；
+  /// `Ctrl+Shift+V` → 同一来源 + [EditorFormat.escapePlainText] 按字面转义。
+  /// 其余键位照旧冒泡。
   Map<Type, Action<Intent>> _sourceActions() => <Type, Action<Intent>>{
+        _PasteIntent: CallbackAction<_PasteIntent>(
+          onInvoke: (intent) {
+            _pasteFromClipboard(
+              rich: intent.rich,
+              escapePlain: intent.escapePlain,
+            );
+            return null;
+          },
+        ),
         PasteTextIntent: CallbackAction<PasteTextIntent>(
           onInvoke: (_) {
             _pasteFromClipboard(rich: false);
@@ -1533,6 +1550,11 @@ class _NoteEditorState extends State<NoteEditor>
     final shortcuts = <ShortcutActivator, Intent>{
       if (formatted) ..._formatShortcuts,
       ..._findShortcuts(),
+      // 源码态的「纯文本粘贴」（`Ctrl+Shift+V`）必须显式声明：源码态不挂格式层快捷键，
+      // 框架默认把它也映射成 `PasteTextIntent`，与普通粘贴无法区分（FR-122 / AC-707）。
+      if (!formatted)
+        const SingleActivator(LogicalKeyboardKey.keyV, control: true, shift: true):
+            const _PasteIntent(rich: false, escapePlain: true),
     };
     final actions = <Type, Action<Intent>>{
       if (formatted) ..._formatActions() else ..._sourceActions(),
@@ -1694,18 +1716,24 @@ class _NoteEditorState extends State<NoteEditor>
     _save();
   }
 
-  /// 粘贴：按 [rich] 选择来源，产物**直接写入正本**并即时保存（FR-45 / FR-71 / §17）。
+  /// 粘贴：按 [rich] / [escapePlain] 两个**正交**开关决定来源与转义
+  /// （FR-45 / FR-71 / FR-122 / 详细设计 §27）。
   ///
   /// 来源优先级：
-  /// 1. `Ctrl+V`（[rich]）且剪贴板有 **HTML 表示** → 用 `note_core` 的 **DOM 式转换器**
+  /// 1. [rich] 且剪贴板有 **HTML 表示** → 用 `note_core` 的 **DOM 式转换器**
   ///    （[convertClipboardHtml]，与批量导入同源，BR-71.2）转成语义等价的 Markdown；
-  /// 2. 否则纯文本 → [EditorFormat.escapePlainText] 安全插入。
+  /// 2. 否则纯文本 → 只做**换行归一**；[escapePlain] 为 true 时再经
+  ///    [EditorFormat.escapePlainText] 按字面转义，否则**原样插入**（`v0.22.1`：Sui 内部
+  ///    复制只写 `text/plain`，逐字符转义会把 `[]()` / 勾选框 / 加粗写成字面量，BR-122.1）。
   ///
   /// HTML 表示的读取顺序：**自研原生通道**（Windows CF_HTML / Android `ClipData`，
   /// 见 [readClipboardHtml]）→ Flutter 内建的 `text/html`（部分平台可能提供）→ 纯文本。
   /// 任一环节失败都**静默回落**（BR-71.6：绝不出现「粘贴无反应」）。
-  /// `Ctrl+Shift+V`（[rich] 为 false）恒取纯文本，口径不变。
-  Future<void> _pasteFromClipboard({required bool rich}) async {
+  /// `Ctrl+Shift+V`（[rich] 为 false、[escapePlain] 为 true）是**唯一**的字面转义入口（BR-122.3）。
+  Future<void> _pasteFromClipboard({
+    required bool rich,
+    bool escapePlain = false,
+  }) async {
     String? html;
     if (rich) {
       html = await readClipboardHtml();
@@ -1742,10 +1770,14 @@ class _NoteEditorState extends State<NoteEditor>
     }
     if (payload == null || payload.trim().isEmpty) {
       // FR-77 / BR-77.3：纯文本同样先做**换行归一**（`\r\n` / `\r` → `\n`；只归换行、不做空白
-      // 规整），再按 Markdown 特殊字符转义插入（格式与源码**两态同源**；
-      // 源码态的接管见 [_sourceActions]）。
+      // 规整）。**普通粘贴原样插入**（BR-122.1：Sui 内部复制只有 `text/plain`，逐字符转义会把
+      // `[]()` / `![…]` / `- [ ]` / `**…**` 写成字面量，链接与勾选框结构丢失）；
+      // 仅「纯文本粘贴」（`Ctrl+Shift+V`，[escapePlain]）保留 [EditorFormat.escapePlainText]
+      // （BR-122.3）。格式与源码**两态同源**（源码态的接管见 [_sourceActions]）。
       payload = (plain != null && plain.isNotEmpty)
-          ? EditorFormat.escapePlainText(normalizeLineEndings(plain))
+          ? (escapePlain
+              ? EditorFormat.escapePlainText(normalizeLineEndings(plain))
+              : normalizeLineEndings(plain))
           : null;
     }
     if (payload == null || payload.isEmpty || !mounted) return;
@@ -3746,14 +3778,16 @@ class _CloseFindIntent extends Intent {
   const _CloseFindIntent();
 }
 
-/// 携带「粘贴模式」的快捷键意图（FR-45 / §12.2）。
+/// 携带「粘贴模式」的快捷键意图（FR-45 / FR-122 / §12.2）。
 ///
-/// [rich] 为 true（`Ctrl+V`）时优先读取剪贴板 HTML 表示并转 Markdown；
-/// 为 false（`Ctrl+Shift+V`）时仅取纯文本并转义 Markdown 特殊字符。
+/// 两个维度**正交**（详细设计 §27.2）：
+/// - [rich]：是否读取剪贴板 **HTML 表示**（普通粘贴 true；`Ctrl+Shift+V` 与源码态 false）；
+/// - [escapePlain]：纯文本是否**按字面转义**（仅 `Ctrl+Shift+V` 为 true；普通粘贴原样插入）。
 class _PasteIntent extends Intent {
-  const _PasteIntent({required this.rich});
+  const _PasteIntent({required this.rich, this.escapePlain = false});
 
   final bool rich;
+  final bool escapePlain;
 }
 
 /// 「插入超链接」录入结果（[showDialog] 的返回值）。
