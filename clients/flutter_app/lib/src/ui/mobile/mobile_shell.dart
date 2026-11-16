@@ -560,7 +560,8 @@ class SyncStatusPill extends StatelessWidget {
           unawaited(showSettingsDialog(context, controller,
               section: SettingsSection.sync));
         } else {
-          unawaited(controller.syncNow());
+          // 用户显式触发：不受超时冷却限制（v0.22.3 / BR-124.2）。
+          unawaited(controller.syncNow(manual: true));
         }
       },
       child: Padding(
@@ -1250,7 +1251,8 @@ class _MineSyncRow extends StatelessWidget {
       );
       return;
     }
-    unawaited(controller.syncNow());
+    // 用户显式触发：不受超时冷却限制（v0.22.3 / BR-124.2）。
+    unawaited(controller.syncNow(manual: true));
   }
 
   @override

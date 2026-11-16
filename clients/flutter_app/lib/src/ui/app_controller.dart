@@ -185,12 +185,16 @@ class AppController extends ChangeNotifier {
     NoteWindowManager? windowManager,
     WindowEventHub? windowEventHub,
     Duration? autoRelockIdle,
+    Duration? syncTimeout,
+    Duration? reconcileTimeout,
   })  : _repository = repository,
         _db = database,
         _dataDir = dataDir,
         _storageResolution = storageResolution,
         _windowManager = windowManager,
-        _autoRelockIdle = autoRelockIdle ?? const Duration(minutes: 15) {
+        _autoRelockIdle = autoRelockIdle ?? const Duration(minutes: 15),
+        _syncTimeout = syncTimeout ?? const Duration(seconds: 120),
+        _reconcileTimeout = reconcileTimeout ?? const Duration(minutes: 5) {
     // 订阅窗口事件枢纽（M8 · 详细设计 §4 / §5.1）。
     //
     // `runMultiApp` 的观察者由 `MultiAppConfig` 先于 `globalScope` 构造，此刻本控制器
@@ -307,6 +311,40 @@ class AppController extends ChangeNotifier {
   /// 触发防抖推送。没有这个定时器，「断网可读可写、联网后自动同步」就只在
   /// 「用户恰好又编辑了一次」时才成立。空闲时 push 无内容、pull 无增量，开销极小。
   static const _syncInterval = Duration(seconds: 30);
+
+  /// 超时之后的**自动重试冷却**（v0.22.3 / B50）。
+  ///
+  /// 只挡自动触发（周期兜底 / WS 通知 / 编辑防抖）；用户显式点「立即同步 /
+  /// 全部重新同步」传 `manual: true` 不受限，避免「服务端恢复后还要等冷却」。
+  static const _retryCooldown = Duration(minutes: 3);
+
+  /// 单次 `sync` / 全局核对的**有界等待**上限（v0.22.3 / B50；构造参数可注入，供单测）。
+  ///
+  /// 同步链路没有逐请求超时：一旦某个 HTTP 请求被半开连接挂住，Future 永不完成，
+  /// [syncState] 就会永远停在 [SyncState.syncing]（30s 周期兜底又被同一守卫挡掉），
+  /// 界面表现即「一直显示同步中…」＋「全部重新同步」永久置灰（B50 现场）。
+  final Duration _syncTimeout;
+  final Duration _reconcileTimeout;
+
+  /// 自动重试冷却的截止时刻；`null` 表示无冷却。
+  DateTime? _autoRetryAfter;
+
+  /// 同步操作序号：每次 `syncNow` / `reconcileAll` / 断开连接自增一次。
+  ///
+  /// 被新操作或断开连接取代的旧操作**不得**再写状态（迟到的超时处理或结果不能
+  /// 污染新连接的状态）。
+  int _syncOpSeq = 0;
+
+  /// 当前操作是否仍然有效：未被更新的操作取代，且连接代次未变。
+  bool _isCurrentOp(int op, int generation) =>
+      op == _syncOpSeq && generation == _connGeneration;
+
+  /// 面向用户的时长描述（超时文案用；不足 1 秒时给毫秒，便于单测断言）。
+  static String _durationText(Duration d) {
+    if (d.inSeconds >= 60) return '${(d.inSeconds / 60).ceil()} 分钟';
+    if (d.inSeconds >= 1) return '${d.inSeconds} 秒';
+    return '${d.inMilliseconds} 毫秒';
+  }
 
   /// 本机偏好键：笔记列表排序方式（M2-T08）。值见 [NoteSortMode.persistentName]。
   static const _kNoteSortMode = 'notes.sortMode';
@@ -1263,20 +1301,33 @@ class AppController extends ChangeNotifier {
   }
 
   /// 立即同步（push + pull）。未连接时为空操作。
-  Future<void> syncNow() async {
+  ///
+  /// [manual] 为真表示**用户显式触发**（顶栏云图标 / 移动端「立即同步」）：
+  /// 不受超时冷却限制（BR-124.2）。
+  Future<void> syncNow({bool manual = false}) async {
     final client = _syncClient;
     if (client == null) return;
     // M12 修订 / FR-58：迁移维护态下不得有新写入（否则复制出的库可能少最后几条）。
     if (_storageMaintenance) return;
     if (_syncState == SyncState.syncing) return;
+    // v0.22.3（B50）：超时后的自动重试进入冷却，避免「一超时就被 30s 周期拉回
+    // 同步中」，让用户先看到可操作的失败原因（显式触发不受限）。
+    final resumeAt = _autoRetryAfter;
+    if (!manual && resumeAt != null && DateTime.now().isBefore(resumeAt)) {
+      return;
+    }
 
     final generation = _connGeneration;
+    final op = ++_syncOpSeq;
     _syncState = SyncState.syncing;
     _syncError = null;
     notifyListeners();
     try {
-      final (_, pulled) = await client.sync();
-      if (generation != _connGeneration) return;
+      // v0.22.3（B50）：**有界等待**。没有逐请求超时时，被挂住的 pull 会让本
+      // Future 永不完成，状态便永久停在 syncing（周期兜底也被上面的守卫挡掉）。
+      final (_, pulled) = await client.sync().timeout(_syncTimeout);
+      if (!_isCurrentOp(op, generation)) return;
+      _autoRetryAfter = null;
       _lastSyncedAt = DateTime.now();
       _syncState = SyncState.idle;
       // FR-99 性能：只有**远端确有下行数据**时才重建本地视图。
@@ -1288,14 +1339,22 @@ class AppController extends ChangeNotifier {
       } else {
         await client.refreshQueuedCount();
       }
+    } on TimeoutException {
+      // 迟到的超时（连接已被替换 / 已被新操作接管）不允许改状态。
+      if (!_isCurrentOp(op, generation)) return;
+      _autoRetryAfter = DateTime.now().add(_retryCooldown);
+      _syncError = '同步超时（${_durationText(_syncTimeout)}无响应）：'
+          '服务端可能不可达或连接已失效，已停止本次同步。'
+          '请确认服务端在线后点「立即同步」重试，或断开后重新连接';
+      _syncState = SyncState.error;
     } on CloudInstanceChangedException catch (e) {
       // 换库 / 重建**不是错误态**：落待决状态交界面弹窗（AC-191；选择前不动任何数据）。
-      if (generation != _connGeneration) return;
+      if (!_isCurrentOp(op, generation)) return;
       _pendingCloudChange = e.change;
       _syncState = SyncState.idle;
       _syncError = null;
     } catch (e) {
-      if (generation != _connGeneration) return;
+      if (!_isCurrentOp(op, generation)) return;
       _syncError = _describeError(e);
       _syncState = SyncState.error;
     }
@@ -1351,39 +1410,57 @@ class AppController extends ChangeNotifier {
     if (client == null) return null;
     if (_reconciling) return null;
     final generation = _connGeneration;
+    final op = ++_syncOpSeq;
     _reconciling = true;
     _syncState = SyncState.syncing;
     _syncError = null;
     notifyListeners();
     try {
-      final result = await client.reconcile(
-        pushLocal: pushLocal,
-        hasUserDecision: hasUserDecision,
-        onProgress: onProgress,
-        cancel: cancel,
-      );
-      if (generation != _connGeneration) return result;
+      // v0.22.3（B50）：核对同样必须**有界返回**——挂住的请求会让
+      // 「全部重新同步」永久置灰（`_reconciling` 永远为真）。
+      final result = await client
+          .reconcile(
+            pushLocal: pushLocal,
+            hasUserDecision: hasUserDecision,
+            onProgress: onProgress,
+            cancel: cancel,
+          )
+          .timeout(_reconcileTimeout);
+      if (!_isCurrentOp(op, generation)) return result;
+      _autoRetryAfter = null;
       _pendingCloudChange = null;
       _syncState = SyncState.idle;
       _syncError = null;
       if (!result.cancelled) _lastSyncedAt = DateTime.now();
       await _refreshLocalViews();
       return result;
+    } on TimeoutException {
+      if (!_isCurrentOp(op, generation)) return null;
+      _autoRetryAfter = DateTime.now().add(_retryCooldown);
+      _syncError = '云端核对超时（${_durationText(_reconcileTimeout)}无响应）：'
+          '已停止本次核对，本地与云端数据都未被删除。'
+          '请确认服务端在线后重试（或断开后重新连接）';
+      _syncState = SyncState.error;
+      return null;
     } on CloudInstanceChangedException catch (e) {
       // 未经用户决策前：**不上传、不清空**（AC-191）。这不是错误态，故不置 error。
-      if (generation != _connGeneration) return null;
+      if (!_isCurrentOp(op, generation)) return null;
       _pendingCloudChange = e.change;
       _syncState = SyncState.idle;
       _syncError = null;
       return null;
     } catch (e) {
-      if (generation != _connGeneration) return null;
+      if (!_isCurrentOp(op, generation)) return null;
       _syncError = _describeError(e);
       _syncState = SyncState.error;
       return null;
     } finally {
-      _reconciling = false;
-      notifyListeners();
+      // 只有「仍然是当前操作」时才解锁：被新操作 / 断开取代的旧核对不得清掉
+      // 新操作的 `_reconciling` 标记。
+      if (op == _syncOpSeq) {
+        _reconciling = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -1597,6 +1674,12 @@ class AppController extends ChangeNotifier {
 
   Future<void> _teardownConnection() async {
     _connGeneration++;
+    // v0.22.3（B50）：作废在途的同步 / 核对并复位状态。被半开连接挂住的请求可能
+    // **永远不返回**，若不复位，「同步中」与「核对中」会被原样带进新连接
+    // （表现为「全部重新同步」永久置灰、只能重启客户端）。
+    _syncOpSeq++;
+    _reconciling = false;
+    if (_syncState == SyncState.syncing) _syncState = SyncState.unconfigured;
     _syncDebounce?.cancel();
     _syncDebounce = null;
     _syncTicker?.cancel();
@@ -1678,6 +1761,10 @@ class AppController extends ChangeNotifier {
         protocols: ['bearer.${_config.token}'],
       );
       _ws = ch;
+      // 握手失败（端口不通 / 4xx / 被中间设备重置）由 [WebSocketChannel.ready]
+      // 呈现为**异步错误**：不接住就会变成「未处理的异步异常」——桌面端只是日志噪音，
+      // 但在单测里会直接判失败（v0.22.3 / B50 回归用例实测）。
+      unawaited(ch.ready.catchError((Object _) {}));
       _wsSub = ch.stream.listen(
         (_) => _onRemoteChange(),
         onError: (_) {}, // WS 不可用不影响手动触发与周期兜底同步

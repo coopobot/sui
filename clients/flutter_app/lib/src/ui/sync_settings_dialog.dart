@@ -144,6 +144,17 @@ class _SyncSettingsPanelState extends State<SyncSettingsPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // v0.22.3（B50）：状态行与「全部重新同步」的可用性都来自 [AppController]，
+    // **必须**随其通知重建。此前本面板既不 watch 也不监听、设置中心也直接构造
+    // `const SyncSettingsPanel()` → 面板冻结在「打开设置那一刻」的快照：后台同步
+    // 结束后仍显示「同步中…」、按钮一直灰着（用户实测现场）。
+    return ListenableBuilder(
+      listenable: _c,
+      builder: (context, _) => _buildPanel(context),
+    );
+  }
+
+  Widget _buildPanel(BuildContext context) {
     final theme = Theme.of(context);
     final connected = _c.syncClient != null;
 
@@ -442,6 +453,15 @@ class _SyncReconcilePanelState extends State<SyncReconcilePanel> {
 
   @override
   Widget build(BuildContext context) {
+    // 同 `_SyncSettingsPanelState.build`：菜单入口的独立对话框没有父级监听，
+    // 未同步计数与按钮可用性同样要跟着控制器走（v0.22.3 / B50）。
+    return ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) => _buildPanel(context),
+    );
+  }
+
+  Widget _buildPanel(BuildContext context) {
     final theme = Theme.of(context);
     final unsynced = widget.controller.unsyncedCount;
     final progress = _progress;

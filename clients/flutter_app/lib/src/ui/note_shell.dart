@@ -426,7 +426,8 @@ class SyncActions extends StatelessWidget {
               showSettingsDialog(context, controller,
                   section: SettingsSection.sync);
             } else {
-              controller.syncNow();
+              // 用户显式触发：不受超时冷却限制（v0.22.3 / BR-124.2）。
+              controller.syncNow(manual: true);
             }
           },
         ),
