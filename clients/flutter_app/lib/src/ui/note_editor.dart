@@ -12,6 +12,7 @@ import '../platform/attachment_opener.dart';
 import '../platform/attachment_picker.dart';
 import '../platform/attachment_saver.dart';
 import '../platform/clipboard_html.dart';
+import '../platform/clipboard_image.dart';
 import '../platform/desktop_platform.dart';
 import '../platform/url_opener.dart';
 import 'snapshot_html_view.dart';
@@ -1717,18 +1718,22 @@ class _NoteEditorState extends State<NoteEditor>
   }
 
   /// 粘贴：按 [rich] / [escapePlain] 两个**正交**开关决定来源与转义
-  /// （FR-45 / FR-71 / FR-122 / 详细设计 §27）。
+  /// （FR-45 / FR-71 / FR-122 / FR-123 / 详细设计 §27 / §28）。
   ///
   /// 来源优先级：
   /// 1. [rich] 且剪贴板有 **HTML 表示** → 用 `note_core` 的 **DOM 式转换器**
   ///    （[convertClipboardHtml]，与批量导入同源，BR-71.2）转成语义等价的 Markdown；
-  /// 2. 否则纯文本 → 只做**换行归一**；[escapePlain] 为 true 时再经
+  ///    HTML 只剩**本地图片引用**（`file:` / `blob:`）时改以**剪贴板位图**为准（BR-123 / §28.4）。
+  /// 2. 纯文本 → 只做**换行归一**；[escapePlain] 为 true 时再经
   ///    [EditorFormat.escapePlainText] 按字面转义，否则**原样插入**（`v0.22.1`：Sui 内部
   ///    复制只写 `text/plain`，逐字符转义会把 `[]()` / 勾选框 / 加粗写成字面量，BR-122.1）。
+  /// 3. 剪贴板**只有位图**（截图工具）→ 存为**附件**并插入
+  ///    `![截图-<时间戳>.png|bmp](sui://<sha256>)`（FR-123 / §28；[escapePlain] 时**不读位图**）。
   ///
   /// HTML 表示的读取顺序：**自研原生通道**（Windows CF_HTML / Android `ClipData`，
   /// 见 [readClipboardHtml]）→ Flutter 内建的 `text/html`（部分平台可能提供）→ 纯文本。
-  /// 任一环节失败都**静默回落**（BR-71.6：绝不出现「粘贴无反应」）。
+  /// 位图读取：**自研原生通道** `sui/platform`（Windows；见 [readClipboardImage]）。
+  /// 任一环节失败都**静默回落**（BR-71.6 / BR-123.2：绝不「粘贴无反应」，也不写坏引用）。
   /// `Ctrl+Shift+V`（[rich] 为 false、[escapePlain] 为 true）是**唯一**的字面转义入口（BR-122.3）。
   Future<void> _pasteFromClipboard({
     required bool rich,
@@ -1754,18 +1759,40 @@ class _NoteEditorState extends State<NoteEditor>
       plain = null;
     }
 
+    // 位图来源（FR-123）：截图工具只放位图时上面两条来源都会为空。**按需读取**——
+    // 文本粘贴不碰位图（大截图的字节拷贝没有意义），只有走到「HTML 只剩本地图片引用」
+    // 或「只有位图」时才读一次（结果缓存，一次粘贴最多读一次）。
+    Uint8List? imageBytes;
+    var imageRead = false;
+    Future<Uint8List?> loadImage() async {
+      if (!imageRead) {
+        imageRead = true;
+        imageBytes = await readClipboardImage();
+      }
+      return imageBytes;
+    }
+
     String? payload;
     if (rich && html != null && html.trim().isNotEmpty) {
       final converted = convertClipboardHtml(html);
       if (converted.trim().isNotEmpty) {
-        // FR-77 / BR-77.3：**格式与源码两态的粘贴都先做换行归一**（`\r\n` / `\r` → `\n`）——
-        // Windows 剪贴板是 CRLF 的真实注入路径，而 CRLF 会让格式模式的行级识别（任务项 /
-        // 分割线 / setext）整行失配。**只归换行、不做空白规整**（`normalizeLineEndings`）：
-        // `normalizePlainText` 是**导入**口径（逐行 rstrip + 折叠空行 + 补结尾换行），
-        // 用在粘贴上会让「行内粘贴一个词」凭空多一个换行。
-        // 归一位于**图片本地化之前**，避免把 `data:` 载荷当普通文本处理。
-        // `data:` 内联图片落附件（BR-71.4）；远端图片保留绝对地址原样。
-        payload = await _localizePastedImages(normalizeLineEndings(converted));
+        if (_isLocalImageOnlyMarkdown(converted)) {
+          // FR-123 / §28.4：HTML 只剩本地图片引用（截图工具的 `file://` 临时路径）→
+          // **以位图为准**。绝不按路径读本地文件（隐私），也不把坏引用写进正本；
+          // 拿不到位图就不落笔（后面还有纯文本来源可回落）。
+          if (!escapePlain) {
+            payload = await _storeClipboardImage(await loadImage());
+          }
+        } else {
+          // FR-77 / BR-77.3：**格式与源码两态的粘贴都先做换行归一**（`\r\n` / `\r` → `\n`）——
+          // Windows 剪贴板是 CRLF 的真实注入路径，而 CRLF 会让格式模式的行级识别（任务项 /
+          // 分割线 / setext）整行失配。**只归换行、不做空白规整**（`normalizeLineEndings`）：
+          // `normalizePlainText` 是**导入**口径（逐行 rstrip + 折叠空行 + 补结尾换行），
+          // 用在粘贴上会让「行内粘贴一个词」凭空多一个换行。
+          // 归一位于**图片本地化之前**，避免把 `data:` 载荷当普通文本处理。
+          // `data:` 内联图片落附件（BR-71.4）；远端图片保留绝对地址原样。
+          payload = await _localizePastedImages(normalizeLineEndings(converted));
+        }
       }
     }
     if (payload == null || payload.trim().isEmpty) {
@@ -1779,6 +1806,14 @@ class _NoteEditorState extends State<NoteEditor>
               ? EditorFormat.escapePlainText(normalizeLineEndings(plain))
               : normalizeLineEndings(plain))
           : null;
+    }
+    if (payload == null || payload.trim().isEmpty) {
+      // FR-123：剪贴板**只有位图**（截图）→ 存附件并插入 `![截图-…](sui://<sha256>)`。
+      // `Ctrl+Shift+V`（[escapePlain]）是「按字面文本粘贴」入口，**不读位图**（BR-123 / AC-718）；
+      // 读不到 / 魔数不认识 / 入库失败 → 静默回落（BR-123.2）。
+      if (!escapePlain) {
+        payload = await _storeClipboardImage(await loadImage());
+      }
     }
     if (payload == null || payload.isEmpty || !mounted) return;
 
@@ -1828,6 +1863,74 @@ class _NoteEditorState extends State<NoteEditor>
       }
     }
     return out;
+  }
+
+  /// 单张剪贴板位图的落盘上限（BR-123.7）：超过就丢弃并提示一次。
+  ///
+  /// 截图工具的 BMP 兜底是**未压缩位图**，4K 画面就可能十几 MB；再大就不该进同步净荷。
+  static const int _maxClipboardImageBytes = 32 * 1024 * 1024;
+
+  /// HTML 转换产物是否**只剩本地图片引用**（`file:` / `blob:` 等非 `http(s)`）。
+  ///
+  /// 判据刻意只做字符串层（§28.4）：去掉图片引用后无可见内容、且引用里没有 `http(s)`。
+  /// 用途是把「截图工具的 `file://` 临时路径」改判为「用剪贴板位图落附件」——
+  /// **绝不按路径读本地文件**（隐私），也不把坏引用写进正本。
+  bool _isLocalImageOnlyMarkdown(String markdown) {
+    final withoutImages =
+        markdown.replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '').trim();
+    if (withoutImages.isNotEmpty) return false;
+    final urls = RegExp(r'!\[[^\]]*\]\(([^)]*)\)')
+        .allMatches(markdown)
+        .map((m) => m.group(1)!.trim().toLowerCase())
+        .toList();
+    if (urls.isEmpty) return false;
+    return urls.every(
+        (u) => !u.startsWith('http://') && !u.startsWith('https://'));
+  }
+
+  /// 把剪贴板位图存为附件，返回要写入正本的图片引用；失败返回 null（BR-123.2）。
+  ///
+  /// 文件名 `截图-yyyyMMdd-HHmmss.<png|bmp>`（同秒重名追加 `-2`…），扩展名按**字节魔数**
+  /// 判定（BR-123.3）；超过 [_maxClipboardImageBytes] 丢弃并提示一次（BR-123.7）。
+  Future<String?> _storeClipboardImage(Uint8List? bytes) async {
+    final id = _noteId;
+    if (id == null || bytes == null || bytes.isEmpty) return null;
+    if (bytes.length > _maxClipboardImageBytes) {
+      _toast('截图过大，已忽略');
+      return null;
+    }
+    final ext = clipboardImageExtension(bytes);
+    if (ext == null) return null;
+    try {
+      final att = await _controller.addAttachmentFromBytes(
+        noteId: id,
+        filename: _clipboardImageName(ext),
+        bytes: bytes,
+      );
+      // 附件面板（独立路由）不随编辑器重建：与 _pickAndAttach 同口径即时刷新（BR-123.5）。
+      final fresh = await _controller.refreshAttachments(id);
+      if (mounted) setState(() => _attachments = fresh);
+      return '![${att.filename}](sui://${att.sha256})';
+    } catch (e) {
+      _toast('粘贴截图失败：$e');
+      return null;
+    }
+  }
+
+  /// 剪贴板截图建议文件名：`截图-yyyyMMdd-HHmmss.<ext>`，同秒重名追加 `-2`、`-3`…（BR-123.3）。
+  String _clipboardImageName(String ext) {
+    final now = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    final base = '截图-${now.year}${two(now.month)}${two(now.day)}-'
+        '${two(now.hour)}${two(now.minute)}${two(now.second)}';
+    final used = _attachments.map((a) => a.filename).toSet();
+    var name = '$base.$ext';
+    var i = 2;
+    while (used.contains(name)) {
+      name = '$base-$i.$ext';
+      i++;
+    }
+    return name;
   }
 
   /// 解码 `data:` URI 的 base64 载荷；非 base64 / 解码失败返回 null。

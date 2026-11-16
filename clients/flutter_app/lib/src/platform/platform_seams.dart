@@ -19,6 +19,11 @@ Future<bool> Function(String url)? debugUrlOpenerOverride;
 /// 覆盖「读剪贴板 HTML」的实现；非 null 时 `readClipboardHtml` 直接委托给它。
 Future<String?> Function()? debugClipboardHtmlOverride;
 
+/// 覆盖「读剪贴板位图」的实现（FR-123 / ADR-047）；非 null 时 `readClipboardImage`
+/// 直接委托给它。测试用：注入 PNG / BMP 字节即可断言「只有位图」的整条粘贴链路，
+/// 无需真实原生通道（生产代码从不写入）。
+Future<Uint8List?> Function()? debugClipboardImageOverride;
+
 /// 覆盖「当前操作系统」判定；非 null 时 `openExternally` 用它替代
 /// `Platform.operatingSystem`。
 ///

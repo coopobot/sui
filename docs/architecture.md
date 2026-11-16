@@ -196,7 +196,7 @@
 | `note_shell.dart` | 响应式三栏骨架（宽屏三栏 / 窄屏抽屉 + 导航堆栈）；桌面端左栏 / 中栏按视图偏好**条件渲染**（折叠面板与其分隔线一并消失）；M12 增顶栏同步状态入口（未连接 → 打开设置，已连接 → 立即同步）与「云端数据已更换 / 重建」**三选一对话框**（默认焦点在「取消」，非破坏性）；**M14** 顶栏「更多」菜单增「设置」入口（窄屏 / Web） |
 | `notebook_tree.dart` | 笔记本树 + 收件箱 + 全部笔记 + 标签入口 + 归档 / 回收站入口（底部区域） |
 | `note_list.dart` | 笔记列表（置顶 / 剪藏标签 / 搜索过滤） |
-| `note_editor.dart` | 编辑器（标题 / 格式工具栏 + 编辑快捷键 / 勾选框点选 / 标签 / 附件面板 / 附件预览 / 历史 / 导出 / 删除 / **表格工具** / **粘贴保留格式** / **简化格式**）；`v0.14.1`：**链接条** `_LinkBar`（光标落在链接里 → 网址 + 打开 / 编辑，含表格单元格内链接）、`_openUrl` / `_editLink`、`_pasteFromClipboard({rich, escapePlain})`（优先读剪贴板 **HTML 表示**；无 HTML 时**普通粘贴原样插入**、`Ctrl+Shift+V` 按字面转义，`v0.22.1` / FR-122）、`_localizePastedImages`（`data:` 图片落附件） |
+| `note_editor.dart` | 编辑器（标题 / 格式工具栏 + 编辑快捷键 / 勾选框点选 / 标签 / 附件面板 / 附件预览 / 历史 / 导出 / 删除 / **表格工具** / **粘贴保留格式** / **简化格式**）；`v0.14.1`：**链接条** `_LinkBar`（光标落在链接里 → 网址 + 打开 / 编辑，含表格单元格内链接）、`_openUrl` / `_editLink`、`_pasteFromClipboard({rich, escapePlain})`（优先读剪贴板 **HTML 表示**；无 HTML 时**普通粘贴原样插入**、`Ctrl+Shift+V` 按字面转义，`v0.22.1` / FR-122）、`_localizePastedImages`（`data:` 图片落附件）、`_storeClipboardImage`（剪贴板**位图**落附件，`v0.22.2` / FR-123） |
 | `markdown_editing_controller.dart` | 「格式 / 源码 / 预览」三态编辑控制器（Markdown 为正本；格式态渲染行内样式、图片单元、任务勾选框与高亮、**表格呈现单元**、**附件胶囊单元**、**有序列表编号**，支持选中调尺寸）；`v0.14.1`：新增区域种类 **`_RegionKind.htmlBlock`**——快照受限 HTML 块作为**原子块**整块呈现（其余码元以零宽等码元 `U+2060` 补齐，守偏移契约） |
 | `markdown_editor.dart` | 源码编辑 + 预览切换（`sizedImageBuilder` 渲染 `sui://` 附件图；预览态渲染任务列表、`==高亮==`、**表格**、**有序列表编号**） |
 | `revision_panel.dart` | 版本历史面板 + 一键恢复（宽屏为右侧栏、窄屏**整页推入**，能力一致；BR-12.3） |
@@ -1247,3 +1247,19 @@ drift **无迁移**（仍 8 表 / `schemaVersion = 10`）、`pubspec.yaml` 依�
 - **门禁**：新增 `flutter_app/test/editor_paste_verbatim_test.dart`（6 条，先红后绿）+
   `editor_m15_ui_test.dart` 源码态粘贴改判；`flutter analyze` 干净、两包全量测试全绿。
 - **已知限制**：表格单元格内粘贴落点、分块模式下的 `Ctrl+Shift+V`（需求 §44.2，本轮不改）。
+
+### 8.21 补丁 `v0.22.2`：剪贴板截图直接粘贴（FR-123）
+
+- **缺陷根因**：Flutter 的 `ClipboardData` 只承载文本（无图片表示），而粘贴链路只读
+  剪贴板 HTML 与 `text/plain`；截图工具把截图放在**位图**格式里 → 两条来源都为空 →
+  `Ctrl+V` **不落笔、无提示**。部分工具的 CF_HTML 只含 `file://` 本地图片引用，走 HTML 路径还会写坏引用。
+- **口径（`v0.22.2`）**：`sui/platform` 新增 `clipboardImage`——**PNG 注册格式优先**，
+  否则 `CF_DIB` 在原生侧补 `BITMAPFILEHEADER` 成 **BMP**（不引 WIC / COM）；Dart 侧按字节魔数定
+  扩展名、存**附件**并插入 `![截图-<时间戳>.png|bmp](sui://<sha256>)`。
+  来源优先级：HTML（有可见文字）→ 纯文本 → 位图；HTML 仅含本地图片引用时**以位图为准**；
+  远端图片保留原地址；`Ctrl+Shift+V` 不读位图。
+- **平台**：仅 **Windows**；Android / macOS / Linux / Web 未实现（已知限制）。
+- **零改动**：零服务端 / 协议字段、drift 无迁移（`schemaVersion` 仍 10）、零新增依赖。
+- **门禁**：新增 `flutter_app/test/editor_paste_image_test.dart`（9 条，先红后绿：回退后 4 通过 / 5 失败）；
+  `flutter analyze` 干净、`flutter_app` 全量全绿、`note_core` 全绿、Windows release 构建通过；
+  原生位图读取**待用户真机手测**（自动化只覆盖 Dart 接缝）。

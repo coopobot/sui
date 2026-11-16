@@ -5,6 +5,21 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.22.2] - 2026-11-16
+
+### 修复
+
+- **截图工具的截图无法直接粘贴进笔记（FR-123）**：Flutter 的剪贴板 API 只承载文本
+  （`ClipboardData` 没有图片表示），而粘贴链路只读剪贴板 **HTML 表示**与 `text/plain`；
+  截图工具把截图放在**位图**格式里（`PNG` / `CF_DIB`）→ 两条来源都为空 → `Ctrl+V`
+  **没有任何反应**。现新增自研原生通道 `sui/platform.clipboardImage`（**Windows**）：
+  `PNG` 注册格式优先，否则把 `CF_DIB` 在原生侧补 `BITMAPFILEHEADER` 成 **BMP**（不引 WIC / COM）。
+  Dart 侧按**字节魔数**判定扩展名，把位图存为**附件**并在光标处插入
+  `![截图-<时间戳>.png|bmp](sui://<sha256>)`（格式态显示图片、源码态可见引用），附件面板即时刷新。
+  来源优先级：HTML（有可见文字）→ 纯文本 → 位图；HTML 只剩 `file://` 本地图片引用时**以位图为准**
+  （绝不把本地路径写进正本）；远端图片保留原地址；`Ctrl+Shift+V` 不读位图。
+  **仅 Windows**；Android / macOS / Linux / Web 仍为已知限制。零新增依赖 / 零服务端改动 / 无 drift 迁移。
+
 ## [0.22.1] - 2026-11-16
 
 ### 修复
