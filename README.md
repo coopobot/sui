@@ -163,7 +163,6 @@ flutter run -d chrome    # Web（本机已验证可运行）
 | [🛠 开发指南](DEVELOPMENT.md) | 开发者根级入口 |
 | [🏗 架构总览](ARCHITECTURE.md) | 架构根级入口 |
 
-> 架构决策记录（ADR）随项目技术文档单独维护，**不随本仓库发布**。
 
 ## 里程碑
 
