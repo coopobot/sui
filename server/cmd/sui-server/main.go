@@ -9,17 +9,31 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
 	"sui/note-server/internal/api"
 	"sui/note-server/internal/blob"
+	"sui/note-server/internal/diag"
+	"sui/note-server/internal/memlimit"
 	"sui/note-server/internal/securechan"
 	"sui/note-server/internal/store"
 	"sui/note-server/internal/version"
 )
 
 func main() {
+	// M23 / 内存治理（ADR-048）：给 Go 运行时设**软内存上限**（等价 GOMEMLIMIT）。
+	// 默认按容器 cgroup 限额或物理内存推导；显式 SUI_MEMORY_LIMIT 优先（`0` 关闭）。
+	// 作用：让 GC 在接近上限时提前加力，压住「堆按 GOGC 翻倍」的峰值，降低被 OOM Killer 选中的概率。
+	if limit, src := memlimit.Resolve(os.Getenv(memlimit.Env), nil); limit > 0 {
+		debug.SetMemoryLimit(limit)
+		log.Printf("memory limit: %s (source: %s)", memlimit.HumanBytes(limit), src)
+	} else {
+		log.Printf("memory limit: disabled (source: %s)", src)
+	}
+
 	addr := os.Getenv("SUI_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8080"
@@ -79,6 +93,22 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// v0.22.4 / 内存治理：只读诊断面 —— pprof（默认关闭，建议只绑回环）+ 周期内存日志。
+	if pprofAddr := strings.TrimSpace(os.Getenv(diag.PProfAddrEnv)); pprofAddr != "" {
+		if ps, _, perr := diag.StartPProf(pprofAddr); perr != nil {
+			log.Printf("pprof disabled: %v", perr)
+		} else {
+			defer func() { _ = ps.Close() }()
+		}
+	}
+	if iv := diag.MemLogInterval(); iv > 0 {
+		log.Printf("memory log every %s", iv)
+		go diag.RunMemLog(ctx, iv)
+	}
+
 	go func() {
 		log.Printf("sui-server v%s listening on %s", version.String, addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -87,8 +117,6 @@ func main() {
 	}()
 
 	// Graceful shutdown on SIGINT/SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	<-ctx.Done()
 	log.Println("shutting down...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

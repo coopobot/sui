@@ -711,6 +711,30 @@ func (s *Store) UpdatedSince(since time.Time) ([]NoteRow, error) {
 	return out, rows.Err()
 }
 
+// NoteIDsSince 返回 updated_at > since 的笔记 id（按 updated_at 升序）。
+//
+// 只为「逐条流式 pull」准备：id 列表很小（每条约 36 字节），正文由调用方逐条取，
+// 避免先把整库正文读成一片（v0.22.4 / 内存治理，ADR-048）。
+func (s *Store) NoteIDsSince(since time.Time) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT id FROM notes WHERE updated_at > ? ORDER BY updated_at`,
+		since.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // GetNote 返回指定笔记的服务端状态。
 func (s *Store) GetNote(id string) (*NoteRow, error) {
 	var r NoteRow

@@ -543,6 +543,65 @@ SUI_S3_PATH_STYLE=1 \
 
 源码位置：`server/internal/api` 与 `server/internal/store`。
 
+### 9.3 内存占用与调优
+
+服务端是**单二进制**，内存主要花在「收发一次同步」上，而不是常驻缓存：
+
+| 路径 | 峰值大致构成 | 说明 |
+|------|-------------|------|
+| `GET /api/v1/sync/pull`（明文） | 单篇笔记正文 | 逐条流式编码，不随库大小增长 |
+| `GET /api/v1/sync/pull`（受保护通道，`http://` 默认） | 响应体 ×2～3 | 明文响应整包缓冲 + 密文封装（GCM 需整包验证） |
+| `PUT /api/v1/blobs/{hash}` / 分片 | 单个分片 | 字节直接落盘，与附件总大小解耦 |
+| 剪藏 `POST /api/v1/clips` | 请求体（≤8 MiB）+ 页面 HTML | 受请求体上限约束 |
+
+**实测（64 MiB 正文 / 512 篇笔记，单次全量 pull）**：
+
+| 场景 | `v0.22.3` | `v0.22.4` |
+|------|-----------|-----------|
+| 明文 pull | 239 MiB | 27 MiB |
+| 受保护通道 pull | 507 MiB | 255 MiB |
+
+> 受保护通道的剩余量是**协议固有**的：整包 AES-GCM 需要「完整明文 + 完整密文」同时在场。
+> 要再往下压需改协议（分页 pull / 分块加密响应），已登记为后续里程碑任务。
+
+**相关环境变量**：
+
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `SUI_MEMORY_LIMIT` | 自动推导 | Go 运行时软内存上限。`512MiB` / `1GiB` / 字节数；`0` 关闭。留空时按 cgroup 限额 90% → 物理内存 50% 推导 |
+| `SUI_PULL_MAX_CONCURRENT` | `1` | 同时在飞的 pull 数量；`0` 不限（不建议）。超出后最多排队 `SUI_PULL_WAIT` |
+| `SUI_PULL_WAIT` | `20s` | pull 排队上限；超时返回 `503` + `Retry-After: 5` |
+| `SUI_MEM_LOG_INTERVAL` | `5m` | 周期性内存日志（rss / heap / goroutines / 上限）；`0` 关闭 |
+| `SUI_PPROF_ADDR` | 空（关闭） | pprof 监听地址，如 `127.0.0.1:6060`；**只读诊断面，勿暴露公网** |
+
+`SUI_MEMORY_LIMIT` 是**软**限制：不会杀进程，只是让 GC 在接近上限时提前加力，避免「堆按 2 倍
+增长」把 RSS 顶到被内核 OOM Killer 选中。设为机器可用内存的 **50%～70%** 比较稳妥
+（例：2 GB 机器 → `1GiB`）。
+
+**systemd 建议**（两处都配：运行时软上限 + 内核兜底）：
+
+```ini
+[Service]
+Environment=SUI_MEMORY_LIMIT=1GiB
+MemoryHigh=1280M
+MemoryMax=1536M
+```
+
+**线上排查内存**：
+
+```bash
+# 1) 看趋势（服务端日志，默认每 5 分钟一行）
+journalctl -u sui -f | grep 'mem:'
+
+# 2) 抓堆快照（需先设 SUI_PPROF_ADDR=127.0.0.1:6060 并重启）
+go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+
+# 3) 看内核 OOM 记录（判断占用看 anon-rss）
+dmesg -T | grep -i 'out of memory'
+```
+
+> `dmesg` 里的 `total-vm` 是 Go 预留的**虚拟地址空间**（常见 1～2 GB），与真实占用无关。
+
 ## 10. 客户端接入
 
 部署完成后，在客户端「同步设置」对话框填入**服务端地址**，再用「注册并连接」（首启建号）或

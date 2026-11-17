@@ -68,20 +68,30 @@ func AAD(method, path, reqID string) []byte {
 	return []byte(method + "\n" + path + "\n" + reqID)
 }
 
-// Seal 用 K_chan 加密并返回 base64 自描述封装 `ver|alg|nonce|ct|tag`。
-func Seal(key, nonce, plaintext, aad []byte) (string, error) {
+// SealBytes 用 K_chan 加密，返回自描述封装 `ver|alg|nonce|ct|tag` 的原始字节。
+//
+// v0.22.4 / 内存治理（ADR-048）：按最终长度预分配后**原地**追加密文——省掉
+// `Seal(nil, …)` 那份与明文同量级的中间副本；调用方还可把 base64 直接流式写出。
+func SealBytes(key, nonce, plaintext, aad []byte) ([]byte, error) {
 	if len(nonce) != nonceLen {
-		return "", fmt.Errorf("%w: nonce 长度", ErrChannel)
+		return nil, fmt.Errorf("%w: nonce 长度", ErrChannel)
 	}
 	aead, err := newAEAD(key)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	sealed := aead.Seal(nil, nonce, plaintext, aad)
-	env := make([]byte, 0, 2+nonceLen+len(sealed))
+	env := make([]byte, 0, 2+nonceLen+len(plaintext)+tagLen)
 	env = append(env, FormatVersion, AlgAES256GCM)
 	env = append(env, nonce...)
-	env = append(env, sealed...)
+	return aead.Seal(env, nonce, plaintext, aad), nil
+}
+
+// Seal 用 K_chan 加密并返回 base64 自描述封装 `ver|alg|nonce|ct|tag`。
+func Seal(key, nonce, plaintext, aad []byte) (string, error) {
+	env, err := SealBytes(key, nonce, plaintext, aad)
+	if err != nil {
+		return "", err
+	}
 	return base64.StdEncoding.EncodeToString(env), nil
 }
 

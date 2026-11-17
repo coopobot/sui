@@ -473,3 +473,23 @@ dart run build_runner build
 迁移完成后必须**重启应用**才切换到新位置（连接仍指向旧目录直到重启）。若迁移失败，
 应用会继续使用旧位置并给出原因（权限 / 空间不足 / 校验不一致）；旧目录**始终保留**，
 不会被自动删除。
+
+## 服务端运维
+
+### 服务端被 OOM Killer 杀掉（`dmesg` 里 `Out of memory: Killed process … sui-server`）？
+
+先看那行的 **`anon-rss`**（真实占用）。`total-vm` 是 Go 预留的虚拟地址空间（通常 1～2 GB），
+**不代表进程真的用了这么多内存**。
+
+常见成因与处置：
+
+1. **同步高峰**：多端同时「全部重新同步」会各自发起全量 pull，峰值叠加。服务端默认只放行 1 个
+   在飞的 pull（`SUI_PULL_MAX_CONCURRENT`），超出的排队 20 秒后回 `503`，客户端按既有重试逻辑稍后再来。
+2. **机器本身内存吃紧**：给服务端设软上限并让内核兜底——`SUI_MEMORY_LIMIT=1GiB` +
+   systemd `MemoryMax=`（见[部署 · 内存占用与调优](deployment.md#93-内存占用与调优)）。
+3. **确认到底是谁占的**：设 `SUI_PPROF_ADDR=127.0.0.1:6060` 抓 `heap` 快照；日志里
+   `SUI_MEM_LOG_INTERVAL`（默认 5 分钟）已打印 `rss / heapAlloc / goroutines`。
+
+> 若 `anon-rss` 只有几百 MB、机器内存却仍被耗尽，说明还有别的进程在吃内存——
+> 用 `ps -eo rss,comm --sort=-rss | head` 对照，不要只盯 `sui-server`。
+

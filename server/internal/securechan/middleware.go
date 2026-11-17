@@ -2,6 +2,7 @@ package securechan
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -95,16 +96,23 @@ func MiddlewareWithReplay(key *Key, next http.Handler, replay *ReplayCache) http
 			writeChannelError(w)
 			return
 		}
-		env, err := Seal(k, nonce, cw.body.Bytes(), aad)
+		env, err := SealBytes(k, nonce, cw.body.Bytes(), aad)
 		if err != nil {
 			writeChannelError(w)
 			return
 		}
 		w.Header().Set(HeaderEnc, "1")
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Content-Length", strconv.Itoa(len(env)))
+		w.Header().Set("Content-Length", strconv.Itoa(base64.StdEncoding.EncodedLen(len(env))))
 		w.WriteHeader(cw.status)
-		_, _ = io.WriteString(w, env)
+		// v0.22.4 / 内存治理（ADR-048）：base64 直接流式写到连接，省掉一份 4/3 倍明文的
+		// 字符串副本（64 MiB 响应 ≈ 省 85 MiB 峰值）。
+		b64 := base64.NewEncoder(base64.StdEncoding, w)
+		if _, werr := b64.Write(env); werr != nil {
+			_ = b64.Close()
+			return
+		}
+		_ = b64.Close()
 	})
 }
 

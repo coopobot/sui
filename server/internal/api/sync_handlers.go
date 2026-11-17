@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -163,132 +165,194 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// apiPullAttachment 是 pull 响应里的附件映射（字段与 v0.22.3 逐字一致）。
+type apiPullAttachment struct {
+	ID           string `json:"id"`
+	Filename     string `json:"filename"`
+	MimeKind     string `json:"mimeKind"`
+	ByteSize     int    `json:"byteSize"`
+	SHA256       string `json:"sha256"`
+	StorageRef   string `json:"storageRef"`
+	ThumbnailRef string `json:"thumbnailRef"`
+	EmbeddedPos  int    `json:"embeddedPos"`
+	IsDeleted    bool   `json:"isDeleted"`
+	CreatedAt    string `json:"createdAt"`
+}
+
+// apiPullNote 是 pull 响应里的笔记（字段与 v0.22.3 逐字一致）。
+type apiPullNote struct {
+	ID           string              `json:"id"`
+	Title        string              `json:"title"`
+	Content      string              `json:"content"`
+	Version      int                 `json:"version"`
+	IsDeleted    bool                `json:"isDeleted"`
+	Archived     bool                `json:"archived"`
+	Encrypted    bool                `json:"encrypted"`
+	SourceDevice string              `json:"sourceDevice"`
+	SourceURL    string              `json:"sourceUrl,omitempty"`
+	UpdatedAt    string              `json:"updatedAt"`
+	Attachments  []apiPullAttachment `json:"attachments,omitempty"`
+	NotebookID   string              `json:"notebookId,omitempty"`
+	TagIDs       []string            `json:"tagIds,omitempty"`
+}
+
+// apiPullNotebook 是 pull 响应里的笔记本（根级 parentId 为空时省略字段）。
+type apiPullNotebook struct {
+	ID           string `json:"id"`
+	ParentID     string `json:"parentId,omitempty"`
+	Name         string `json:"name"`
+	SortOrder    int    `json:"sortOrder"`
+	Version      int    `json:"version"`
+	IsDeleted    bool   `json:"isDeleted"`
+	Encrypted    bool   `json:"encrypted"`
+	CryptoMeta   string `json:"cryptoMeta,omitempty"`
+	SourceDevice string `json:"sourceDevice"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+// apiPullTag 是 pull 响应里的标签。
+type apiPullTag struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Version      int    `json:"version"`
+	IsDeleted    bool   `json:"isDeleted"`
+	SourceDevice string `json:"sourceDevice"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
 // handlePull 返回自 since 之后的增量。
+//
+// v0.22.4 / 内存治理（ADR-048）：响应**逐条流式编码**——不再把整库正文读成切片、
+// 也不再构造整份 JSON 字符串；同时用 pullGate 限制并发大响应。
+//
+// 峰值构成（加密请求）：单篇正文 + 受保护通道的整包缓冲（明文）+ 密文封装；base64 直接
+// 流式写到连接，不再另存一份 4/3 倍字符串。
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
-	sinceStr := r.URL.Query().Get("since")
+	// 全量 / 大增量响应可能有上百 MB：按「流式下载」口径延长**写**期限
+	// （全局 WriteTimeout 10s 是为慢速攻击兜底，不是给 100 MB 响应用的）。
+	extendWriteDeadline(w)
+
 	since := time.Time{}
-	if sinceStr != "" {
-		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+	if v := r.URL.Query().Get("since"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
 			since = t
 		}
 	}
-	rows, err := s.sync.Pull(since)
-	if err != nil {
-		writeInternalError(w, r, err)
+
+	release, ok := s.pull.acquire(r.Context(), pullWaitWindow())
+	if !ok {
+		// 闸门排队超时：让客户端按既有重试逻辑晚点再来，而不是把两倍峰值同时压进内存。
+		w.Header().Set("Retry-After", "5")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "server busy"})
 		return
 	}
-	type attOut struct {
-		ID           string `json:"id"`
-		Filename     string `json:"filename"`
-		MimeKind     string `json:"mimeKind"`
-		ByteSize     int    `json:"byteSize"`
-		SHA256       string `json:"sha256"`
-		StorageRef   string `json:"storageRef"`
-		ThumbnailRef string `json:"thumbnailRef"`
-		EmbeddedPos  int    `json:"embeddedPos"`
-		IsDeleted    bool   `json:"isDeleted"`
-		CreatedAt    string `json:"createdAt"`
-	}
-	type out struct {
-		ID           string   `json:"id"`
-		Title        string   `json:"title"`
-		Content      string   `json:"content"`
-		Version      int      `json:"version"`
-		IsDeleted    bool     `json:"isDeleted"`
-		Archived     bool     `json:"archived"`
-		Encrypted    bool     `json:"encrypted"`
-		SourceDevice string   `json:"sourceDevice"`
-		SourceURL    string   `json:"sourceUrl,omitempty"`
-		UpdatedAt    string   `json:"updatedAt"`
-		Attachments  []attOut `json:"attachments,omitempty"`
-		NotebookID   string   `json:"notebookId,omitempty"`
-		TagIDs       []string `json:"tagIds,omitempty"`
-	}
-	list := make([]out, 0, len(rows))
-	for _, pn := range rows {
-		rw := pn.Note
-		item := out{
-			ID: rw.ID, Title: rw.Title, Content: rw.ContentMarkdown,
-			Version: rw.Version, IsDeleted: rw.IsDeleted, Archived: rw.Archived,
-			Encrypted:    rw.Encrypted,
-			SourceDevice: rw.SourceDevice,
-			SourceURL:    rw.SourceURL,
-			NotebookID:   rw.NotebookID,
-			UpdatedAt:    rw.UpdatedAt.UTC().Format(time.RFC3339),
-			TagIDs:       pn.TagIDs,
-		}
-		for _, a := range pn.Attachments {
-			item.Attachments = append(item.Attachments, attOut{
-				ID: a.ID, Filename: a.Filename, MimeKind: a.MimeKind,
-				ByteSize: a.ByteSize, SHA256: a.SHA256, StorageRef: a.StorageRef,
-				ThumbnailRef: a.ThumbnailRef, EmbeddedPos: a.EmbeddedPos,
-				IsDeleted: a.IsDeleted,
-				CreatedAt: a.CreatedAt.UTC().Format(time.RFC3339),
-			})
-		}
-		list = append(list, item)
-	}
-	// BUG5：根级笔记本 parentId 为空时省略字段，避免输出空串 ""，
-	// 否则客户端会把它误判为非根节点（「创建后闪没」/「多端不同步」）。
-	type nbOut struct {
-		ID           string `json:"id"`
-		ParentID     string `json:"parentId,omitempty"`
-		Name         string `json:"name"`
-		SortOrder    int    `json:"sortOrder"`
-		Version      int    `json:"version"`
-		IsDeleted    bool   `json:"isDeleted"`
-		Encrypted    bool   `json:"encrypted"`
-		CryptoMeta   string `json:"cryptoMeta,omitempty"`
-		SourceDevice string `json:"sourceDevice"`
-		UpdatedAt    string `json:"updatedAt"`
-	}
-	type tagOut struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		Version      int    `json:"version"`
-		IsDeleted    bool   `json:"isDeleted"`
-		SourceDevice string `json:"sourceDevice"`
-		UpdatedAt    string `json:"updatedAt"`
-	}
+	defer release()
+
+	// 先取「小且必须成功」的部分（笔记本 / 标签 / 实例身份）：它们出错时还能回 500。
 	nbRows, err := s.sync.PullNotebooks(since)
 	if err != nil {
 		writeInternalError(w, r, err)
 		return
-	}
-	notebooks := make([]nbOut, 0, len(nbRows))
-	for _, nb := range nbRows {
-		notebooks = append(notebooks, nbOut{
-			ID: nb.ID, ParentID: nb.ParentID, Name: nb.Name, SortOrder: nb.SortOrder,
-			Version: nb.Version, IsDeleted: nb.IsDeleted, SourceDevice: nb.SourceDevice,
-			Encrypted: nb.Encrypted, CryptoMeta: nb.CryptoMeta,
-			UpdatedAt: nb.UpdatedAt.UTC().Format(time.RFC3339),
-		})
 	}
 	tagRows, err := s.sync.PullTags(since)
 	if err != nil {
 		writeInternalError(w, r, err)
 		return
 	}
-	tags := make([]tagOut, 0, len(tagRows))
-	for _, tg := range tagRows {
-		tags = append(tags, tagOut{
-			ID: tg.ID, Name: tg.Name, Version: tg.Version,
-			IsDeleted: tg.IsDeleted, SourceDevice: tg.SourceDevice,
-			UpdatedAt: tg.UpdatedAt.UTC().Format(time.RFC3339),
-		})
-	}
-	// M12（FR-55）：随 pull 下发**云端实例身份**（该端点恒鉴权），
-	// 供客户端识别「换库 / 重建」并提示用户（ADR-019 决策 4）。
 	instanceID, err := s.store.InstanceID()
 	if err != nil {
 		writeInternalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "notes": list,
-		"notebooks": notebooks, "tags": tags,
-		"instanceId": instanceID,
+
+	notebooks := make([]apiPullNotebook, 0, len(nbRows))
+	for _, nb := range nbRows {
+		notebooks = append(notebooks, apiPullNotebook{
+			ID: nb.ID, ParentID: nb.ParentID, Name: nb.Name, SortOrder: nb.SortOrder,
+			Version: nb.Version, IsDeleted: nb.IsDeleted, SourceDevice: nb.SourceDevice,
+			Encrypted: nb.Encrypted, CryptoMeta: nb.CryptoMeta,
+			UpdatedAt: nb.UpdatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	tags := make([]apiPullTag, 0, len(tagRows))
+	for _, tg := range tagRows {
+		tags = append(tags, apiPullTag{
+			ID: tg.ID, Name: tg.Name, Version: tg.Version,
+			IsDeleted: tg.IsDeleted, SourceDevice: tg.SourceDevice,
+			UpdatedAt: tg.UpdatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+
+	bw := bufio.NewWriterSize(w, 64<<10)
+	enc := json.NewEncoder(bw)
+	if _, err := bw.WriteString(`{"ok":true,"notes":[`); err != nil {
+		log.Printf("pull: write header: %v", err)
+		return
+	}
+	first := true
+	err = s.sync.PullIter(since, func(pn sync.PullNote) error {
+		if !first {
+			if err := bw.WriteByte(','); err != nil {
+				return err
+			}
+		}
+		first = false
+		// 单条编码：encoder 的缓冲只保留「最大单篇笔记」量级，不再随整库增长。
+		return enc.Encode(noteFromPull(pn))
 	})
+	if err != nil {
+		// 响应头已发出，无法再回 500：记日志并中止，客户端会因 JSON 截断而重试。
+		log.Printf("pull: stream notes: %v", err)
+		return
+	}
+	if _, err := bw.WriteString(`],"notebooks":`); err != nil {
+		return
+	}
+	if err := enc.Encode(notebooks); err != nil {
+		log.Printf("pull: encode notebooks: %v", err)
+		return
+	}
+	if _, err := bw.WriteString(`,"tags":`); err != nil {
+		return
+	}
+	if err := enc.Encode(tags); err != nil {
+		log.Printf("pull: encode tags: %v", err)
+		return
+	}
+	inst, _ := json.Marshal(instanceID)
+	if _, err := bw.WriteString(`,"instanceId":` + string(inst) + `}`); err != nil {
+		return
+	}
+	_ = bw.Flush()
+}
+
+// noteFromPull 把同步层的一行转换成 pull 响应结构（不复制正文字符串）。
+func noteFromPull(pn sync.PullNote) apiPullNote {
+	rw := pn.Note
+	item := apiPullNote{
+		ID: rw.ID, Title: rw.Title, Content: rw.ContentMarkdown,
+		Version: rw.Version, IsDeleted: rw.IsDeleted, Archived: rw.Archived,
+		Encrypted:    rw.Encrypted,
+		SourceDevice: rw.SourceDevice,
+		SourceURL:    rw.SourceURL,
+		NotebookID:   rw.NotebookID,
+		UpdatedAt:    rw.UpdatedAt.UTC().Format(time.RFC3339),
+		TagIDs:       pn.TagIDs,
+	}
+	for _, a := range pn.Attachments {
+		item.Attachments = append(item.Attachments, apiPullAttachment{
+			ID: a.ID, Filename: a.Filename, MimeKind: a.MimeKind,
+			ByteSize: a.ByteSize, SHA256: a.SHA256, StorageRef: a.StorageRef,
+			ThumbnailRef: a.ThumbnailRef, EmbeddedPos: a.EmbeddedPos,
+			IsDeleted: a.IsDeleted,
+			CreatedAt: a.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return item
 }
 
 // handleBlobHead 检查 hash 是否存在（内容寻址去重）。

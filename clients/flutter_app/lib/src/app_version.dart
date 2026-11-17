@@ -7,8 +7,8 @@
 // 均从此处取值，保证各端显示值与真源**逐字一致**。
 
 /// 产品版本号前三段（`x.y.z`，如 `0.12.0`）——**不含**构建号（BR-56.2）。
-const String kAppVersion = '0.22.3';
+const String kAppVersion = '0.22.4';
 
 /// 构建号：`BN = major*10000 + minor*100 + patch`（`0.12.0 → 1200`）。
 /// 仅用于问题定位（扩展设置页展示），客户端界面通常不显示。
-const String kAppBuildNumber = '2203';
+const String kAppBuildNumber = '2204';

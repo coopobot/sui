@@ -31,6 +31,8 @@ type Server struct {
 	// guard 是**登录失败防护**状态（M12 修订 / FR-59，auth.md §10）。
 	// 进程内、不落库：服务端重启即清零（刻意的逃生口，BR-59.5）。
 	guard *loginGuard
+	// pull 限制同时在飞的大响应（v0.22.4 / 内存治理，ADR-048）。
+	pull *pullGate
 }
 
 // New 创建带依赖的 API Server。
@@ -41,6 +43,7 @@ func New(st *store.Store, blobs blob.Store) *Server {
 		sync:  sync.New(st),
 		hub:   ws.NewHub(),
 		guard: newLoginGuard(),
+		pull:  newPullGate(pullMaxConcurrent()),
 	}
 }
 
